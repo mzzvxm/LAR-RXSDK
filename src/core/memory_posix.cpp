@@ -483,6 +483,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Views are mapped from the descriptor, never reopened by name, so drop the
+  // name now: the object then lives exactly as long as the process, and a
+  // killed or crashed run cannot leave gigabytes behind in /dev/shm.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
