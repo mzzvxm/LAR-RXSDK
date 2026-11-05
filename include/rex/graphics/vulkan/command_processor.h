@@ -480,6 +480,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t tile_count;
     uint32_t source_offset_bytes;
     uint32_t half_pixel_offset;
+    uint32_t unit_layout = ResolveDownscaleUnitLayoutConstant();
   };
   bool EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height);
   void DestroySwapFxaaSourceImage();

@@ -15,6 +15,16 @@
 // When xe_downscale_half_pixel_offset is set, samples from (scale/2, scale/2)
 // within each block to compensate for the half-pixel offset becoming a
 // full-pixel offset at higher resolutions.
+//
+// Where the pixel is in the scaled data depends on the layout of a resolution-
+// scaled resolve (XeTextureScaledTiledOffset in the xenia shaders): the host
+// pixels of a guest Nx1 unit (N = 8 for 1 and 2 bytes a pixel, 4 for 4 bytes,
+// 2 for 8 bytes) are kept in N x 1 host sub-units, column-major, not as one
+// contiguous block per guest pixel. With xe_downscale_unit_layout set the
+// source is found that way (XeDownscaleSourceOffset, which the layout check in
+// launcher/dev runs as text); without it, the pixel is taken to be at
+// pixel * scale_x * scale_y in the tile's scaled data, which is the block's
+// top-left host pixel only at 1x and for 8 bytes a pixel at 2x2.
 
 cbuffer XeResolveDownscaleConstants : register(b0) {
   uint xe_downscale_scale_x;         // 1 to kMaxDrawResolutionScaleAlongAxis
@@ -27,10 +37,64 @@ cbuffer XeResolveDownscaleConstants : register(b0) {
   // games, which at Nx resolution scaling shifts rendered content by
   // (N/2, N/2) host pixels.
   uint xe_downscale_half_pixel_offset;
+  // When non-zero, find the pixel by the scaled resolve layout (see above).
+  uint xe_downscale_unit_layout;
 };
 
 ByteAddressBuffer xe_resolve_source : register(t0);
 RWByteAddressBuffer xe_resolve_dest : register(u0);
+
+// BEGIN XeDownscaleSourceOffset (the same text is in resolve_downscale.cs.glsl
+// and is what launcher/dev/downscale-layout-check.py runs)
+// The byte offset, from the start of the scaled data of the first tile, of the
+// host pixel to copy for the guest pixel at index pixel_index (the order of the
+// pixels in memory) of 32x32 tile tile_index.
+uint XeDownscaleSourceOffset(uint tile_index, uint pixel_index, uint scale_x,
+                             uint scale_y, uint pixel_size_log2,
+                             uint half_pixel_offset, uint unit_layout) {
+  uint pixel_size = 1u << pixel_size_log2;
+  uint tile_size_1x = 32u * 32u * pixel_size;
+  uint scale_xy = scale_x * scale_y;
+  // Where in the block of scale_x * scale_y host pixels to sample: the top left
+  // one, or, with the half-pixel correction, the one at (scale/2, scale/2) to
+  // compensate for the D3D9-style half-pixel offset shifting content by
+  // (N/2, N/2) pixels at Nx resolution.
+  uint offset_x = 0u;
+  uint offset_y = 0u;
+  if (half_pixel_offset != 0u && scale_xy > 1u) {
+    offset_x = scale_x >> 1u;
+    offset_y = scale_y >> 1u;
+  }
+  uint src_offset;
+  if (unit_layout != 0u) {
+    // Guest units of N pixels consecutive in memory (XeTextureTiled
+    // ConsecutiveBlocksLog2), each scaled to scale_x * scale_y sub-units of N
+    // host pixels in a row, column-major.
+    uint unit_width_log2 = min(4u - pixel_size_log2, 3u);
+    uint unit_mask = (1u << unit_width_log2) - 1u;
+    uint unit_pixel = pixel_index & unit_mask;
+    // The guest unit's byte offset in the 1x data, which the scaled data's unit
+    // is at scale_x * scale_y times.
+    uint unit_offset_1x = tile_index * tile_size_1x +
+                          ((pixel_index & ~unit_mask) << pixel_size_log2);
+    // The host pixel to take, in host pixels along the unit's rows.
+    uint host_x = unit_pixel * scale_x + offset_x;
+    uint sub_unit_x = host_x >> unit_width_log2;
+    uint host_pixel_in_sub_unit = host_x & unit_mask;
+    src_offset = unit_offset_1x * scale_xy +
+                 ((((sub_unit_x * scale_y + offset_y) << unit_width_log2) +
+                   host_pixel_in_sub_unit)
+                  << pixel_size_log2);
+  } else {
+    // The pixel's slot, in pixels, among the tile's scaled pixels.
+    uint block_sample_offset = offset_x + offset_y * scale_x;
+    src_offset = tile_index * tile_size_1x * scale_xy +
+                 pixel_index * pixel_size * scale_xy +
+                 block_sample_offset * pixel_size;
+  }
+  return src_offset;
+}
+// END XeDownscaleSourceOffset
 
 // Groupshared memory for coalescing sub-32-bit writes
 // Max tile size at 1x is 32*32*8 bytes = 8KB for 64-bit pixels
@@ -55,25 +119,12 @@ void main(uint3 xe_group_id : SV_GroupID,
 
   uint pixel_size = 1u << xe_downscale_pixel_size_log2;
   uint tile_size_1x = 32 * 32 * pixel_size;
-  uint scale_xy = xe_downscale_scale_x * xe_downscale_scale_y;
-  uint tile_size_scaled = tile_size_1x * scale_xy;
 
-  // Compute offset within each scaled block to sample from.
-  // Without half-pixel correction: sample from (0, 0) = linear offset 0.
-  // With half-pixel correction: sample from (scale/2, scale/2) to compensate
-  // for the D3D9-style half-pixel offset shifting content by (N/2, N/2) pixels
-  // at Nx resolution.
-  uint block_sample_offset = 0u;
-  [branch] if (xe_downscale_half_pixel_offset != 0u && scale_xy > 1u) {
-    uint offset_x = xe_downscale_scale_x >> 1u;
-    uint offset_y = xe_downscale_scale_y >> 1u;
-    block_sample_offset = offset_x + offset_y * xe_downscale_scale_x;
-  }
-
-  // Source offset: base of the scaled block plus offset within block
-  uint src_offset = tile_index * tile_size_scaled +
-                    pixel_index * pixel_size * scale_xy +
-                    block_sample_offset * pixel_size;
+  // Source offset (in bytes): the pixel's slot in the scaled data.
+  uint src_offset = XeDownscaleSourceOffset(
+      tile_index, pixel_index, xe_downscale_scale_x, xe_downscale_scale_y,
+      xe_downscale_pixel_size_log2, xe_downscale_half_pixel_offset,
+      xe_downscale_unit_layout);
 
   // Destination offset in 1x buffer
   uint dst_offset = tile_index * tile_size_1x +

@@ -225,6 +225,15 @@ class CommandProcessor {
   // implementations.
   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
 
+  // 1 when the resolve downscale pass (the resolve readback uses it, and
+  // anything else that turns a scaled resolve back into 1x data) is
+  // to find the pixels of a resolution-scaled resolve by the scaled layout's own
+  // addressing, 0 for the pass's original addressing (resolve_downscale_unit_layout;
+  // rexglue-resolve-downscale-unit-layout.patch). The backends' downscale
+  // constants take it as the default of their last field, so every user of the
+  // pass gets it.
+  static uint32_t ResolveDownscaleUnitLayoutConstant();
+
   // Shared readback resolve mode with backend legacy-flag alias support.
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
   // Shared memexport readback enable state with backend legacy-flag override support.
