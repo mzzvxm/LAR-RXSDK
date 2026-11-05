@@ -237,9 +237,15 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
         }
       } break;
       case Command::kSetPipelineStateHandle: {
-        current_pipeline_state =
-            command_processor_.GetD3D12PipelineByHandle(*reinterpret_cast<void* const*>(stream));
+        void* pipeline_handle = *reinterpret_cast<void* const*>(stream);
+        current_pipeline_state = command_processor_.GetD3D12PipelineByHandle(pipeline_handle);
         if (current_pipeline_state) {
+          // MSAA line guard: a pipeline that draws lines on a multisampled
+          // target goes after a triangle pipeline of its sample count.
+          if (ID3D12PipelineState* guard =
+                  command_processor_.GetMsaaLineGuardPipeline(pipeline_handle)) {
+            command_list->SetPipelineState(guard);
+          }
           command_list->SetPipelineState(current_pipeline_state);
         }
       } break;
