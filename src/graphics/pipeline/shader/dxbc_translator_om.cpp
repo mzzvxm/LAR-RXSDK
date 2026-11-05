@@ -1706,7 +1706,7 @@ void DxbcShaderTranslator::CompletePixelShader_AlphaToMaskSample(
   dxbc::Src temp_src(dxbc::Src::R(temp).Select(temp_component));
   // Calculate the threshold.
   a_.OpMAd(temp_dest, threshold_offset, dxbc::Src::LF(-threshold_offset_scale),
-           dxbc::Src::LF(threshold_base));
+           dxbc::Src::LF(threshold_base - rex::graphics::kAlphaToMaskTolerance));
   // Check if alpha of oC0 is at or greater than the threshold (handling NaN
   // according to the Direct3D 11.3 functional specification, as not covered).
   a_.OpGE(temp_dest, dxbc::Src::R(system_temps_color_[0], dxbc::Src::kWWWW), temp_src);
