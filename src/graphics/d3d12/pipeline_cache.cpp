@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -763,6 +764,14 @@ void PipelineCache::EndSubmission() {
     pipeline_storage_file_flush_needed_ = false;
   }
   if (!creation_threads_.empty()) {
+    if (REXCVAR_GET(async_shader_compilation)) {
+      // Only draws queue pipelines here (ConfigurePipeline with async creation),
+      // and a draw whose pipeline isn't created yet is left out without
+      // recording anything that refers to the pipeline, so nothing submitted
+      // needs the pending ones: let the creation threads finish them while the
+      // next frames are recorded instead of holding this one.
+      return;
+    }
     CreateQueuedPipelinesOnProcessorThread();
     // Await creation of all queued pipelines.
     bool await_creation_completion_event;
@@ -909,8 +918,10 @@ bool PipelineCache::ConfigurePipeline(
   assert_not_null(pipeline_handle_out);
   assert_not_null(root_signature_out);
 
+  // A draw in an occlusion query would be counted as hidden if it was left out,
+  // so its pipeline is created right away.
   bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
-                   pixel_shader != nullptr;
+                   pixel_shader != nullptr && !command_processor_.IsOcclusionQueryActive();
 
   // Ensure shaders are translated - needed now for GetCurrentStateDescription.
   // Edge flags are not supported yet (because polygon primitives are not).
@@ -1026,6 +1037,7 @@ bool PipelineCache::ConfigurePipeline(
         bound_rts, shader_writes_color_targets, shader_writes_depth);
     new_pipeline->pending_vertex_shader = vertex_shader;
     new_pipeline->pending_pixel_shader = pixel_shader;
+    new_pipeline->async_creation_pending.store(true, std::memory_order_release);
     // Submit the pipeline for creation to any available thread.
     {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
@@ -3272,6 +3284,8 @@ void PipelineCache::CreationThread(size_t thread_index) {
       pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
                                       std::memory_order_release);
     }
+    bool was_async_pending =
+        pipeline_to_create->async_creation_pending.exchange(false, std::memory_order_acq_rel);
 
     // Pipeline created - the thread is not busy anymore, safe to set the
     // completion event if needed (at the next iteration, or in some other
@@ -3280,7 +3294,21 @@ void PipelineCache::CreationThread(size_t thread_index) {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
       --creation_threads_busy_;
     }
+    if (was_async_pending) {
+      async_creation_done_cond_.notify_all();
+    }
   }
+}
+
+bool PipelineCache::AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us) {
+  Pipeline* pipeline = reinterpret_cast<Pipeline*>(handle);
+  if (!pipeline->async_creation_pending.load(std::memory_order_acquire)) {
+    return true;
+  }
+  std::unique_lock<std::mutex> lock(creation_request_lock_);
+  return async_creation_done_cond_.wait_for(
+      lock, std::chrono::microseconds(timeout_us),
+      [pipeline]() { return !pipeline->async_creation_pending.load(std::memory_order_acquire); });
 }
 
 void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
@@ -3298,10 +3326,12 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
     PipelineRuntimeDescription runtime_description;
     if (!PrepareRuntimeDescriptionForQueuedCreation(pipeline_to_create, runtime_description)) {
       pipeline_to_create->state.store(nullptr, std::memory_order_release);
-      continue;
+    } else {
+      pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
+                                      std::memory_order_release);
     }
-    pipeline_to_create->state.store(CreateD3D12Pipeline(runtime_description),
-                                    std::memory_order_release);
+    // The processor thread is the only one waiting for these, and it's here.
+    pipeline_to_create->async_creation_pending.store(false, std::memory_order_release);
   }
 }
 

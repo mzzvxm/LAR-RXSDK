@@ -60,6 +60,13 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                     "used placeholder pipelines to avoid visible flashing")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_UINT32(vulkan_async_skip_incomplete_frames_max_ms, 100, "GPU/Vulkan",
+                      "With vulkan_async_skip_incomplete_frames, present frames that used "
+                      "placeholder pipelines anyway once presents have been skipped for this "
+                      "long, so a slow pipeline creation shows as objects missing for a moment "
+                      "rather than a picture held still. 0 skips for as long as it takes.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                     "Submit command buffer when PM4 primary buffer ends")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -2292,6 +2299,20 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
                                             frame_used_async_placeholder_pipeline_;
+  // The time presents have been skipped for runs from the first incomplete
+  // frame to the next complete one.
+  if (skip_present_due_async_placeholder) {
+    auto now = std::chrono::steady_clock::now();
+    if (!incomplete_frames_skipped_since_) {
+      incomplete_frames_skipped_since_ = now;
+    } else if (uint32_t skip_max_ms = REXCVAR_GET(vulkan_async_skip_incomplete_frames_max_ms)) {
+      // Skipped for long enough: show what there is until a frame is complete.
+      skip_present_due_async_placeholder =
+          now - *incomplete_frames_skipped_since_ < std::chrono::milliseconds(skip_max_ms);
+    }
+  } else {
+    incomplete_frames_skipped_since_.reset();
+  }
   if (skip_present_due_async_placeholder) {
     static bool skipped_incomplete_frame_logged = false;
     if (!skipped_incomplete_frame_logged) {
@@ -3862,8 +3883,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
                                                 &pipeline_is_placeholder);
   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
-    frame_used_async_placeholder_pipeline_ = true;
-    return true;
+    // Left out until the real pipeline is ready, unless it's ready within the
+    // frame's waiting budget.
+    if (AwaitAsyncPipeline(pipeline_handle)) {
+      pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline,
+                                                    pipeline_layout_provider,
+                                                    &pipeline_is_placeholder);
+    }
+    if (pipeline_is_placeholder) {
+      // A pipeline that failed to be created stays left out, but the frame
+      // isn't incomplete for it - it would never be complete again.
+      if (!pipeline_cache_->HasAsyncPipelineCreationFailed(pipeline_handle)) {
+        frame_used_async_placeholder_pipeline_ = true;
+      }
+      return true;
+    }
   }
   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
     return draw_fail("pipeline_lookup");
@@ -5090,7 +5124,38 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
 }
 
 bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
-  return !submission_open_ || (!scratch_buffer_used_ && !pipeline_cache_->IsCreatingPipelines());
+  // Pending pipelines of asynchronous creation don't hold a submission: the end
+  // of one doesn't wait for them.
+  return !submission_open_ ||
+         (!scratch_buffer_used_ &&
+          (REXCVAR_GET(async_shader_compilation) || !pipeline_cache_->IsCreatingPipelines()));
+}
+
+bool VulkanCommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
+  // A draw in an occlusion query whose pipeline an earlier draw queued waits
+  // (up to half a second, outside the budget) rather than being left out, which
+  // the query would count as hidden.
+  if (active_occlusion_query_.valid) {
+    return pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, UINT64_C(500000));
+  }
+  int32_t budget_ms = REXCVAR_GET(async_pipeline_wait_budget_ms);
+  if (!budget_ms) {
+    return false;
+  }
+  uint64_t timeout_us = UINT64_C(60000000);
+  if (budget_ms > 0) {
+    uint64_t budget_us = uint64_t(budget_ms) * 1000;
+    if (frame_async_pipeline_wait_us_ >= budget_us) {
+      return false;
+    }
+    timeout_us = budget_us - frame_async_pipeline_wait_us_;
+  }
+  auto wait_start = std::chrono::steady_clock::now();
+  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
+  frame_async_pipeline_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - wait_start)
+                                                .count());
+  return created;
 }
 
 bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
@@ -5167,6 +5232,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
     frame_used_async_placeholder_pipeline_ = false;
+    frame_async_pipeline_wait_us_ = 0;
 
     // Reset bindings that depend on transient data.
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
