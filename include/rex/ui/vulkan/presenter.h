@@ -416,6 +416,12 @@ class VulkanPresenter final : public Presenter {
     bool swapchain_is_fifo = false;
     std::vector<VkImage> swapchain_images;
     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
+    // The semaphore a paint's submission signals and its present waits for, one
+    // per swapchain image: reused when the image is acquired again, which is after
+    // its previous present (one per paint submission could be signaled again
+    // while a present still waited for it, VUID-vkQueueSubmit-pSignalSemaphores-00067).
+    // Kept across swapchains (only added to), destroyed with the presenter.
+    std::vector<VkSemaphore> swapchain_present_semaphores;
   };
 
   explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,

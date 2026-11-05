@@ -247,6 +247,10 @@ VulkanPresenter::~VulkanPresenter() {
   }
   util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
                              guest_output_paint_image_descriptor_set_layout_);
+  // After the swapchain and its presents (above).
+  for (VkSemaphore& semaphore : paint_context_.swapchain_present_semaphores) {
+    util::DestroyAndNullHandle(dfn.vkDestroySemaphore, device, semaphore);
+  }
 }
 
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
@@ -986,6 +990,22 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
     REXLOG_ERROR("VulkanPresenter: Failed to get swapchain images");
     paint_context_.DestroySwapchainAndVulkanSurface();
     return SurfacePaintConnectResult::kFailure;
+  }
+
+  // A present semaphore for each swapchain image (the old swapchain's last
+  // presents were awaited before it was destroyed).
+  while (paint_context_.swapchain_present_semaphores.size() <
+         paint_context_.swapchain_images.size()) {
+    VkSemaphoreCreateInfo semaphore_create_info = {};
+    semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    VkSemaphore semaphore;
+    if (dfn.vkCreateSemaphore(device, &semaphore_create_info, nullptr, &semaphore) !=
+        VK_SUCCESS) {
+      REXLOG_ERROR("VulkanPresenter: Failed to create a present semaphore");
+      paint_context_.DestroySwapchainAndVulkanSurface();
+      return SurfacePaintConnectResult::kFailure;
+    }
+    paint_context_.swapchain_present_semaphores.push_back(semaphore);
   }
 
   // Create the image views and the framebuffers.
@@ -2181,7 +2201,10 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
     paint_context_.ui_setup_command_buffer_current_index = SIZE_MAX;
   }
   command_buffers[command_buffer_count++] = draw_command_buffer;
-  VkSemaphore present_semaphore = paint_submission.present_semaphore();
+  VkSemaphore present_semaphore =
+      swapchain_image_index < paint_context_.swapchain_present_semaphores.size()
+          ? paint_context_.swapchain_present_semaphores[swapchain_image_index]
+          : paint_submission.present_semaphore();
   VkSubmitInfo submit_info;
   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
   submit_info.pNext = nullptr;
