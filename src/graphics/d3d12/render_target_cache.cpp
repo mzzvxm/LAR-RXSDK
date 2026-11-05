@@ -1503,10 +1503,18 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
                                             direct_source_views[i],
                                             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             }
+            // A depth render target is also kept in the depth read state, not to be
+            // decompressed for the shader.
+            // CHECK: measured on a Radeon iGPU (the barriers before resolves 0.94 to 0.05 ms) and
+            // an RTX 5080 (no change); not compiled or run here, no other GPU tried.
+            D3D12_RESOURCE_STATES direct_source_state =
+                direct_source->key().is_depth
+                    ? D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                            D3D12_RESOURCE_STATE_DEPTH_READ)
+                    : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             command_processor_.PushTransitionBarrier(
-                direct_source->resource(),
-                direct_source->SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                direct_source->resource(), direct_source->SetResourceState(direct_source_state),
+                direct_source_state);
             command_list.D3DSetComputeRootSignature(direct_resolve_root_signature_);
             for (uint32_t i = 0; i < 2; ++i) {
               command_list.D3DSetComputeRootDescriptorTable(
@@ -4121,10 +4129,12 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
         // anyway even in the best case, so it's not possible to have all the
         // barriers in one place here.
         TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        // Also in the depth read state, not to be decompressed for the shader.
+        D3D12_RESOURCE_STATES host_depth_store_source_state = D3D12_RESOURCE_STATES(
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_DEPTH_READ);
         command_processor_.PushTransitionBarrier(
-            dest_d3d12_rt.resource(),
-            dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            dest_d3d12_rt.resource(), dest_d3d12_rt.SetResourceState(host_depth_store_source_state),
+            host_depth_store_source_state);
         // Pipeline.
         command_processor_.SetExternalPipeline(
             host_depth_store_pipelines_[size_t(dest_rt_key.msaa_samples)]);
@@ -5838,10 +5848,14 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
   uint32_t rt_sort_index = 0;
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
-    command_processor_.PushTransitionBarrier(
-        d3d12_rt.resource(),
-        d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    D3D12_RESOURCE_STATES dump_source_state =
+        d3d12_rt.key().is_depth
+            ? D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                    D3D12_RESOURCE_STATE_DEPTH_READ)
+            : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    command_processor_.PushTransitionBarrier(d3d12_rt.resource(),
+                                             d3d12_rt.SetResourceState(dump_source_state),
+                                             dump_source_state);
     if (d3d12_rt.temporary_sort_index() == UINT32_MAX) {
       d3d12_rt.SetTemporarySortIndex(rt_sort_index++);
     }
