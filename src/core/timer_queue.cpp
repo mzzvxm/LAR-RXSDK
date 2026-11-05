@@ -12,16 +12,54 @@
 #include <algorithm>
 #include <forward_list>
 
+#include <disruptorplus/blocking_wait_strategy.hpp>
 #include <disruptorplus/multi_threaded_claim_strategy.hpp>
 #include <disruptorplus/ring_buffer.hpp>
 #include <disruptorplus/sequence_barrier.hpp>
-#include <disruptorplus/spin_wait_strategy.hpp>
 
 #include <rex/assert.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
 
 namespace dp = disruptorplus;
+
+namespace {
+
+// The timer thread's wait for new timers. It used to spin (yield, and a 1 ms sleep every 20th turn),
+// which kept part of a core busy for the whole session. It now sleeps on a condition variable until
+// the next timer is due or a timer is queued: publishing a timer always signals it.
+class TimerWaitStrategy {
+ public:
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[]) {
+    return blocking_.wait_until_published(sequence, count, sequences);
+  }
+
+  template <typename Rep, typename Period>
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[],
+                                      const std::chrono::duration<Rep, Period>& timeout) {
+    return blocking_.wait_until_published(sequence, count, sequences, timeout);
+  }
+
+  template <typename Clock, typename Duration>
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[],
+                                      const std::chrono::time_point<Clock, Duration>& timeout_time) {
+    // An empty queue waits until time_point::max(), which the condition variable cannot convert:
+    // wake at least once a second instead (the caller just waits again).
+    const auto limit = std::chrono::time_point_cast<Duration>(Clock::now() + std::chrono::seconds(1));
+    return blocking_.wait_until_published(sequence, count, sequences,
+                                          timeout_time < limit ? timeout_time : limit);
+  }
+
+  void signal_all_when_blocking() { blocking_.signal_all_when_blocking(); }
+
+ private:
+  dp::blocking_wait_strategy blocking_;
+};
+
+}  // namespace
 
 namespace rex::thread {
 
@@ -142,9 +180,9 @@ class TimerQueue {
   // This ring buffer will be used to introduce timers queued by the public API
   static constexpr size_t kWaitCount = 512;
   dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
-  dp::spin_wait_strategy wait_strategy_;
-  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
-  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
+  TimerWaitStrategy wait_strategy_;
+  dp::multi_threaded_claim_strategy<TimerWaitStrategy> claim_strategy_;
+  dp::sequence_barrier<TimerWaitStrategy> consumed_;
 
   // This is a _sorted_ (ascending due_) list of active timers managed by a
   // dedicated thread
