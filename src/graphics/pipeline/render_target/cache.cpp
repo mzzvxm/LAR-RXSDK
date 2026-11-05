@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <bitset>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -658,6 +659,29 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                        rt_base);
   }
 
+  // Remember the MSAA mode the range of a clear rectangle draw is drawn with
+  // next, for the same clear to be done in that mode.
+  for (ClearRectangleWaitingForDraw& waiting : clear_rectangles_waiting_for_draw_) {
+    if (!waiting.waiting) {
+      continue;
+    }
+    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+      RenderTargetKey rt_key = rt_keys[edram_bases_sorted[i].second];
+      RenderTargetKey rt_key_any_msaa = rt_key;
+      rt_key_any_msaa.msaa_samples = xenos::MsaaSamples::k1X;
+      if (rt_key_any_msaa == waiting.render_target_any_msaa) {
+        if (clear_rectangle_next_msaa_.size() >= 256 &&
+            clear_rectangle_next_msaa_.find(waiting.clear) == clear_rectangle_next_msaa_.end()) {
+          // Bounded, in case a title clears ever new rectangles.
+          clear_rectangle_next_msaa_.clear();
+        }
+        clear_rectangle_next_msaa_[waiting.clear] = rt_key.msaa_samples;
+        waiting.waiting = false;
+        break;
+      }
+    }
+  }
+
   if (interlock_barrier_only) {
     // Because a full pixel shader interlock barrier may clear the ownership map
     // (since it flushes all previous writes, and there's no need for another
@@ -758,6 +782,499 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     are_accumulated_render_targets_valid_ = true;
   }
 
+  return true;
+}
+
+namespace {
+
+class ClearRectangleVertexExportSink : public ShaderInterpreter::ExportSink {
+ public:
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    float* dest = nullptr;
+    uint32_t* dest_mask = nullptr;
+    if (export_register == ucode::ExportRegister::kVSPosition) {
+      dest = position;
+      dest_mask = &position_mask;
+    } else if (uint32_t(export_register) < xenos::kMaxInterpolators) {
+      dest = interpolators[uint32_t(export_register)];
+      dest_mask = &interpolator_masks[uint32_t(export_register)];
+    } else if (export_register == ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex &&
+               (value_mask & 0b0100)) {
+      killed = (memory::Reinterpret<uint32_t>(value[2]) & ~(UINT32_C(1) << 31)) != 0;
+      return;
+    } else {
+      return;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (value_mask & (UINT32_C(1) << i)) {
+        dest[i] = value[i];
+      }
+    }
+    *dest_mask |= value_mask;
+  }
+
+  float position[4] = {};
+  uint32_t position_mask = 0;
+  float interpolators[xenos::kMaxInterpolators][4] = {};
+  uint32_t interpolator_masks[xenos::kMaxInterpolators] = {};
+  bool killed = false;
+};
+
+class ClearRectangleColorExportSink : public ShaderInterpreter::ExportSink {
+ public:
+  explicit ClearRectangleColorExportSink(ucode::ExportRegister color_register)
+      : color_register_(color_register) {}
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    if (export_register != color_register_) {
+      return;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (value_mask & (UINT32_C(1) << i)) {
+        color[i] = value[i];
+      }
+    }
+    color_mask |= value_mask;
+  }
+
+  float color[4] = {};
+  uint32_t color_mask = 0;
+
+ private:
+  ucode::ExportRegister color_register_;
+};
+
+// Whether a float16 render target holds the value exactly.
+bool IsFloat16Exact(float value) {
+  uint32_t bits = memory::Reinterpret<uint32_t>(value) & ~(UINT32_C(1) << 31);
+  int32_t exponent = int32_t(bits >> 23) - 127;
+  if (!bits) {
+    return true;
+  }
+  if (exponent > 15) {
+    return false;
+  }
+  if (exponent >= -14) {
+    return !(bits & 0x1FFF);
+  }
+  // Denormal, a multiple of 2^-24.
+  float denormal = std::abs(value) * 16777216.0f;
+  return denormal == std::floor(denormal);
+}
+
+// The value a color drawn into a render target of the format leaves there, for
+// clearing like in a resolve, if the format is handled and the host render
+// target would hold the same as after drawing. In the RB_COLOR_CLEAR(_LO)
+// layout, or as host values for float16 host render targets, which hold the
+// color times the exponent bias as drawn, not clamped to 7e3 or 2-bit alpha.
+bool GetClearRectangleColorValue(xenos::ColorRenderTargetFormat format, const float* color,
+                                 float exp_bias_scale, uint64_t& value_out,
+                                 float* host_value_out, bool& is_host_value_out) {
+  float biased[4];
+  for (uint32_t i = 0; i < 4; ++i) {
+    biased[i] = color[i] * exp_bias_scale;
+    if (!std::isfinite(biased[i])) {
+      return false;
+    }
+  }
+  is_host_value_out = false;
+  // Rounded to the nearest like the host does when drawing.
+  auto unorm = [&biased](uint32_t i, uint32_t max) -> uint64_t {
+    return uint64_t(std::nearbyint(std::min(std::max(biased[i], 0.0f), 1.0f) * float(max)));
+  };
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+      value_out = unorm(0, 0xFF) | (unorm(1, 0xFF) << 8) | (unorm(2, 0xFF) << 16) |
+                  (unorm(3, 0xFF) << 24);
+      return true;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      value_out = unorm(0, 0x3FF) | (unorm(1, 0x3FF) << 10) | (unorm(2, 0x3FF) << 20) |
+                  (unorm(3, 0x3) << 30);
+      return true;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (!IsFloat16Exact(biased[i])) {
+          return false;
+        }
+        host_value_out[i] = biased[i];
+      }
+      is_host_value_out = true;
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+// CHECK: ported without changes, not compiled or run here. Compare pictures with and without it
+// (the city, the pause menu, a race) and the GPU frame time above 1x.
+bool RenderTargetCache::ClearRectangleDraw(bool is_rasterization_done, const Shader& vertex_shader,
+                                           const Shader* pixel_shader,
+                                           reg::RB_DEPTHCONTROL normalized_depth_control,
+                                           uint32_t normalized_color_mask) {
+  if (GetPath() != Path::kHostRenderTargets || !is_rasterization_done) {
+    return false;
+  }
+  const RegisterFile& regs = register_file();
+
+  // One rectangle in screen space, not clipped, culled or offset.
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (vgt_draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
+      vgt_draw_initiator.num_indices != 3 ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
+    return false;
+  }
+  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
+  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+  if (pa_cl_vte_cntl.vport_x_scale_ena || pa_cl_vte_cntl.vport_x_offset_ena ||
+      pa_cl_vte_cntl.vport_y_scale_ena || pa_cl_vte_cntl.vport_y_offset_ena ||
+      pa_cl_vte_cntl.vport_z_scale_ena || pa_cl_vte_cntl.vport_z_offset_ena ||
+      !pa_cl_vte_cntl.vtx_xy_fmt || !pa_cl_vte_cntl.vtx_z_fmt ||
+      !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable || pa_su_sc_mode_cntl.cull_front ||
+      pa_su_sc_mode_cntl.cull_back ||
+      pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
+      pa_su_sc_mode_cntl.poly_offset_front_enable || pa_su_sc_mode_cntl.poly_offset_back_enable ||
+      pa_su_sc_mode_cntl.poly_offset_para_enable) {
+    return false;
+  }
+
+  // Depth and stencil replaced everywhere, or not used.
+  bool clear_depth = normalized_depth_control.z_enable || normalized_depth_control.stencil_enable;
+  auto rb_stencilrefmask = regs.Get<reg::RB_STENCILREFMASK>();
+  if (clear_depth &&
+      (!normalized_depth_control.z_enable || !normalized_depth_control.z_write_enable ||
+       normalized_depth_control.zfunc != xenos::CompareFunction::kAlways ||
+       !normalized_depth_control.stencil_enable ||
+       normalized_depth_control.stencilfunc != xenos::CompareFunction::kAlways ||
+       normalized_depth_control.stencilzpass != xenos::StencilOp::kReplace ||
+       normalized_depth_control.backface_enable || rb_stencilrefmask.stencilwritemask != 0xFF)) {
+    return false;
+  }
+  // At most one color render target, all of it replaced.
+  uint32_t color_rt_index = UINT32_MAX;
+  if (normalized_color_mask) {
+    rex::bit_scan_forward(normalized_color_mask, &color_rt_index);
+    color_rt_index >>= 2;
+    if (normalized_color_mask != (UINT32_C(0b1111) << (4 * color_rt_index))) {
+      return false;
+    }
+    auto rb_blendcontrol =
+        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[color_rt_index]);
+    if (rb_blendcontrol.color_srcblend != xenos::BlendFactor::kOne ||
+        rb_blendcontrol.color_destblend != xenos::BlendFactor::kZero ||
+        rb_blendcontrol.color_comb_fcn != xenos::BlendOp::kAdd ||
+        rb_blendcontrol.alpha_srcblend != xenos::BlendFactor::kOne ||
+        rb_blendcontrol.alpha_destblend != xenos::BlendFactor::kZero ||
+        rb_blendcontrol.alpha_comb_fcn != xenos::BlendOp::kAdd) {
+      return false;
+    }
+  }
+  if (!clear_depth && color_rt_index == UINT32_MAX) {
+    return false;
+  }
+  // No pixel discarded, the color known on the CPU.
+  if (pixel_shader) {
+    auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+    if (pixel_shader->kills_pixels() || pixel_shader->writes_depth() ||
+        !ShaderInterpreter::CanInterpretShader(*pixel_shader) ||
+        (rb_colorcontrol.alpha_test_enable &&
+         rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways) ||
+        rb_colorcontrol.alpha_to_mask_enable) {
+      return false;
+    }
+  } else if (color_rt_index != UINT32_MAX) {
+    return false;
+  }
+  if (!ShaderInterpreter::CanInterpretShader(vertex_shader)) {
+    return false;
+  }
+
+  // The vertices.
+  ShaderInterpreter& interpreter = clear_rectangle_shader_interpreter_;
+  ClearRectangleVertexExportSink vertices[3];
+  interpreter.SetShader(vertex_shader);
+  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+  for (uint32_t i = 0; i < 3; ++i) {
+    interpreter.SetExportSink(&vertices[i]);
+    // Like the host's registers, zero except for the vertex index.
+    float* temps = interpreter.temp_registers();
+    std::fill(temps, temps + 4 * xenos::kMaxShaderTempRegisters, 0.0f);
+    temps[0] = float(std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF)));
+    interpreter.Execute();
+  }
+  interpreter.SetExportSink(nullptr);
+  for (uint32_t i = 0; i < 3; ++i) {
+    if (vertices[i].killed || vertices[i].position_mask != 0b1111 ||
+        !(vertices[i].position[3] > 0.0f) ||
+        memory::Reinterpret<uint32_t>(vertices[i].position[2]) !=
+            memory::Reinterpret<uint32_t>(vertices[0].position[2])) {
+      return false;
+    }
+  }
+  // Three corners of the rectangle, edges between pixels.
+  float x_offset = 0.0f, y_offset = 0.0f;
+  if (REXCVAR_GET(half_pixel_offset) &&
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero) {
+    x_offset = y_offset = 0.5f;
+  }
+  if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
+    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    x_offset += float(pa_sc_window_offset.window_x_offset);
+    y_offset += float(pa_sc_window_offset.window_y_offset);
+  }
+  float edges[2][2];
+  for (uint32_t i = 0; i < 2; ++i) {
+    float offset = i ? y_offset : x_offset;
+    float a = vertices[0].position[i] + offset, b = vertices[1].position[i] + offset,
+          c = vertices[2].position[i] + offset;
+    edges[i][0] = std::min(a, std::min(b, c));
+    edges[i][1] = std::max(a, std::max(b, c));
+    if (!(edges[i][0] < edges[i][1]) || (a != edges[i][0] && a != edges[i][1]) ||
+        (b != edges[i][0] && b != edges[i][1]) || (c != edges[i][0] && c != edges[i][1]) ||
+        edges[i][0] != std::floor(edges[i][0]) || edges[i][1] != std::floor(edges[i][1]) ||
+        !(edges[i][0] > -16384.0f) || !(edges[i][1] < 16384.0f)) {
+      return false;
+    }
+  }
+  for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t j = i + 1; j < 3; ++j) {
+      if (vertices[i].position[0] == vertices[j].position[0] &&
+          vertices[i].position[1] == vertices[j].position[1]) {
+        return false;
+      }
+    }
+  }
+  draw_util::Scissor scissor;
+  draw_util::GetScissor(regs, scissor);
+  int32_t rect_left = std::max(int32_t(edges[0][0]), int32_t(scissor.offset[0]));
+  int32_t rect_top = std::max(int32_t(edges[1][0]), int32_t(scissor.offset[1]));
+  int32_t rect_right =
+      std::min(int32_t(edges[0][1]), int32_t(scissor.offset[0] + scissor.extent[0]));
+  int32_t rect_bottom =
+      std::min(int32_t(edges[1][1]), int32_t(scissor.offset[1] + scissor.extent[1]));
+  if (rect_left >= rect_right || rect_top >= rect_bottom) {
+    return false;
+  }
+
+  // The values.
+  uint64_t clear_values[2] = {};
+  float color_host_clear_value[4];
+  bool color_clear_value_is_host = false;
+  if (clear_depth) {
+    float z = vertices[0].position[2];
+    if (!(z <= 1.0f)) {
+      return false;
+    }
+    z = std::max(z, 0.0f);
+    uint32_t depth;
+    if (regs.Get<reg::RB_DEPTH_INFO>().depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
+      // Drawn as float32 without rounding to 20e4.
+      depth = xenos::Float32To20e4(z, true);
+      if (xenos::Float20e4To32(depth) != z) {
+        return false;
+      }
+    } else {
+      depth = uint32_t(std::nearbyint(double(z) * double(0xFFFFFF)));
+    }
+    clear_values[0] = (depth << 8) | rb_stencilrefmask.stencilref;
+  }
+  auto rb_color_info = color_rt_index != UINT32_MAX
+                           ? regs.Get<reg::RB_COLOR_INFO>(
+                                 reg::RB_COLOR_INFO::rt_register_indices[color_rt_index])
+                           : reg::RB_COLOR_INFO();
+  if (color_rt_index != UINT32_MAX) {
+    // The pixel shader with the interpolators from the vertices, which must be
+    // the same in all of them, and the other registers having any value.
+    uint32_t ps_param_gen_pos = UINT32_MAX;
+    uint32_t interpolator_mask = pixel_shader->GetInterpolatorInputMask(
+        regs.Get<reg::SQ_PROGRAM_CNTL>(), regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+    if (ps_param_gen_pos != UINT32_MAX ||
+        (interpolator_mask & ~vertex_shader.writes_interpolators())) {
+      return false;
+    }
+    for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
+      if (!(interpolator_mask & (UINT32_C(1) << i))) {
+        continue;
+      }
+      for (uint32_t j = 0; j < 3; ++j) {
+        if (vertices[j].interpolator_masks[i] != 0b1111 ||
+            std::memcmp(vertices[j].interpolators[i], vertices[0].interpolators[i],
+                        sizeof(float) * 4)) {
+          return false;
+        }
+      }
+    }
+    float colors[2][4];
+    interpreter.SetShader(*pixel_shader);
+    for (uint32_t i = 0; i < 2; ++i) {
+      float* temps = interpreter.temp_registers();
+      std::fill(temps, temps + 4 * xenos::kMaxShaderTempRegisters, float(i));
+      for (uint32_t j = 0; j < xenos::kMaxInterpolators; ++j) {
+        if (interpolator_mask & (UINT32_C(1) << j)) {
+          std::memcpy(temps + 4 * j, vertices[0].interpolators[j], sizeof(float) * 4);
+        }
+      }
+      ClearRectangleColorExportSink color(
+          ucode::ExportRegister(uint32_t(ucode::ExportRegister::kPSColor0) + color_rt_index));
+      interpreter.SetExportSink(&color);
+      interpreter.Execute();
+      interpreter.SetExportSink(nullptr);
+      if (color.color_mask != 0b1111) {
+        return false;
+      }
+      std::memcpy(colors[i], color.color, sizeof(float) * 4);
+    }
+    if (std::memcmp(colors[0], colors[1], sizeof(colors[0])) ||
+        !GetClearRectangleColorValue(rb_color_info.color_format, colors[0],
+                                     std::ldexp(1.0f, rb_color_info.color_exp_bias),
+                                     clear_values[1], color_host_clear_value,
+                                     color_clear_value_is_host)) {
+      return false;
+    }
+  }
+
+  // The render targets as drawn.
+  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  xenos::MsaaSamples draw_msaa_samples = rb_surface_info.msaa_samples;
+  if (draw_msaa_samples > xenos::MsaaSamples::k4X || !rb_surface_info.surface_pitch) {
+    return false;
+  }
+  uint32_t draw_msaa_samples_x_log2 = uint32_t(draw_msaa_samples >= xenos::MsaaSamples::k4X);
+  uint32_t draw_msaa_samples_y_log2 = uint32_t(draw_msaa_samples >= xenos::MsaaSamples::k2X);
+  uint32_t pitch_tiles_at_32bpp =
+      ((rb_surface_info.surface_pitch << draw_msaa_samples_x_log2) +
+       (xenos::kEdramTileWidthSamples - 1)) /
+      xenos::kEdramTileWidthSamples;
+  RenderTargetKey draw_keys[2];
+  bool rts_are_64bpp[2] = {};
+  if (clear_depth) {
+    auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+    draw_keys[0].base_tiles = rb_depth_info.depth_base;
+    draw_keys[0].is_depth = 1;
+    draw_keys[0].resource_format = uint32_t(rb_depth_info.depth_format);
+  }
+  if (color_rt_index != UINT32_MAX) {
+    draw_keys[1].base_tiles = rb_color_info.color_base;
+    draw_keys[1].resource_format = uint32_t(
+        GetColorResourceFormat(xenos::GetStorageColorFormat(rb_color_info.color_format)));
+    rts_are_64bpp[1] = xenos::IsColorRenderTargetFormat64bpp(rb_color_info.color_format);
+    if (clear_depth && draw_keys[1].base_tiles == draw_keys[0].base_tiles) {
+      return false;
+    }
+  }
+  uint64_t rect_packed = uint64_t(uint16_t(rect_left)) | (uint64_t(uint16_t(rect_top)) << 16) |
+                         (uint64_t(uint16_t(rect_right)) << 32) |
+                         (uint64_t(uint16_t(rect_bottom)) << 48);
+
+  // Each in the MSAA mode the range was drawn with next after the same clear,
+  // if the rectangle has whole pixels in it.
+  RenderTargetKey keys[2];
+  RenderTarget* render_targets[2] = {};
+  Transfer::Rectangle rectangles[2];
+  uint32_t starts_tiles[2] = {}, lengths_tiles[2] = {};
+  std::bitset<xenos::kEdramTileCount> tiles_used;
+  for (uint32_t i = 0; i < 2; ++i) {
+    if (i ? color_rt_index == UINT32_MAX : !clear_depth) {
+      continue;
+    }
+    draw_keys[i].pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
+    draw_keys[i].msaa_samples = draw_msaa_samples;
+    RenderTargetKey& key = keys[i];
+    key = draw_keys[i];
+    uint32_t sample_edges[4] = {
+        uint32_t(rect_left) << draw_msaa_samples_x_log2,
+        uint32_t(rect_top) << draw_msaa_samples_y_log2,
+        uint32_t(rect_right) << draw_msaa_samples_x_log2,
+        uint32_t(rect_bottom) << draw_msaa_samples_y_log2,
+    };
+    auto next_msaa_it =
+        clear_rectangle_next_msaa_.find(std::make_pair(uint64_t(draw_keys[i].key), rect_packed));
+    if (next_msaa_it != clear_rectangle_next_msaa_.end()) {
+      uint32_t x_mask = uint32_t(next_msaa_it->second >= xenos::MsaaSamples::k4X);
+      uint32_t y_mask = uint32_t(next_msaa_it->second >= xenos::MsaaSamples::k2X);
+      if (!((sample_edges[0] | sample_edges[2]) & x_mask) &&
+          !((sample_edges[1] | sample_edges[3]) & y_mask)) {
+        key.msaa_samples = next_msaa_it->second;
+      }
+    }
+    uint32_t msaa_samples_x_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t msaa_samples_y_log2 = uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
+    Transfer::Rectangle& rectangle = rectangles[i];
+    rectangle.x_pixels = sample_edges[0] >> msaa_samples_x_log2;
+    rectangle.y_pixels = sample_edges[1] >> msaa_samples_y_log2;
+    rectangle.width_pixels = (sample_edges[2] >> msaa_samples_x_log2) - rectangle.x_pixels;
+    rectangle.height_pixels = (sample_edges[3] >> msaa_samples_y_log2) - rectangle.y_pixels;
+    // Storing host depth for transfers works in 8x8-pixel blocks.
+    if (key.is_depth && ((rectangle.x_pixels | rectangle.y_pixels | rectangle.width_pixels |
+                          rectangle.height_pixels) &
+                         ((UINT32_C(1) << xenos::kResolveAlignmentPixelsLog2) - 1))) {
+      return false;
+    }
+    if (sample_edges[2] > pitch_tiles_at_32bpp * xenos::kEdramTileWidthSamples ||
+        rectangle.y_pixels + rectangle.height_pixels >
+            GetRenderTargetHeight(pitch_tiles_at_32bpp, key.msaa_samples)) {
+      return false;
+    }
+    // The tiles containing the rectangle, as in a resolve clear.
+    uint32_t start_tiles_at_32bpp =
+        (sample_edges[1] / xenos::kEdramTileHeightSamples) * pitch_tiles_at_32bpp +
+        sample_edges[0] / xenos::kEdramTileWidthSamples;
+    uint32_t end_tiles_at_32bpp =
+        ((sample_edges[3] - 1) / xenos::kEdramTileHeightSamples) * pitch_tiles_at_32bpp +
+        (sample_edges[2] - 1) / xenos::kEdramTileWidthSamples + 1;
+    starts_tiles[i] =
+        std::min(start_tiles_at_32bpp << uint32_t(rts_are_64bpp[i]), xenos::kEdramTileCount);
+    lengths_tiles[i] =
+        std::min(end_tiles_at_32bpp << uint32_t(rts_are_64bpp[i]), xenos::kEdramTileCount) -
+        starts_tiles[i];
+    for (uint32_t j = 0; j < lengths_tiles[i]; ++j) {
+      uint32_t tile = (key.base_tiles + starts_tiles[i] + j) & (xenos::kEdramTileCount - 1);
+      if (tiles_used[tile]) {
+        // Depth and color overlapping.
+        return false;
+      }
+      tiles_used[tile] = true;
+    }
+    render_targets[i] = GetOrCreateRenderTarget(key);
+    if (!render_targets[i]) {
+      return false;
+    }
+  }
+
+  for (uint32_t i = 0; i < 2; ++i) {
+    clear_rectangle_transfers_[i].clear();
+    if (!render_targets[i]) {
+      continue;
+    }
+    ChangeOwnership(keys[i], starts_tiles[i], lengths_tiles[i], &clear_rectangle_transfers_[i],
+                    &rectangles[i]);
+    ClearRectangleWaitingForDraw& waiting = clear_rectangles_waiting_for_draw_[i];
+    waiting.clear = std::make_pair(uint64_t(draw_keys[i].key), rect_packed);
+    waiting.render_target_any_msaa = keys[i];
+    waiting.render_target_any_msaa.msaa_samples = xenos::MsaaSamples::k1X;
+    waiting.waiting = true;
+  }
+  if (render_targets[0] && render_targets[1] &&
+      keys[0].msaa_samples == keys[1].msaa_samples) {
+    TransferAndClearRenderTargets(2, render_targets, clear_rectangle_transfers_, clear_values,
+                                  color_clear_value_is_host ? color_host_clear_value : nullptr,
+                                  rectangles[0]);
+  } else {
+    for (uint32_t i = 0; i < 2; ++i) {
+      if (render_targets[i]) {
+        TransferAndClearRenderTargets(1, &render_targets[i], &clear_rectangle_transfers_[i],
+                                      &clear_values[i],
+                                      color_clear_value_is_host ? color_host_clear_value : nullptr,
+                                      rectangles[i]);
+      }
+    }
+  }
   return true;
 }
 

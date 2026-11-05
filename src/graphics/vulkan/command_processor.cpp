@@ -3706,6 +3706,20 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     if (!BeginSubmission(true)) {
       return draw_fail("begin_submission");
     }
+    if (!i) {
+      // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
+      // CHECK: on the first of the two iterations, after BeginSubmission, as the Direct3D 12 call
+      // is; not compiled or run here.
+      if (prim_type == xenos::PrimitiveType::kRectangleList && !memexport_writes_possible &&
+          !active_occlusion_query_.valid &&
+          render_target_cache_->ClearRectangleDraw(
+              is_rasterization_done, *vertex_shader, pixel_shader, normalized_depth_control,
+              pixel_shader
+                  ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                  : 0)) {
+        return true;
+      }
+    }
 
     // Process primitives.
     if (!primitive_processor_->Process(primitive_processing_result)) {

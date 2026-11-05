@@ -174,6 +174,19 @@ class RenderTargetCache {
   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask, const Shader& vertex_shader);
 
+  // For host render targets, if the draw only fills a screen-space rectangle
+  // with one depth and stencil value and one color, like the clears of
+  // Direct3D 9 on the Xbox 360 (drawn with 4x MSAA to cover twice as many
+  // samples per pixel as 2x), clears the host render targets instead of
+  // drawing, in the MSAA mode the range was drawn with next after the same
+  // clear before. That skips ownership transfers of the whole range to the
+  // MSAA mode of the clear and back. Returns whether the draw has been done
+  // this way, in which case it must not be drawn. To be called in a
+  // submission, for a draw without memory export or an occlusion query.
+  bool ClearRectangleDraw(bool is_rasterization_done, const Shader& vertex_shader,
+                          const Shader* pixel_shader, reg::RB_DEPTHCONTROL normalized_depth_control,
+                          uint32_t normalized_color_mask);
+
   // Returns bits where 0 is whether a depth render target is currently bound on
   // the host and 1... are whether the same applies to color render targets, and
   // formats (resource formats, but if needed, with gamma taken into account) of
@@ -185,6 +198,7 @@ class RenderTargetCache {
                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
       : register_file_(register_file),
         draw_extent_estimator_(register_file, memory),
+        clear_rectangle_shader_interpreter_(register_file, memory),
         draw_resolution_scale_x_(draw_resolution_scale_x),
         draw_resolution_scale_y_(draw_resolution_scale_y) {
     assert_not_zero(draw_resolution_scale_x);
@@ -539,6 +553,16 @@ class RenderTargetCache {
                                             std::vector<Transfer>& depth_transfers_out,
                                             RenderTarget*& color_render_target_out,
                                             std::vector<Transfer>& color_transfers_out);
+  // Performs the ownership transfers to the render targets, and then clears
+  // them in the rectangle, like a clear in a resolve (values in the
+  // RB_DEPTH_CLEAR and RB_COLOR_CLEAR / RB_COLOR_CLEAR_LO layouts, or, if not
+  // null, the four host values of a color render target).
+  virtual void TransferAndClearRenderTargets(uint32_t render_target_count,
+                                             RenderTarget* const* render_targets,
+                                             const std::vector<Transfer>* transfers,
+                                             const uint64_t* clear_values,
+                                             const float* color_host_clear_value,
+                                             const Transfer::Rectangle& clear_rectangle) = 0;
 
   // For pixel shader interlock.
 
@@ -554,6 +578,21 @@ class RenderTargetCache {
   uint32_t draw_resolution_scale_y_;
 
   DrawExtentEstimator draw_extent_estimator_;
+
+  // For clear rectangle draws.
+  ShaderInterpreter clear_rectangle_shader_interpreter_;
+  // The MSAA mode each clear rectangle draw (its render target key and
+  // rectangle) was followed by the last time, to clear in that mode.
+  std::map<std::pair<uint64_t, uint64_t>, xenos::MsaaSamples> clear_rectangle_next_msaa_;
+  // Depth and color clear rectangle draws whose render targets haven't been
+  // drawn to since, to learn the MSAA mode that the next draw uses.
+  struct ClearRectangleWaitingForDraw {
+    std::pair<uint64_t, uint64_t> clear;
+    RenderTargetKey render_target_any_msaa;
+    bool waiting = false;
+  };
+  ClearRectangleWaitingForDraw clear_rectangles_waiting_for_draw_[2];
+  std::vector<Transfer> clear_rectangle_transfers_[2];
 
   // For host render targets.
 
