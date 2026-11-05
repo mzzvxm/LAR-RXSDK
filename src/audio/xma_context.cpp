@@ -133,10 +133,24 @@ bool XmaContext::Work() {
   }
 
   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
+    const uint32_t pre_decode_offset = data.input_buffer_read_offset;
+    const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
+
     Decode(&data);
     Consume(&output_rb, &data);
 
     if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
+      // Don't abandon a partly handed out frame (Xenia Canary 6bef1fbed, Herman S.): Consume() hands
+      // out at most subframe_decode_count blocks per pass, so the pass that runs out of input often
+      // leaves the rest of the frame. is_enabled_ is cleared and only a kick sets it again, so
+      // nothing else would deliver it: the frame was lost (a long stream lost one every 10-20 s).
+      if (current_frame_remaining_subframes_ == 0) {
+        break;
+      }
+    } else if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
+               current_frame_remaining_subframes_ == 0) {
+      // A pass that moved nothing and produced nothing would repeat forever on the thread that
+      // kicked the context (Xenia Canary ade7e610b, Herman S.).
       break;
     }
   }
@@ -316,7 +330,15 @@ uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_pack
     if (packet_frame_offset <= kMaxFrameSizeinBits) {
       return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
     }
-    next_packet_index++;
+
+    // No frame starts in this packet: it only continues a frame split across the packet boundary.
+    // Follow its own skip count to the next packet of the same stream (Xenia Canary 7015473a7,
+    // Herman S.).
+    const uint8_t next_skip = xma::GetPacketSkipCount(next_packet);
+    if (next_skip == 0xFF) {
+      break;
+    }
+    next_packet_index += next_skip + 1;
   }
 
   return kBitsPerPacketHeader;
@@ -347,18 +369,42 @@ memory::RingBuffer XmaContext::PrepareOutputRingBuffer(XMA_CONTEXT_DATA* data) {
 
 kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
   kPacketInfo packet_info = {};
+  packet_info.current_frame_offset_ = frame_offset;
 
   const uint32_t first_frame_offset = xma::GetPacketFrameOffset(packet);
   BitStream stream(packet, kBitsPerPacket);
   stream.SetOffset(first_frame_offset);
 
+  // Reports the first frame starting at or after frame_offset (Xenia Edge 5dd1cdbbf), and the frame
+  // at frame_offset itself as the current one.
+  bool resolved = false;
+  auto consider_frame = [&](uint32_t offset, uint32_t size) {
+    if (!resolved && offset >= frame_offset) {
+      resolved = true;
+      packet_info.current_frame_offset_ = offset;
+    }
+    if (offset != frame_offset) {
+      return;
+    }
+    packet_info.current_frame_ = packet_info.frame_count_;
+    packet_info.current_frame_size_ = size;
+  };
+
   if (frame_offset < first_frame_offset) {
     packet_info.current_frame_ = 0;
     packet_info.current_frame_size_ = first_frame_offset - frame_offset;
+    resolved = true;
   }
 
   while (true) {
     if (stream.BitsRemaining() < kBitsPerFrameHeader) {
+      // This frame's 15-bit header runs into the next packet, so its size isn't readable yet. Count
+      // it anyway, or the caller takes the previous frame for the packet's last and skips this one.
+      // Size 0 sends it to the split-header path (Xenia Canary aee0871dd, Herman S.).
+      if (stream.BitsRemaining() > 0) {
+        consider_frame(static_cast<uint32_t>(stream.offset_bits()), 0);
+        packet_info.frame_count_++;
+      }
       break;
     }
 
@@ -367,10 +413,7 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
       break;
     }
 
-    if (stream.offset_bits() == frame_offset) {
-      packet_info.current_frame_ = packet_info.frame_count_;
-      packet_info.current_frame_size_ = static_cast<uint32_t>(frame_size);
-    }
+    consider_frame(static_cast<uint32_t>(stream.offset_bits()), static_cast<uint32_t>(frame_size));
 
     packet_info.frame_count_++;
 
@@ -598,6 +641,14 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   }
 
   kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
+
+  // Games can write loop_start one bit short of the frame boundary (Xenia Edge 5dd1cdbbf, Herman S.).
+  if (loop_start_skip_pending_ && packet_info.current_frame_offset_ != relative_offset) {
+    relative_offset = packet_info.current_frame_offset_;
+    data->input_buffer_read_offset = (packet_index * kBitsPerPacket) + relative_offset;
+    packet_info = GetPacketInfo(packet, relative_offset);
+  }
+
   const uint32_t packet_to_skip = skip_count + 1;
   const uint32_t next_packet_index = packet_index + packet_to_skip;
 
