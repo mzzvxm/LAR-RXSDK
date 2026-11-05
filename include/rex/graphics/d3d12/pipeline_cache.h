@@ -96,6 +96,11 @@ class PipelineCache {
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->state.load(std::memory_order_acquire);
   }
+  // MSAA line guard: the sample count (2 or 4) of the host render targets
+  // when the pipeline draws lines or wireframe on a multisampled target, 0 for
+  // any other pipeline (and with the ROV path, where the pipeline's sample count
+  // is 1). Reads only the description, which never changes after creation.
+  uint32_t GetMsaaLineGuardSamples(void* handle) const;
 
  private:
   REXPACKEDSTRUCT(ShaderStoredHeader, {

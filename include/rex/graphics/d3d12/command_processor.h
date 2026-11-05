@@ -182,6 +182,10 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return pipeline_cache_->GetD3D12PipelineByHandle(handle);
   }
+  // MSAA line guard: the pipeline to bind right before the pipeline with
+  // this handle, or nullptr if it needs none. Called by the replay of the
+  // deferred commands, on the submission thread too.
+  ID3D12PipelineState* GetMsaaLineGuardPipeline(void* handle) const;
 
   // Sets the current cached values to external ones. This is for cache
   // invalidation primarily. A submission must be open.
@@ -339,6 +343,17 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   // Need to await submission completion before calling.
   void ClearCommandAllocatorCache();
+
+  // MSAA line guard: triangle pipelines (without a pixel shader, nothing
+  // is ever drawn with them) for the 2 and 4 sample counts of the host render
+  // targets. A pipeline that draws lines, bound after one with another sample
+  // count (or none), makes some AMD drivers rasterize the triangles after it
+  // with the samples at the pixel centre; one of the same count right before
+  // it avoids that. Index: 0 for 2 samples, 1 for 4.
+  bool CreateMsaaLineGuardPipelines();
+  ID3D12RootSignature* msaa_line_guard_root_signature_ = nullptr;
+  ID3D12PipelineState* msaa_line_guard_pipelines_[2] = {};
+  mutable std::atomic<uint64_t> msaa_line_guard_binds_{0};
 
   // Request descriptors and automatically rebind the descriptor heap on the
   // draw command list. Refer to D3D12DescriptorHeapPool::Request for partial /

@@ -2675,6 +2675,44 @@ const std::vector<uint32_t>& PipelineCache::GetGeometryShader(GeometryShaderKey 
   return geometry_shaders_.emplace(key, std::move(shader)).first->second;
 }
 
+uint32_t PipelineCache::GetMsaaLineGuardSamples(void* handle) const {
+  const PipelineDescription& description =
+      reinterpret_cast<const Pipeline*>(handle)->description.description;
+  if (description.host_msaa_samples == xenos::MsaaSamples::k1X) {
+    return 0;
+  }
+  // A pipeline with a geometry shader (the quad lists have the line topology type
+  // and are rasterized as triangles) doesn't leave the sample positions at the
+  // pixel centre on the Radeon, so it needs no guard.
+  if (description.geometry_shader != PipelineGeometryShader::kNone) {
+    return 0;
+  }
+  // Triangles drawn as wireframe are rasterized as lines. For a vertex shader,
+  // the topology type (the same one CreateD3D12Pipeline gives the pipeline) is
+  // line.
+  bool lines = description.fill_mode_wireframe != 0;
+  if (!lines &&
+      !Shader::IsHostVertexShaderTypeDomain(
+          DxbcShaderTranslator::Modification(description.vertex_shader_modification)
+              .vertex.host_vertex_shader_type)) {
+    lines = PipelinePrimitiveTopologyType(description.primitive_topology_type_or_tessellation_mode) ==
+            PipelinePrimitiveTopologyType::kLine;
+  }
+  if (!lines) {
+    return 0;
+  }
+  if (render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock) {
+    // The pipeline's sample count is 1 there (the target's is forced).
+    return 0;
+  }
+  uint32_t samples = uint32_t(1) << uint32_t(description.host_msaa_samples);
+  if (samples == 2 && !render_target_cache_.msaa_2x_supported()) {
+    // As in CreateD3D12Pipeline.
+    samples = 4;
+  }
+  return samples <= 4 ? samples : 0;
+}
+
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     const PipelineRuntimeDescription& runtime_description) {
   const PipelineDescription& description = runtime_description.description;
