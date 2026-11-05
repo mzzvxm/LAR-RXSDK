@@ -69,6 +69,17 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
                     "automatic fallback to full synchronous readback")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(resolve_downscale_unit_layout, true, "GPU",
+                    "When draw resolution scaling is active, the pass that turns a scaled resolve "
+                    "back into the 1x data (the resolve readback of the title's textures) finds "
+                    "each guest pixel's host pixel by the scaled resolve layout's own addressing "
+                    "(host pixels are kept in N x 1 sub-units, column-major, inside one guest "
+                    "unit of N pixels). Off: the pass's original addressing (the pixel's byte "
+                    "address times the scale), which reads the right pixel at 1x and for 8 bytes "
+                    "a pixel at 2x2 only: with 4 bytes a pixel (the custom vinyl texture) half of "
+                    "the pixels at 2x2 come from a neighbouring block")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_INT32(query_occlusion_fake_sample_count, 1000, "GPU",
                      "Fake sample count for occlusion queries")
     .range(1, 100000)
@@ -187,6 +198,10 @@ bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) cons
     return legacy_backend_flag;
   }
   return REXCVAR_GET(readback_memexport);
+}
+
+uint32_t CommandProcessor::ResolveDownscaleUnitLayoutConstant() {
+  return REXCVAR_GET(resolve_downscale_unit_layout) ? 1u : 0u;
 }
 
 void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect) {
