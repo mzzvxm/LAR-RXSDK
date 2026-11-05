@@ -1452,6 +1452,8 @@ void XHostThread::Execute() {
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
 
+  thread_state_->context()->fpscr.InitHost();
+
   int ret = host_fn_();
 
   // Exit.
