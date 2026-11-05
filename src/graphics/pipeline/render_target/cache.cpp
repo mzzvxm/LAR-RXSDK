@@ -1451,6 +1451,77 @@ void RenderTargetCache::GetResolveCopyDispatchesToDump(
   }
 }
 
+// CHECK: ported without changes, not compiled or run here. While this was developed every direct
+// resolve was compared byte for byte with the EDRAM buffer path (a validation patch that is not
+// part of the SDK); compare pictures with direct_host_resolve on and off above 1x, and the
+// resolve time.
+RenderTargetCache::RenderTarget* RenderTargetCache::GetDirectResolveSource(
+    const draw_util::ResolveInfo& resolve_info,
+    DirectResolveSourceConstants& source_constants_out) const {
+  assert_true(GetPath() == Path::kHostRenderTargets);
+  bool is_depth = resolve_info.IsCopyingDepth();
+  const draw_util::ResolveEdramInfo& edram_info =
+      is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+  auto msaa_samples = xenos::MsaaSamples(edram_info.msaa_samples);
+  // The sample selection is within the samples of the pixels already
+  // (SanitizeCopySampleSelect in GetResolveInfo).
+
+  uint32_t base, row_length, rows, pitch;
+  resolve_info.GetCopyEdramTileSpan(base, row_length, rows, pitch);
+  if (!row_length || !rows || !pitch ||
+      base + (rows - 1) * pitch + row_length > xenos::kEdramTileCount) {
+    return nullptr;
+  }
+  // One render target must own all of it.
+  std::vector<ResolveCopyDumpRectangle>& rectangles = direct_resolve_rectangles_;
+  GetResolveCopyRectanglesToDump(base, row_length, rows, pitch, rectangles);
+  RenderTarget* render_target = nullptr;
+  uint32_t owned_tiles = 0;
+  for (const ResolveCopyDumpRectangle& rectangle : rectangles) {
+    if (render_target && rectangle.render_target != render_target) {
+      return nullptr;
+    }
+    render_target = rectangle.render_target;
+    owned_tiles += rectangle.rows == 1
+                       ? rectangle.row_last_end - rectangle.row_first_start
+                       : (row_length - rectangle.row_first_start) +
+                             (rectangle.rows - 2) * row_length + rectangle.row_last_end;
+  }
+  if (!render_target || owned_tiles != rows * row_length) {
+    return nullptr;
+  }
+  RenderTargetKey rt_key = render_target->key();
+  if (rt_key.is_depth != is_depth || rt_key.msaa_samples != msaa_samples ||
+      rt_key.GetPitchTiles() != pitch ||
+      (!is_depth && rt_key.Is64bpp() != (edram_info.format_is_64bpp != 0))) {
+    return nullptr;
+  }
+
+  // The render target's tiles are in its texture in rows with the same pitch,
+  // so the resolve's EDRAM sample grid is offset by whole tiles in it, unless
+  // the used tile columns of the resolve go past the end of a row of the
+  // render target.
+  if (edram_info.base_tiles < rt_key.base_tiles) {
+    return nullptr;
+  }
+  uint32_t offset_tiles = edram_info.base_tiles - rt_key.base_tiles;
+  uint32_t offset_tiles_y = offset_tiles / pitch;
+  uint32_t offset_tiles_x = offset_tiles - offset_tiles_y * pitch;
+  uint32_t first_column = (base - edram_info.base_tiles) % pitch;
+  if (offset_tiles_x + first_column + row_length > pitch) {
+    return nullptr;
+  }
+  uint32_t offset_x =
+      offset_tiles_x *
+      ((xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) * draw_resolution_scale_x());
+  uint32_t offset_y = offset_tiles_y * (xenos::kEdramTileHeightSamples * draw_resolution_scale_y());
+  if (offset_x > UINT16_MAX || offset_y > UINT16_MAX) {
+    return nullptr;
+  }
+  source_constants_out.offset = offset_x | (offset_y << 16);
+  return render_target;
+}
+
 bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
     const draw_util::ResolveInfo& resolve_info, Transfer::Rectangle& clear_rectangle_out,
     RenderTarget*& depth_render_target_out, std::vector<Transfer>& depth_transfers_out,

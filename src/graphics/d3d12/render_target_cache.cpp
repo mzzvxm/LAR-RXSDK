@@ -79,6 +79,30 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_scaled_cs.h"
 }  // namespace shaders
 
 const D3D12RenderTargetCache::ResolveCopyShaderCode
@@ -106,6 +130,65 @@ const D3D12RenderTargetCache::ResolveCopyShaderCode
          shaders::resolve_full_64bpp_scaled_cs, sizeof(shaders::resolve_full_64bpp_scaled_cs)},
         {shaders::resolve_full_128bpp_cs, sizeof(shaders::resolve_full_128bpp_cs),
          shaders::resolve_full_128bpp_scaled_cs, sizeof(shaders::resolve_full_128bpp_scaled_cs)},
+};
+
+const D3D12RenderTargetCache::ResolveDirectShaderCode
+    D3D12RenderTargetCache::kResolveDirectShaders[size_t(
+        draw_util::ResolveCopyShaderIndex::kCount)][2] = {
+        // kFast32bpp1x2xMSAA
+        {{shaders::resolve_direct_fast_32bpp_cs, sizeof(shaders::resolve_direct_fast_32bpp_cs),
+          shaders::resolve_direct_fast_32bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_fast_32bpp_scaled_cs)},
+         {shaders::resolve_direct_fast_32bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
+          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
+        // kFast32bpp4xMSAA - the 1x/2x MSAA one's
+        {},
+        // kFast64bpp1x2xMSAA
+        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
+          shaders::resolve_direct_fast_64bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_fast_64bpp_scaled_cs)},
+         {shaders::resolve_direct_fast_64bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
+          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
+        // kFast64bpp4xMSAA - the 1x/2x MSAA one's
+        {},
+        // kFull8bpp
+        {{shaders::resolve_direct_full_8bpp_cs, sizeof(shaders::resolve_direct_full_8bpp_cs),
+          shaders::resolve_direct_full_8bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_full_8bpp_scaled_cs)},
+         {shaders::resolve_direct_full_8bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_full_8bpp_msaa_cs),
+          shaders::resolve_direct_full_8bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_full_8bpp_msaa_scaled_cs)}},
+        // kFull16bpp
+        {{shaders::resolve_direct_full_16bpp_cs, sizeof(shaders::resolve_direct_full_16bpp_cs),
+          shaders::resolve_direct_full_16bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_full_16bpp_scaled_cs)},
+         {shaders::resolve_direct_full_16bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_full_16bpp_msaa_cs),
+          shaders::resolve_direct_full_16bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_full_16bpp_msaa_scaled_cs)}},
+        // kFull32bpp
+        {{shaders::resolve_direct_full_32bpp_cs, sizeof(shaders::resolve_direct_full_32bpp_cs),
+          shaders::resolve_direct_full_32bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_full_32bpp_scaled_cs)},
+         {shaders::resolve_direct_full_32bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_full_32bpp_msaa_cs),
+          shaders::resolve_direct_full_32bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_full_32bpp_msaa_scaled_cs)}},
+        // kFull64bpp
+        {{shaders::resolve_direct_full_64bpp_cs, sizeof(shaders::resolve_direct_full_64bpp_cs),
+          shaders::resolve_direct_full_64bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_full_64bpp_scaled_cs)},
+         {shaders::resolve_direct_full_64bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_full_64bpp_msaa_cs),
+          shaders::resolve_direct_full_64bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_full_64bpp_msaa_scaled_cs)}},
+        // kFull128bpp - through the EDRAM buffer.
+        {},
 };
 
 const uint32_t D3D12RenderTargetCache::kTransferUsedRootParameters[size_t(
@@ -333,13 +416,6 @@ bool D3D12RenderTargetCache::Initialize() {
     Shutdown();
     return false;
   }
-  // Direct resolve currently shares the root signature shape with the resolve
-  // copy pass (constants + destination UAV + source SRV) and may diverge later.
-  direct_resolve_root_signature_color_ = resolve_copy_root_signature_;
-  direct_resolve_root_signature_depth_ = resolve_copy_root_signature_;
-  direct_resolve_root_signature_color_->AddRef();
-  direct_resolve_root_signature_depth_->AddRef();
-
   // Create the resolve copying pipelines.
   for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
     const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
@@ -795,6 +871,100 @@ bool D3D12RenderTargetCache::Initialize() {
       return false;
     }
 
+    // Direct resolves (direct_host_resolve): the resolve copy root signature
+    // with the source constants, and the render target views instead of the
+    // EDRAM buffer, as separate tables as bindless one-use descriptors are not
+    // contiguous. Optional - without them, resolves go through the EDRAM
+    // buffer.
+    {
+      D3D12_ROOT_PARAMETER direct_resolve_root_parameters[4];
+      direct_resolve_root_parameters[0] = resolve_copy_root_parameters[0];
+      direct_resolve_root_parameters[0].Constants.Num32BitValues +=
+          sizeof(DirectResolveSourceConstants) / sizeof(uint32_t);
+      direct_resolve_root_parameters[1] = resolve_copy_root_parameters[1];
+      D3D12_DESCRIPTOR_RANGE direct_resolve_source_ranges[2];
+      for (uint32_t i = 0; i < 2; ++i) {
+        D3D12_DESCRIPTOR_RANGE& direct_resolve_source_range = direct_resolve_source_ranges[i];
+        direct_resolve_source_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        direct_resolve_source_range.NumDescriptors = 1;
+        direct_resolve_source_range.BaseShaderRegister = i;
+        direct_resolve_source_range.RegisterSpace = 0;
+        direct_resolve_source_range.OffsetInDescriptorsFromTableStart = 0;
+        D3D12_ROOT_PARAMETER& direct_resolve_source_parameter =
+            direct_resolve_root_parameters[2 + i];
+        direct_resolve_source_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        direct_resolve_source_parameter.DescriptorTable.NumDescriptorRanges = 1;
+        direct_resolve_source_parameter.DescriptorTable.pDescriptorRanges =
+            &direct_resolve_source_range;
+        direct_resolve_source_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+      }
+      D3D12_ROOT_SIGNATURE_DESC direct_resolve_root_signature_desc;
+      direct_resolve_root_signature_desc.NumParameters =
+          UINT(rex::countof(direct_resolve_root_parameters));
+      direct_resolve_root_signature_desc.pParameters = direct_resolve_root_parameters;
+      direct_resolve_root_signature_desc.NumStaticSamplers = 0;
+      direct_resolve_root_signature_desc.pStaticSamplers = nullptr;
+      direct_resolve_root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+      direct_resolve_root_signature_ =
+          ui::d3d12::util::CreateRootSignature(provider, direct_resolve_root_signature_desc);
+      bool null_srvs_allocated = true;
+      for (uint32_t i = 0; i < 2; ++i) {
+        for (uint32_t j = 0; j < 2; ++j) {
+          direct_resolve_null_srvs_[i][j] = descriptor_pool_srv_->AllocateDescriptor();
+          null_srvs_allocated &= direct_resolve_null_srvs_[i][j].IsValid();
+        }
+      }
+      if (direct_resolve_root_signature_ && null_srvs_allocated) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC null_srv_desc;
+        null_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        for (uint32_t i = 0; i < 2; ++i) {
+          null_srv_desc.Format = i ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R32_FLOAT;
+          null_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+          null_srv_desc.Texture2D.MostDetailedMip = 0;
+          null_srv_desc.Texture2D.MipLevels = 1;
+          null_srv_desc.Texture2D.PlaneSlice = 0;
+          null_srv_desc.Texture2D.ResourceMinLODClamp = 0.0f;
+          device->CreateShaderResourceView(nullptr, &null_srv_desc,
+                                           direct_resolve_null_srvs_[i][0].GetHandle());
+          null_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+          device->CreateShaderResourceView(nullptr, &null_srv_desc,
+                                           direct_resolve_null_srvs_[i][1].GetHandle());
+        }
+        for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
+          for (size_t j = 0; j < 2; ++j) {
+            const ResolveDirectShaderCode& direct_shader_code = kResolveDirectShaders[i][j];
+            const void* direct_shader =
+                draw_resolution_scaled ? direct_shader_code.scaled : direct_shader_code.unscaled;
+            if (!direct_shader) {
+              continue;
+            }
+            ID3D12PipelineState* direct_pipeline = ui::d3d12::util::CreateComputePipeline(
+                device, direct_shader,
+                draw_resolution_scaled ? direct_shader_code.scaled_size
+                                       : direct_shader_code.unscaled_size,
+                direct_resolve_root_signature_);
+            if (!direct_pipeline) {
+              REXGPU_WARN(
+                  "D3D12RenderTargetCache: Failed to create the direct {} pipeline for {} "
+                  "render targets",
+                  draw_util::resolve_copy_shader_info[i].debug_name,
+                  j ? "multisampled" : "single-sampled");
+              continue;
+            }
+            std::u16string direct_pipeline_name = rex::string::to_utf16(
+                fmt::format("Direct {} from {} RT",
+                            draw_util::resolve_copy_shader_info[i].debug_name, j ? "MSAA" : "1x"));
+            direct_pipeline->SetName(reinterpret_cast<LPCWSTR>(direct_pipeline_name.c_str()));
+            direct_resolve_pipelines_[i][j] = direct_pipeline;
+          }
+        }
+      } else {
+        REXGPU_WARN(
+            "D3D12RenderTargetCache: Failed to create the direct resolve root signature or "
+            "null descriptors, resolves will go through the EDRAM buffer");
+      }
+    }
+
     // k_32_FLOAT and k_32_32_FLOAT clear root signature and pipelines.
     D3D12_ROOT_PARAMETER uint32_rtv_clear_root_constants;
     uint32_rtv_clear_root_constants.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -977,21 +1147,17 @@ void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
     }
   }
   dump_pipelines_.clear();
-  for (const auto& direct_resolve_pipeline_pair : direct_resolve_pipelines_) {
-    bool aliased_resolve_copy_pipeline = false;
-    for (ID3D12PipelineState* resolve_copy_pipeline : resolve_copy_pipelines_) {
-      if (direct_resolve_pipeline_pair.second == resolve_copy_pipeline) {
-        aliased_resolve_copy_pipeline = true;
-        break;
-      }
-    }
-    if (direct_resolve_pipeline_pair.second && !aliased_resolve_copy_pipeline) {
-      direct_resolve_pipeline_pair.second->Release();
+  for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
+    for (size_t j = 0; j < 2; ++j) {
+      ui::d3d12::util::ReleaseAndNull(direct_resolve_pipelines_[i][j]);
     }
   }
-  direct_resolve_pipelines_.clear();
-  ui::d3d12::util::ReleaseAndNull(direct_resolve_root_signature_depth_);
-  ui::d3d12::util::ReleaseAndNull(direct_resolve_root_signature_color_);
+  for (size_t i = 0; i < 2; ++i) {
+    for (size_t j = 0; j < 2; ++j) {
+      direct_resolve_null_srvs_[i][j].Free();
+    }
+  }
+  ui::d3d12::util::ReleaseAndNull(direct_resolve_root_signature_);
   ui::d3d12::util::ReleaseAndNull(dump_root_signature_depth_);
   ui::d3d12::util::ReleaseAndNull(dump_root_signature_color_);
 
@@ -1194,18 +1360,38 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
-      bool direct_resolved = false;
+      // With direct_host_resolve, read the render target that owns the area
+      // directly when possible, instead of dumping the render targets to the
+      // EDRAM buffer and copying from that.
+      D3D12RenderTarget* direct_source = nullptr;
+      bool direct_source_is_uint = false;
+      DirectResolveSourceConstants direct_source_constants;
+      ID3D12PipelineState* direct_pipeline = nullptr;
       if (GetPath() == Path::kHostRenderTargets) {
         if (REXCVAR_GET(direct_host_resolve)) {
-          direct_resolved =
-              TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
-          if (direct_resolved) {
-            ++direct_resolve_success_count_;
-          } else {
-            ++direct_resolve_fallback_count_;
+          // The source must have the sample count of the resolve.
+          const draw_util::ResolveEdramInfo& direct_edram_info =
+              resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info
+                                            : resolve_info.color_edram_info;
+          direct_pipeline =
+              direct_resolve_pipelines_[size_t(GetDirectResolveCopyShader(copy_shader))][size_t(
+                  xenos::MsaaSamples(direct_edram_info.msaa_samples) != xenos::MsaaSamples::k1X)];
+          RenderTarget* source = direct_pipeline
+                                     ? GetDirectResolveSource(resolve_info, direct_source_constants)
+                                     : nullptr;
+          DirectResolveSourceConversion direct_source_conversion;
+          if (source && GetDirectResolveSourceConversion(source->key(), direct_source_conversion)) {
+            direct_source = static_cast<D3D12RenderTarget*>(source);
+            direct_source_is_uint =
+                direct_source_conversion >= DirectResolveSourceConversion::kUInt16x2 &&
+                direct_source_conversion <= DirectResolveSourceConversion::kUInt32x2;
+            direct_source_constants.info =
+                uint32_t(direct_source_conversion) |
+                (draw_util::GetD3D10SampleIndexForGuest2xMSAA(0, msaa_2x_supported_) << 4) |
+                (draw_util::GetD3D10SampleIndexForGuest2xMSAA(1, msaa_2x_supported_) << 6);
           }
         }
-        if (!direct_resolved) {
+        if (!direct_source) {
           // Dump the current contents of the render targets owning the affected
           // range to edram_buffer_.
           uint32_t dump_base;
@@ -1243,11 +1429,16 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
         // resolve buffer with scaling because only at least 128 * 2^20 R32
         // elements must be addressable
         // (D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP).
+        // With a direct resolve, the two source views are copied to one-use
+        // descriptors after the destination one.
         ui::d3d12::util::DescriptorCpuGpuHandlePair descriptor_dest;
         ui::d3d12::util::DescriptorCpuGpuHandlePair descriptor_source;
-        ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[2];
+        ui::d3d12::util::DescriptorCpuGpuHandlePair descriptors[4];
+        uint32_t descriptor_dest_count =
+            bindless_resources_used_ ? uint32_t(draw_resolution_scaled) : 1;
         if (command_processor_.RequestOneUseSingleViewDescriptors(
-                bindless_resources_used_ ? uint32_t(draw_resolution_scaled) : 2, descriptors)) {
+                descriptor_dest_count + (direct_source ? 2 : uint32_t(!bindless_resources_used_)),
+                descriptors)) {
           if (bindless_resources_used_) {
             if (draw_resolution_scaled) {
               descriptor_dest = descriptors[0];
@@ -1255,12 +1446,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
               descriptor_dest = command_processor_.GetSharedMemoryUintPow2BindlessUAVHandlePair(
                   copy_shader_info.dest_bpe_log2);
             }
-            if (copy_shader_info.source_is_raw) {
-              descriptor_source = command_processor_.GetSystemBindlessViewHandlePair(
-                  D3D12CommandProcessor::SystemBindlessView::kEdramRawSRV);
-            } else {
-              descriptor_source = command_processor_.GetEdramUintPow2BindlessSRVHandlePair(
-                  copy_shader_info.source_bpe_log2);
+            if (!direct_source) {
+              if (copy_shader_info.source_is_raw) {
+                descriptor_source = command_processor_.GetSystemBindlessViewHandlePair(
+                    D3D12CommandProcessor::SystemBindlessView::kEdramRawSRV);
+              } else {
+                descriptor_source = command_processor_.GetEdramUintPow2BindlessSRVHandlePair(
+                    copy_shader_info.source_bpe_log2);
+              }
             }
           } else {
             descriptor_dest = descriptors[0];
@@ -1268,12 +1461,14 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
               shared_memory.WriteUintPow2UAVDescriptor(descriptor_dest.first,
                                                        copy_shader_info.dest_bpe_log2);
             }
-            descriptor_source = descriptors[1];
-            if (copy_shader_info.source_is_raw) {
-              WriteEdramRawSRVDescriptor(descriptor_source.first);
-            } else {
-              WriteEdramUintPow2SRVDescriptor(descriptor_source.first,
-                                              copy_shader_info.source_bpe_log2);
+            if (!direct_source) {
+              descriptor_source = descriptors[1];
+              if (copy_shader_info.source_is_raw) {
+                WriteEdramRawSRVDescriptor(descriptor_source.first);
+              } else {
+                WriteEdramUintPow2SRVDescriptor(descriptor_source.first,
+                                                copy_shader_info.source_bpe_log2);
+              }
             }
           }
           if (draw_resolution_scaled) {
@@ -1284,21 +1479,63 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
           } else {
             shared_memory.UseForWriting();
           }
-          TransitionEdramBuffer(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
           // Submit the resolve.
-          command_list.D3DSetComputeRootSignature(resolve_copy_root_signature_);
-          command_list.D3DSetComputeRootDescriptorTable(2, descriptor_source.second);
-          command_list.D3DSetComputeRootDescriptorTable(1, descriptor_dest.second);
-          if (draw_resolution_scaled) {
-            command_list.D3DSetComputeRoot32BitConstants(
-                0, sizeof(copy_shader_constants.dest_relative) / sizeof(uint32_t),
-                &copy_shader_constants.dest_relative, 0);
+          if (direct_source) {
+            ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
+            bool direct_source_is_multisampled =
+                direct_source->key().msaa_samples != xenos::MsaaSamples::k1X;
+            D3D12_CPU_DESCRIPTOR_HANDLE direct_source_views[2];
+            if (direct_source->key().is_depth) {
+              direct_source_views[0] = direct_source->descriptor_srv().GetHandle();
+              direct_source_views[1] = direct_source->descriptor_srv_stencil().GetHandle();
+            } else if (direct_source_is_uint) {
+              direct_source_views[0] =
+                  direct_resolve_null_srvs_[0][direct_source_is_multisampled].GetHandle();
+              direct_source_views[1] = direct_source->descriptor_srv().GetHandle();
+            } else {
+              direct_source_views[0] = direct_source->descriptor_srv().GetHandle();
+              direct_source_views[1] =
+                  direct_resolve_null_srvs_[1][direct_source_is_multisampled].GetHandle();
+            }
+            for (uint32_t i = 0; i < 2; ++i) {
+              device->CopyDescriptorsSimple(1, descriptors[descriptor_dest_count + i].first,
+                                            direct_source_views[i],
+                                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            }
+            command_processor_.PushTransitionBarrier(
+                direct_source->resource(),
+                direct_source->SetResourceState(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            command_list.D3DSetComputeRootSignature(direct_resolve_root_signature_);
+            for (uint32_t i = 0; i < 2; ++i) {
+              command_list.D3DSetComputeRootDescriptorTable(
+                  2 + i, descriptors[descriptor_dest_count + i].second);
+            }
           } else {
-            command_list.D3DSetComputeRoot32BitConstants(
-                0, sizeof(copy_shader_constants) / sizeof(uint32_t), &copy_shader_constants, 0);
+            TransitionEdramBuffer(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            command_list.D3DSetComputeRootSignature(resolve_copy_root_signature_);
+            command_list.D3DSetComputeRootDescriptorTable(2, descriptor_source.second);
           }
-          command_processor_.SetExternalPipeline(resolve_copy_pipelines_[size_t(copy_shader)]);
+          command_list.D3DSetComputeRootDescriptorTable(1, descriptor_dest.second);
+          uint32_t copy_shader_constant_count;
+          if (draw_resolution_scaled) {
+            copy_shader_constant_count =
+                sizeof(copy_shader_constants.dest_relative) / sizeof(uint32_t);
+            command_list.D3DSetComputeRoot32BitConstants(0, copy_shader_constant_count,
+                                                         &copy_shader_constants.dest_relative, 0);
+          } else {
+            copy_shader_constant_count = sizeof(copy_shader_constants) / sizeof(uint32_t);
+            command_list.D3DSetComputeRoot32BitConstants(0, copy_shader_constant_count,
+                                                         &copy_shader_constants, 0);
+          }
+          if (direct_source) {
+            command_list.D3DSetComputeRoot32BitConstants(
+                0, sizeof(direct_source_constants) / sizeof(uint32_t), &direct_source_constants,
+                copy_shader_constant_count);
+          }
+          command_processor_.SetExternalPipeline(
+              direct_source ? direct_pipeline : resolve_copy_pipelines_[size_t(copy_shader)]);
           command_processor_.SubmitBarriers();
           command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
 
@@ -5522,69 +5759,56 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
   return pipeline;
 }
 
-ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDirectResolvePipeline(
-    DirectResolvePipelineKey key) {
-  auto pipeline_it = direct_resolve_pipelines_.find(key);
-  if (pipeline_it != direct_resolve_pipelines_.end()) {
-    return pipeline_it->second;
-  }
-  ID3D12PipelineState* pipeline = nullptr;
-  // Until dedicated direct host RT -> shared memory shaders are added, reuse
-  // the resolve copy pipelines to keep all resolve shader modes wired for the
-  // direct preflight path.
-  size_t copy_shader_index = size_t(key.copy_shader);
-  if (copy_shader_index < size_t(draw_util::ResolveCopyShaderIndex::kCount)) {
-    pipeline = resolve_copy_pipelines_[copy_shader_index];
-  }
-  direct_resolve_pipelines_.emplace(key, pipeline);
-  return pipeline;
-}
-
-bool D3D12RenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
-                                                    draw_util::ResolveCopyShaderIndex copy_shader,
-                                                    bool draw_resolution_scaled) {
-  ++direct_resolve_attempt_count_;
-  (void)copy_shader;
-  (void)draw_resolution_scaled;
-  if (!direct_resolve_root_signature_color_ || !direct_resolve_root_signature_depth_) {
-    return false;
-  }
-
-  uint32_t dump_base;
-  uint32_t dump_row_length_used;
-  uint32_t dump_rows;
-  uint32_t dump_pitch;
-  resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
-  GetResolveCopyDispatchesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
-                                 dump_rectangles_, direct_resolve_dispatches_);
-  if (direct_resolve_dispatches_.empty()) {
-    return false;
-  }
-
-  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
-    const auto* render_target = static_cast<const D3D12RenderTarget*>(rectangle.render_target);
-    if (render_target == nullptr) {
-      return false;
-    }
-    DumpPipelineKey dump_pipeline_key;
-    dump_pipeline_key.msaa_samples = render_target->key().msaa_samples;
-    dump_pipeline_key.resource_format = render_target->key().resource_format;
-    dump_pipeline_key.is_depth = render_target->key().is_depth;
-    if (!GetOrCreateDumpPipeline(dump_pipeline_key)) {
-      return false;
-    }
-    DirectResolvePipelineKey direct_pipeline_key;
-    direct_pipeline_key.dump_pipeline_key = dump_pipeline_key;
-    direct_pipeline_key.copy_shader = copy_shader;
-    direct_pipeline_key.draw_resolution_scaled = draw_resolution_scaled;
-    if (!GetOrCreateDirectResolvePipeline(direct_pipeline_key)) {
-      return false;
+bool D3D12RenderTargetCache::GetDirectResolveSourceConversion(
+    RenderTargetKey key, DirectResolveSourceConversion& conversion_out) const {
+  // The same conversions as in GetOrCreateDumpPipeline.
+  if (key.is_depth) {
+    switch (key.GetDepthFormat()) {
+      case xenos::DepthRenderTargetFormat::kD24S8:
+        conversion_out = DirectResolveSourceConversion::kDepthUNorm24;
+        return true;
+      case xenos::DepthRenderTargetFormat::kD24FS8:
+        conversion_out = (!depth_float24_convert_in_pixel_shader() && depth_float24_round())
+                             ? DirectResolveSourceConversion::kDepthFloat24Round
+                             : DirectResolveSourceConversion::kDepthFloat24;
+        return true;
+      default:
+        return false;
     }
   }
-
-  // Dedicated direct resolve dispatches are staged behind the same preflight;
-  // keep using the existing dump path until source-image direct shaders land.
-  return DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+  switch (key.GetColorFormat()) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+      conversion_out = DirectResolveSourceConversion::k_8_8_8_8;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+      conversion_out = DirectResolveSourceConversion::k_8_8_8_8_PWLGamma;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      conversion_out = DirectResolveSourceConversion::k_2_10_10_10;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      conversion_out = DirectResolveSourceConversion::k_2_10_10_10_Float;
+      return true;
+    // Loaded through unsigned integer views (GetColorOwnershipTransferDXGIFormat).
+    case xenos::ColorRenderTargetFormat::k_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+      conversion_out = DirectResolveSourceConversion::kUInt16x2;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
+      conversion_out = DirectResolveSourceConversion::kUInt16x4;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+      conversion_out = DirectResolveSourceConversion::kUInt32;
+      return true;
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
+      conversion_out = DirectResolveSourceConversion::kUInt32x2;
+      return true;
+    default:
+      return false;
+  }
 }
 
 bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,

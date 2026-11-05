@@ -541,6 +541,54 @@ class RenderTargetCache {
                                       std::vector<ResolveCopyDumpRectangle>& rectangles_out,
                                       std::vector<ResolveCopyDispatch>& dispatches_out) const;
 
+  // How a direct resolve (direct_host_resolve) converts the samples of a host
+  // render target to their EDRAM representation, the same way as dumping
+  // (kXeResolveDirectSourceConversion_* in resolve_direct.xesli).
+  enum class DirectResolveSourceConversion : uint32_t {
+    k_8_8_8_8,
+    k_8_8_8_8_PWLGamma,
+    k_2_10_10_10,
+    k_2_10_10_10_Float,
+    kUInt16x2,
+    kUInt16x4,
+    kUInt32,
+    kUInt32x2,
+    kDepthUNorm24,
+    kDepthFloat24,
+    kDepthFloat24Round,
+  };
+  // The constants of direct resolve shaders after the resolve copy constants
+  // (xe_resolve_direct_source_info and xe_resolve_direct_source_offset).
+  struct DirectResolveSourceConstants {
+    // Bits 0:3 - DirectResolveSourceConversion.
+    // Bits 4:5, 6:7 - host sample indices of guest 2x MSAA samples 0 and 1.
+    uint32_t info;
+    // Offset of the resolve area in the render target, in samples - bits 0:15
+    // horizontally, 16:31 vertically.
+    uint32_t offset;
+  };
+  // The render target to resolve from directly, instead of dumping the render
+  // targets to the EDRAM buffer and copying from that, if there's one that
+  // owns the whole area the resolve copy reads, with the same pitch, sample
+  // count and sample size, without EDRAM addressing wrapping around in the
+  // area. Fills the offset in source_constants_out, not the info.
+  RenderTarget* GetDirectResolveSource(const draw_util::ResolveInfo& resolve_info,
+                                       DirectResolveSourceConstants& source_constants_out) const;
+  // The copy shader whose direct resolve shader a copy shader uses: the fast
+  // 4x MSAA ones use the 1x/2x MSAA ones, which read any sample of a
+  // multisampled render target.
+  static draw_util::ResolveCopyShaderIndex GetDirectResolveCopyShader(
+      draw_util::ResolveCopyShaderIndex copy_shader) {
+    switch (copy_shader) {
+      case draw_util::ResolveCopyShaderIndex::kFast32bpp4xMSAA:
+        return draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA;
+      case draw_util::ResolveCopyShaderIndex::kFast64bpp4xMSAA:
+        return draw_util::ResolveCopyShaderIndex::kFast64bpp1x2xMSAA;
+      default:
+        return copy_shader;
+    }
+  }
+
   // Sets up the needed render targets and transfers to perform a clear in a
   // resolve operation via a host render target clear. resolve_info is expected
   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
@@ -593,6 +641,9 @@ class RenderTargetCache {
   };
   ClearRectangleWaitingForDraw clear_rectangles_waiting_for_draw_[2];
   std::vector<Transfer> clear_rectangle_transfers_[2];
+
+  // Temporary storage for GetDirectResolveSource.
+  mutable std::vector<ResolveCopyDumpRectangle> direct_resolve_rectangles_;
 
   // For host render targets.
 
