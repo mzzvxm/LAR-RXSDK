@@ -1,2 +1,0 @@
-#define XE_RESOLVE_DIRECT_SOURCE_MSAA
-#include "resolve_direct_full_64bpp.xesli"

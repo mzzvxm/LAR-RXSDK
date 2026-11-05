@@ -79,14 +79,14 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_64bpp_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_full_8bpp_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_msaa_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_32bpp_msaa_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_msaa_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_fast_64bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_32bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_64bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_64bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_64bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_fast_64bpp_msaa_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_8bpp_msaa_cs.h"
@@ -95,14 +95,14 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_msaa_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_16bpp_msaa_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_msaa_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_32bpp_msaa_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_scaled_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_cs.h"
-#include "../shaders/bytecode/d3d12_5_1/resolve_direct_full_64bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_32bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_32bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_32bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_32bpp_msaa_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_64bpp_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_64bpp_scaled_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_64bpp_msaa_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/resolve_direct_batched_full_64bpp_msaa_scaled_cs.h"
 }  // namespace shaders
 
 const D3D12RenderTargetCache::ResolveCopyShaderCode
@@ -132,27 +132,32 @@ const D3D12RenderTargetCache::ResolveCopyShaderCode
          shaders::resolve_full_128bpp_scaled_cs, sizeof(shaders::resolve_full_128bpp_scaled_cs)},
 };
 
+// The fast and full 32 and 64 bpp entries are the shaders built with
+// XE_RESOLVE_DIRECT_BATCHED_LOADS (the loads of a thread issued together); the full 8 and 16 bpp
+// ones are the plain ones.
+// CHECK: the generated headers weren't rebuilt here, and nothing was compiled or run; compare the
+// resolve time (a gain is expected on a GPU with few compute units, such as the Radeon iGPU).
 const D3D12RenderTargetCache::ResolveDirectShaderCode
     D3D12RenderTargetCache::kResolveDirectShaders[size_t(
         draw_util::ResolveCopyShaderIndex::kCount)][2] = {
         // kFast32bpp1x2xMSAA
-        {{shaders::resolve_direct_fast_32bpp_cs, sizeof(shaders::resolve_direct_fast_32bpp_cs),
-          shaders::resolve_direct_fast_32bpp_scaled_cs,
-          sizeof(shaders::resolve_direct_fast_32bpp_scaled_cs)},
-         {shaders::resolve_direct_fast_32bpp_msaa_cs,
-          sizeof(shaders::resolve_direct_fast_32bpp_msaa_cs),
-          shaders::resolve_direct_fast_32bpp_msaa_scaled_cs,
-          sizeof(shaders::resolve_direct_fast_32bpp_msaa_scaled_cs)}},
+        {{shaders::resolve_direct_batched_fast_32bpp_cs, sizeof(shaders::resolve_direct_batched_fast_32bpp_cs),
+          shaders::resolve_direct_batched_fast_32bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_fast_32bpp_scaled_cs)},
+         {shaders::resolve_direct_batched_fast_32bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_batched_fast_32bpp_msaa_cs),
+          shaders::resolve_direct_batched_fast_32bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_fast_32bpp_msaa_scaled_cs)}},
         // kFast32bpp4xMSAA - the 1x/2x MSAA one's
         {},
         // kFast64bpp1x2xMSAA
-        {{shaders::resolve_direct_fast_64bpp_cs, sizeof(shaders::resolve_direct_fast_64bpp_cs),
-          shaders::resolve_direct_fast_64bpp_scaled_cs,
-          sizeof(shaders::resolve_direct_fast_64bpp_scaled_cs)},
-         {shaders::resolve_direct_fast_64bpp_msaa_cs,
-          sizeof(shaders::resolve_direct_fast_64bpp_msaa_cs),
-          shaders::resolve_direct_fast_64bpp_msaa_scaled_cs,
-          sizeof(shaders::resolve_direct_fast_64bpp_msaa_scaled_cs)}},
+        {{shaders::resolve_direct_batched_fast_64bpp_cs, sizeof(shaders::resolve_direct_batched_fast_64bpp_cs),
+          shaders::resolve_direct_batched_fast_64bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_fast_64bpp_scaled_cs)},
+         {shaders::resolve_direct_batched_fast_64bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_batched_fast_64bpp_msaa_cs),
+          shaders::resolve_direct_batched_fast_64bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_fast_64bpp_msaa_scaled_cs)}},
         // kFast64bpp4xMSAA - the 1x/2x MSAA one's
         {},
         // kFull8bpp
@@ -172,21 +177,21 @@ const D3D12RenderTargetCache::ResolveDirectShaderCode
           shaders::resolve_direct_full_16bpp_msaa_scaled_cs,
           sizeof(shaders::resolve_direct_full_16bpp_msaa_scaled_cs)}},
         // kFull32bpp
-        {{shaders::resolve_direct_full_32bpp_cs, sizeof(shaders::resolve_direct_full_32bpp_cs),
-          shaders::resolve_direct_full_32bpp_scaled_cs,
-          sizeof(shaders::resolve_direct_full_32bpp_scaled_cs)},
-         {shaders::resolve_direct_full_32bpp_msaa_cs,
-          sizeof(shaders::resolve_direct_full_32bpp_msaa_cs),
-          shaders::resolve_direct_full_32bpp_msaa_scaled_cs,
-          sizeof(shaders::resolve_direct_full_32bpp_msaa_scaled_cs)}},
+        {{shaders::resolve_direct_batched_full_32bpp_cs, sizeof(shaders::resolve_direct_batched_full_32bpp_cs),
+          shaders::resolve_direct_batched_full_32bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_full_32bpp_scaled_cs)},
+         {shaders::resolve_direct_batched_full_32bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_batched_full_32bpp_msaa_cs),
+          shaders::resolve_direct_batched_full_32bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_full_32bpp_msaa_scaled_cs)}},
         // kFull64bpp
-        {{shaders::resolve_direct_full_64bpp_cs, sizeof(shaders::resolve_direct_full_64bpp_cs),
-          shaders::resolve_direct_full_64bpp_scaled_cs,
-          sizeof(shaders::resolve_direct_full_64bpp_scaled_cs)},
-         {shaders::resolve_direct_full_64bpp_msaa_cs,
-          sizeof(shaders::resolve_direct_full_64bpp_msaa_cs),
-          shaders::resolve_direct_full_64bpp_msaa_scaled_cs,
-          sizeof(shaders::resolve_direct_full_64bpp_msaa_scaled_cs)}},
+        {{shaders::resolve_direct_batched_full_64bpp_cs, sizeof(shaders::resolve_direct_batched_full_64bpp_cs),
+          shaders::resolve_direct_batched_full_64bpp_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_full_64bpp_scaled_cs)},
+         {shaders::resolve_direct_batched_full_64bpp_msaa_cs,
+          sizeof(shaders::resolve_direct_batched_full_64bpp_msaa_cs),
+          shaders::resolve_direct_batched_full_64bpp_msaa_scaled_cs,
+          sizeof(shaders::resolve_direct_batched_full_64bpp_msaa_scaled_cs)}},
         // kFull128bpp - through the EDRAM buffer.
         {},
 };
