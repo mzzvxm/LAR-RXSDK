@@ -1840,6 +1840,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                 swapchain_effect, paint_context_.swapchain_render_pass);
             if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
               guest_output_flow.effect_count = 0;
+            } else {
+              // The format of the render pass the pipeline was made for, so the check
+              // above recreates it only when the swapchain's format changes (HDR on or
+              // off), not in every paint, where it also waited for the GPU to finish the
+              // previous paint.
+              swapchain_effect_pipeline.swapchain_format =
+                  paint_context_.swapchain_render_pass_format;
             }
           }
         }
