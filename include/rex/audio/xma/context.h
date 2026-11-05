@@ -164,6 +164,8 @@ struct kPacketInfo {
   uint8_t frame_count_ = 0;
   uint8_t current_frame_ = 0;
   uint32_t current_frame_size_ = 0;
+  // The first frame starting at or after the requested offset (Xenia Edge 5dd1cdbbf).
+  uint32_t current_frame_offset_ = 0;
 
   bool isLastFrameInPacket() const {
     return frame_count_ == 0 || current_frame_ == frame_count_ - 1;
