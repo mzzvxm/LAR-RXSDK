@@ -16,6 +16,7 @@
 #include <SPIRV/GLSL.std.450.h>
 
 #include <rex/assert.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/render_target/cache.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/util/draw.h>
@@ -651,7 +652,9 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
                                                   uint32_t host_sample_index, float threshold_base,
                                                   float threshold_offset_scale) -> spv::Id {
           spv::Id sample_threshold = builder_->createBinOp(
-              spv::OpFSub, type_float_, builder_->makeFloatConstant(threshold_base),
+              spv::OpFSub, type_float_,
+              builder_->makeFloatConstant(threshold_base -
+                                          rex::graphics::kAlphaToMaskTolerance),
               builder_->createBinOp(spv::OpFMul, type_float_, alpha_to_coverage_offset_float,
                                     builder_->makeFloatConstant(threshold_offset_scale)));
           spv::Id sample_covered = builder_->createBinOp(spv::OpFOrdGreaterThanEqual, type_bool_,

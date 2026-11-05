@@ -40,6 +40,12 @@ REXCVAR_DECLARE(bool, native_stencil_value_output);
 REXCVAR_DECLARE(bool, native_stencil_value_output_d3d12_intel);
 REXCVAR_DECLARE(bool, gamma_render_target_as_unorm16);
 REXCVAR_DECLARE(bool, native_2x_msaa);
+// Alpha to mask: an alpha this far under a coverage threshold still passes it, about half a step of
+// 8-bit alpha (0.0039 / 2): the comparison of alpha rounded to 8 bits. A shader alpha that comes out a
+// hair under 1.0 on the host lost a sample at the threshold 1.0, which showed as a lattice of dots.
+namespace rex::graphics {
+inline constexpr float kAlphaToMaskTolerance = 0.00195f;
+}
 REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
 REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
 REXCVAR_DECLARE(bool, direct_host_resolve);
