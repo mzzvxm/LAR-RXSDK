@@ -414,6 +414,9 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
   // Initialize the pipeline storage stream - read pipeline descriptions and
   // collect used shader modifications to translate.
   std::vector<PipelineStoredDescription> pipeline_stored_descriptions;
+  // The descriptions in the file before the first corrupted one, including those this device
+  // can't create (skipped at load, but kept in the file for devices that can).
+  size_t pipeline_storage_valid_count = 0;
   // <Shader hash, modification bits>.
   std::set<std::pair<uint64_t, uint64_t>> shader_translations_needed;
   auto pipeline_storage_file_path =
@@ -489,6 +492,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         }
       }
       pipeline_stored_descriptions.resize(pipeline_storage_kept_count);
+      pipeline_storage_valid_count = pipeline_storage_read_count;
       if (pipeline_storage_skipped_unsupported_count || pipeline_storage_skipped_corrupted_count) {
         REXGPU_INFO(
             "VulkanPipelineCache: Pipeline storage filtering kept {} descriptions (skipped {} "
@@ -688,12 +692,15 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
   }
 
   // If any pipeline descriptions were corrupted (or the whole file has excess
-  // bytes in the end), truncate to the last valid pipeline description.
+  // bytes in the end), truncate to the last valid pipeline description. Not to
+  // the number of descriptions loaded: the unsupported ones skipped above stay in
+  // the file, and counting only the loaded ones would cut valid descriptions off
+  // its end.
   rex::filesystem::TruncateStdioFile(
       pipeline_storage_file_,
       uint64_t(sizeof(pipeline_storage_file_header) +
-               sizeof(PipelineStoredDescription) * pipeline_stored_descriptions.size()));
-  if (pipeline_stored_descriptions.empty()) {
+               sizeof(PipelineStoredDescription) * pipeline_storage_valid_count));
+  if (!pipeline_storage_valid_count) {
     rex::filesystem::TruncateStdioFile(pipeline_storage_file_, 0);
     pipeline_storage_file_header.magic = pipeline_storage_magic;
     pipeline_storage_file_header.magic_api = pipeline_storage_magic_api;
