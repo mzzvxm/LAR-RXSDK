@@ -6021,6 +6021,30 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
       }
     }
   }
+  // MCLA (lighting work): MIN / MAX blending with factors. On the Xenos the source factor
+  // still applies in those equations; the host's blender ignores factors there. The game
+  // draws the light glows of the cars' environment map with max(source * SrcAlpha, dest) - a
+  // constant colour with a round alpha falloff - which came out as solid squares that the
+  // car paint then mirrored (white bodies with a bloom halo at night). The shader multiplies
+  // by alpha itself where the destination factor is One (the only case the host can do).
+  if (!edram_fragment_shader_interlock) {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      auto blend_control =
+          regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
+      if ((blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.color_destblend == xenos::BlendFactor::kOne) {
+        flags |= SpirvShaderTranslator::kSysFlag_MinMaxColor0TimesSrcAlpha << i;
+      }
+      if ((blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.alpha_destblend == xenos::BlendFactor::kOne) {
+        flags |= SpirvShaderTranslator::kSysFlag_MinMaxAlpha0TimesSrcAlpha << i;
+      }
+    }
+  }
   if (edram_fragment_shader_interlock && depth_stencil_enabled) {
     flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencil;
     if (normalized_depth_control.z_enable) {

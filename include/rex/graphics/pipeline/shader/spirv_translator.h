@@ -154,6 +154,19 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
     kSysFlag_Count,
 
+    // MCLA (lighting work): the Xenos applies the source blend factor in the MIN and MAX
+    // blend equations as well; Vulkan ignores the factors there. With these set, the pixel
+    // shader multiplies its colour / its alpha for that render target by its (saturated)
+    // alpha itself: the SrcAlpha source factor of a MIN / MAX blend whose destination factor
+    // is One. Host render target path only, so the eight bits share those of the FSI flags
+    // (which only that other path sets and reads) - there are not eight free ones.
+    // See REFLECTION_FIX.md in the project root.
+    kSysFlag_MinMaxColor0TimesSrcAlpha_Shift = kSysFlag_FSIDepthStencil_Shift,
+    kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift =
+        kSysFlag_MinMaxColor0TimesSrcAlpha_Shift + xenos::kMaxColorRenderTargets,
+    kSysFlag_MinMaxCount =
+        kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift + xenos::kMaxColorRenderTargets,
+
     // For HostVertexShaderType kVertex, if fullDrawIndexUint32 is not
     // supported (ignored otherwise), whether to fetch the index manually
     // (32-bit only - 16-bit indices are always fetched via the Vulkan index
@@ -199,8 +212,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
     kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
     kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
+    kSysFlag_MinMaxColor0TimesSrcAlpha = 1u << kSysFlag_MinMaxColor0TimesSrcAlpha_Shift,
+    kSysFlag_MinMaxAlpha0TimesSrcAlpha = 1u << kSysFlag_MinMaxAlpha0TimesSrcAlpha_Shift,
   };
   static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
+  static_assert(kSysFlag_MinMaxCount <= 32, "Too many flags in the system constants");
 
   // For Vulkan vertex memexport compute fallback dispatches.
   static constexpr uint32_t kMemExportComputeDispatchX = 65535;

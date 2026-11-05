@@ -922,6 +922,42 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
       spv::Id color_variable = output_or_var_fragment_data_[color_target_index];
       spv::Id color = builder_->createLoad(color_variable, spv::NoPrecision);
 
+      if (!edram_fragment_shader_interlock_) {
+        // MCLA (lighting work): MIN / MAX blending with the SrcAlpha source factor - the host
+        // ignores blend factors in those equations, the Xenos does not (see the flags' note).
+        // The alpha as the blender takes it, saturated; 1 where the flag is not set.
+        spv::Id min_max_alpha = builder_->createTriBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+            builder_->createCompositeExtract(color, type_float_, 3), const_float_0_,
+            const_float_1_);
+        spv::Id min_max_color_factor = builder_->createTriOp(
+            spv::OpSelect, type_float_,
+            builder_->createBinOp(
+                spv::OpINotEqual, type_bool_,
+                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+                                      builder_->makeUintConstant(kSysFlag_MinMaxColor0TimesSrcAlpha
+                                                                 << color_target_index)),
+                const_uint_0_),
+            min_max_alpha, const_float_1_);
+        spv::Id min_max_alpha_factor = builder_->createTriOp(
+            spv::OpSelect, type_float_,
+            builder_->createBinOp(
+                spv::OpINotEqual, type_bool_,
+                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+                                      builder_->makeUintConstant(kSysFlag_MinMaxAlpha0TimesSrcAlpha
+                                                                 << color_target_index)),
+                const_uint_0_),
+            min_max_alpha, const_float_1_);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_alpha_factor);
+        color = builder_->createNoContractionBinOp(
+            spv::OpFMul, type_float4_, color,
+            builder_->createCompositeConstruct(type_float4_, id_vector_temp_));
+      }
+
       // Apply the exponent bias after the alpha test and alpha to coverage
       // because they need the unbiased alpha from the shader.
       id_vector_temp_.clear();
