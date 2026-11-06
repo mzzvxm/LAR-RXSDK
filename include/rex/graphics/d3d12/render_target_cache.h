@@ -112,6 +112,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
+  // The render targets in the command list may be gone.
+  void OnRenderTargetsTrimmed() override { InvalidateCommandListRenderTargets(); }
+
   bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const override;
 
   bool IsGammaFormatHostStorageSeparate() const override;

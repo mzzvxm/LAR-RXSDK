@@ -171,6 +171,23 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
+  // Giving host render targets back (render_target_trim_seconds). A host render
+  // target is made for each key used and is otherwise kept for good, though one
+  // that is not the owner of any EDRAM range holds no data and can be made
+  // again when needed. At the end of a frame, the command processor asks
+  // IsTrimDue (at most once a second; with the time in milliseconds), and if it
+  // says yes, waits until the GPU is done with every submission and calls
+  // TrimUnusedRenderTargets, which frees the render targets that own no range
+  // and haven't been used for the time set (at most 2 seconds while
+  // set_trim_pressure(true): the host is short of video memory). Returns how
+  // many and how much.
+  bool IsTrimDue(uint64_t now_ms);
+  uint32_t TrimUnusedRenderTargets(uint64_t* freed_bytes_out = nullptr);
+  void set_trim_pressure(bool pressure) { trim_pressure_ = pressure; }
+  // How much host memory the render targets take, and how many are made (the
+  // implementation reports its own size per render target).
+  uint64_t GetRenderTargetsHostMemoryBytes(uint32_t* count_out = nullptr) const;
+
   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask, const Shader& vertex_shader);
 
@@ -294,11 +311,21 @@ class RenderTargetCache {
     RenderTarget& operator=(RenderTarget&& render_target) = delete;
     RenderTargetKey key() const { return key_; }
 
+    // The host memory the render target takes, 0 if the implementation doesn't
+    // say.
+    uint64_t host_memory_bytes() const { return host_memory_bytes_; }
+    void set_host_memory_bytes(uint64_t bytes) { host_memory_bytes_ = bytes; }
+    // When (RenderTargetCache::IsTrimDue's clock) it was last asked for.
+    uint64_t last_used_ms() const { return last_used_ms_; }
+    void set_last_used_ms(uint64_t ms) { last_used_ms_ = ms; }
+
    protected:
     RenderTarget(RenderTargetKey key) : key_(key) {}
 
    private:
     RenderTargetKey key_;
+    uint64_t host_memory_bytes_ = 0;
+    uint64_t last_used_ms_ = 0;
   };
 
   struct Transfer {
@@ -633,6 +660,17 @@ class RenderTargetCache {
   }
 
   RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
+
+  // Called after render targets were freed (TrimUnusedRenderTargets), with no
+  // pointer to any of them left in the common code, for the implementation to
+  // drop what refers to them (framebuffers).
+  virtual void OnRenderTargetsTrimmed() {}
+
+  // The clock of IsTrimDue, and what limits the next check.
+  uint64_t trim_now_ms_ = 0;
+  uint64_t trim_next_check_ms_ = 0;
+  uint64_t trim_min_idle_ms_ = 0;
+  bool trim_pressure_ = false;
 
   // render_target_max_height (0: off) as read at start-up, rounded to the
   // tile height, and how many draws it has cut (logged, rate-limited).

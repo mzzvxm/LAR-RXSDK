@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <rex/assert.h>
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/perf/counter.h>
@@ -3526,6 +3527,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
 
+    // render_target_trim_seconds: whether host render targets can be given back.
+    const bool render_targets_trim_due =
+        render_target_cache_ &&
+        render_target_cache_->IsTrimDue(rex::chrono::Clock::QueryHostUptimeMillis());
+
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
 
@@ -3557,6 +3563,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
       render_target_cache_->ClearCache();
 
       shared_memory_->ClearCache();
+    } else if (!cache_clear_requested_ && render_targets_trim_due &&
+               AwaitAllQueueOperationsCompletion()) {
+      // The GPU is done with everything submitted: render targets that hold no
+      // data can go.
+      render_target_cache_->TrimUnusedRenderTargets();
     }
   }
 

@@ -1112,6 +1112,20 @@ void VulkanRenderTargetCache::ClearCache() {
   RenderTargetCache::ClearCache();
 }
 
+void VulkanRenderTargetCache::OnRenderTargetsTrimmed() {
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  // As in ClearCache: framebuffers reference views of attachment images, which
+  // may be gone. The command processor has awaited all the submissions.
+  last_update_framebuffer_ = VK_NULL_HANDLE;
+  for (const auto& framebuffer_pair : framebuffers_) {
+    dfn.vkDestroyFramebuffer(device, framebuffer_pair.second.framebuffer, nullptr);
+  }
+  framebuffers_.clear();
+}
+
 void VulkanRenderTargetCache::CompletedSubmissionUpdated() {
   if (transfer_vertex_buffer_pool_) {
     transfer_vertex_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
@@ -1908,9 +1922,10 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
   }
   VkImage image;
   VkDeviceMemory memory;
+  VkDeviceSize memory_size = 0;
   if (!ui::vulkan::util::CreateDedicatedAllocationImage(
           vulkan_device, image_create_info, ui::vulkan::util::MemoryPurpose::kDeviceLocal, image,
-          memory)) {
+          memory, nullptr, &memory_size)) {
     REXGPU_ERROR(
         "VulkanRenderTarget: Failed to create a {}x{} {}xMSAA {} render target "
         "image",
@@ -2072,9 +2087,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
   }
   dfn.vkUpdateDescriptorSets(device, key.is_depth ? 2 : 1, descriptor_set_write, 0, nullptr);
 
-  return new VulkanRenderTarget(key, *this, image, memory, view_depth_color, view_depth_stencil,
-                                view_stencil, view_srgb, view_color_transfer_separate,
-                                descriptor_set_index_transfer_source);
+  VulkanRenderTarget* render_target = new VulkanRenderTarget(
+      key, *this, image, memory, view_depth_color, view_depth_stencil, view_stencil, view_srgb,
+      view_color_transfer_separate, descriptor_set_index_transfer_source);
+  render_target->set_host_memory_bytes(uint64_t(memory_size));
+  return render_target;
 }
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(

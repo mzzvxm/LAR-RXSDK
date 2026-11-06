@@ -1551,6 +1551,23 @@ DXGI_FORMAT D3D12RenderTargetCache::GetDepthSRVStencilDXGIFormat(
   }
 }
 
+// Bytes of one sample of the formats render targets are made in (for the host
+// memory a render target takes).
+static uint32_t GetRenderTargetBytesPerSample(DXGI_FORMAT format) {
+  switch (format) {
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_SNORM:
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R32G32_FLOAT:
+    case DXGI_FORMAT_R32G32_TYPELESS:
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+      return 8;
+    default:
+      return 4;
+  }
+}
+
 RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(RenderTargetKey key) {
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
 
@@ -1695,9 +1712,13 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(Rend
   }
   device->CreateShaderResourceView(resource.Get(), &srv_desc, descriptor_srv.GetHandle());
 
-  return new D3D12RenderTarget(key, resource.Get(), std::move(descriptor_draw),
-                               std::move(descriptor_load_separate), std::move(descriptor_srv),
-                               std::move(descriptor_srv_stencil), resource_state);
+  D3D12RenderTarget* render_target = new D3D12RenderTarget(
+      key, resource.Get(), std::move(descriptor_draw), std::move(descriptor_load_separate),
+      std::move(descriptor_srv), std::move(descriptor_srv_stencil), resource_state);
+  render_target->set_host_memory_bytes(uint64_t(resource_desc.Width) * resource_desc.Height *
+                                       resource_desc.SampleDesc.Count *
+                                       GetRenderTargetBytesPerSample(resource_desc.Format));
+  return render_target;
 }
 
 bool D3D12RenderTargetCache::IsHostDepthEncodingDifferent(
