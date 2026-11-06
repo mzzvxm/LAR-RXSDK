@@ -164,6 +164,17 @@ class CommandProcessor {
   virtual void ShutdownContext() = 0;
 
   virtual void WriteRegister(uint32_t index, uint32_t value);
+  // Registers whose writes do more than update the register file: scratch
+  // writeback, COHER_STATUS_HOST and the gamma ramp (DC_LUT_RW_INDEX through
+  // DC_LUT_30_COLOR). A branch-free test, so an ordinary write can skip
+  // HandleSpecialRegisterWrite (split out as in xenia-canary).
+  static constexpr bool IsSpecialRegister(uint32_t index) {
+    return ((index - uint32_t(XE_GPU_REG_SCRATCH_REG0)) < 8) |
+           (index == uint32_t(XE_GPU_REG_COHER_STATUS_HOST)) |
+           ((index - uint32_t(XE_GPU_REG_DC_LUT_RW_INDEX)) <=
+            uint32_t(XE_GPU_REG_DC_LUT_30_COLOR - XE_GPU_REG_DC_LUT_RW_INDEX));
+  }
+  void HandleSpecialRegisterWrite(uint32_t index, uint32_t value);
   uint32_t ReadRegisterValue(uint32_t index) const;
   virtual void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
   virtual void WriteRegisterRangeFromRing(memory::RingBuffer* ring, uint32_t base,

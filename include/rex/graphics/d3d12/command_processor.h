@@ -208,6 +208,8 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void WriteRegister(uint32_t index, uint32_t value) override;
   void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WriteFloatConstantsFromMem(uint32_t first_index, uint32_t last_index, uint32_t* base);
+  void WriteFetchConstantsFromMem(uint32_t first_index, uint32_t last_index, uint32_t* base);
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;

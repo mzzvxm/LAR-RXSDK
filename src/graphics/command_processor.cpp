@@ -676,6 +676,13 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   }
 #endif
 
+  if (IsSpecialRegister(index)) {
+    HandleSpecialRegisterWrite(index, value);
+  }
+}
+
+void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index, uint32_t value) {
+  RegisterFile& regs = *register_file_;
   // Scratch register writeback.
   if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
@@ -1020,6 +1027,13 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  if (!write_one_reg) {
+    // A block of consecutive registers: the range path lets the backend copy
+    // ordinary registers in bulk instead of one virtual WriteRegister call
+    // per register (as in xenia-canary). Same registers, same order.
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
     uint32_t target_index = write_one_reg ? base_index : base_index + m;
