@@ -38,6 +38,17 @@ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, tru
 REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
                     "Use full range for SNORM16 render targets");
 
+REXCVAR_DEFINE_UINT32(render_target_max_height, 0, "GPU",
+                      "With host render targets, the tallest host render target to make, in pixels "
+                      "at 1x resolution (a multiple of the EDRAM tile height, at least 32; 0: as "
+                      "tall as the console's whole EDRAM from the base, up to 8192, which makes "
+                      "every render target about 10 MB times the resolution scale squared, "
+                      "however little of it is drawn). A title that never draws a surface taller "
+                      "than this loses nothing; a taller draw is cut at the limit (logged). "
+                      "Memory only; next start")
+    .range(0, 8192)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                     "Resolve from host render targets directly to shared memory when possible")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -336,6 +347,17 @@ RenderTargetCache::~RenderTargetCache() {
 
 void RenderTargetCache::InitializeCommon() {
   assert_true(ownership_ranges_.empty());
+  // Read once: the heights of existing render targets must not change.
+  render_target_max_height_ = REXCVAR_GET(render_target_max_height);
+  if (render_target_max_height_) {
+    // A multiple of the 16 pixel tile height (8 with MSAA), and at least two
+    // tile rows.
+    render_target_max_height_ = std::max(
+        uint32_t(32), (render_target_max_height_ + xenos::kEdramTileHeightSamples - 1) /
+                          xenos::kEdramTileHeightSamples * xenos::kEdramTileHeightSamples);
+    REXGPU_INFO("RenderTargetCache: host render targets at most {} rows tall at 1x",
+                render_target_max_height_);
+  }
   ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
                             std::forward_as_tuple(xenos::kEdramTileCount, RenderTargetKey(),
                                                   RenderTargetKey(), RenderTargetKey()));
@@ -567,13 +589,26 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
 
   // Estimate height used by render targets (for color for writes, for depth /
   // stencil for both reads and writes) from various sources.
-  uint32_t height_used =
-      std::min(GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples),
-               draw_extent_estimator_.EstimateMaxY(
-                   interlock_barrier_only
-                       ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
-                       : true,
-                   vertex_shader));
+  const uint32_t render_target_height = GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples);
+  const uint32_t draw_max_y = draw_extent_estimator_.EstimateMaxY(
+      interlock_barrier_only ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
+                             : true,
+      vertex_shader);
+  if (render_target_max_height_ && draw_max_y > render_target_height &&
+      draw_max_y < xenos::kTexture2DCubeMaxWidthHeight) {
+    // An estimate of the full guest height (8192) says the draw has no extent
+    // information; a lower one is a real draw taller than the limit.
+    ++render_target_max_height_clamped_draws_;
+    if (render_target_max_height_clamped_draws_ <= 16 ||
+        !(render_target_max_height_clamped_draws_ % 10000)) {
+      REXGPU_WARN(
+          "RenderTargetCache: a draw reaches row {} of a {}-tile-wide, {}x MSAA surface, cut at "
+          "{} rows by render_target_max_height ({} such draws so far)",
+          draw_max_y, pitch_tiles_at_32bpp, uint32_t(1) << uint32_t(msaa_samples),
+          render_target_height, render_target_max_height_clamped_draws_);
+    }
+  }
+  uint32_t height_used = std::min(render_target_height, draw_max_y);
 
   // Sorted by EDRAM base and then by index in the pipeline - for simplicity,
   // treat render targets placed closer to the end of the EDRAM as truncating
@@ -1323,6 +1358,13 @@ uint32_t RenderTargetCache::GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
   uint32_t tile_height_samples_scaled = xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
   tile_rows =
       std::min(tile_rows, (max_height_scaled << msaa_samples_y_log2) / tile_height_samples_scaled);
+  // render_target_max_height: no taller than the title needs (the height is
+  // in pixels at 1x, as the return value; a tile row is 16 pixels without
+  // MSAA and 8 with it).
+  if (render_target_max_height_) {
+    const uint32_t tile_height = xenos::kEdramTileHeightSamples >> msaa_samples_y_log2;
+    tile_rows = std::min(tile_rows, std::max(uint32_t(1), render_target_max_height_ / tile_height));
+  }
   assert_not_zero(tile_rows);
   return tile_rows * (xenos::kEdramTileHeightSamples >> msaa_samples_y_log2);
 }

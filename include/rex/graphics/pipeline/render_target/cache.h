@@ -724,6 +724,11 @@ class RenderTargetCache {
 
   RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
 
+  // render_target_max_height (0: off) as read at start-up, rounded to the
+  // tile height, and how many draws it has cut (logged, rate-limited).
+  uint32_t render_target_max_height_ = 0;
+  uint64_t render_target_max_height_clamped_draws_ = 0;
+
   // Checks if changing ownership of the range to the specified render target
   // would require transferring data - primarily for barrier placement on the
   // pixel shader interlock path (where transfers do not involve copying, but
