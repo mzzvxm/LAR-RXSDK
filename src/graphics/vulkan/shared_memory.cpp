@@ -275,12 +275,21 @@ bool VulkanSharedMemory::UploadByteRanges(
   }
   uint32_t bounds_start = UINT32_MAX;
   uint32_t bounds_end = 0;
+  hoist_page_ranges_temp_.clear();
   for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
     bounds_start = std::min(bounds_start, range.first);
     bounds_end = std::max(bounds_end, range.first + range.second);
+    if (range.second) {
+      uint32_t page_first = range.first >> page_size_log2();
+      hoist_page_ranges_temp_.emplace_back(
+          page_first, ((range.first + range.second - 1) >> page_size_log2()) - page_first + 1);
+    }
   }
-  Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
-  command_processor_.SubmitBarriers(true);
+  bool hoist = BeginHoistedUpload(hoist_page_ranges_temp_);
+  if (!hoist) {
+    Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
+    command_processor_.SubmitBarriers(true);
+  }
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   upload_regions_.clear();
@@ -296,6 +305,9 @@ bool VulkanSharedMemory::UploadByteRanges(
           upload_buffer_size);
       if (upload_buffer_mapping == nullptr) {
         REXGPU_ERROR("Shared memory: Failed to get a Vulkan upload buffer");
+        if (hoist) {
+          EndHoistedUpload(upload_byte_ranges);
+        }
         return false;
       }
       upload_buffer_size = std::min(upload_buffer_size, VkDeviceSize(remaining));
@@ -319,6 +331,9 @@ bool VulkanSharedMemory::UploadByteRanges(
                                    uint32_t(upload_regions_.size()), upload_regions_.data());
     upload_regions_.clear();
   }
+  if (hoist) {
+    EndHoistedUpload(upload_byte_ranges);
+  }
   return true;
 }
 
@@ -327,14 +342,17 @@ bool VulkanSharedMemory::UploadRanges(
   if (upload_page_ranges.empty()) {
     return true;
   }
-  // upload_page_ranges are sorted, use them to determine the range for the
-  // ordering barrier.
-  Use(Usage::kTransferDestination,
-      std::make_pair(upload_page_ranges.front().first << page_size_log2(),
-                     (upload_page_ranges.back().first + upload_page_ranges.back().second -
-                      upload_page_ranges.front().first)
-                         << page_size_log2()));
-  command_processor_.SubmitBarriers(true);
+  bool hoist = BeginHoistedUpload(upload_page_ranges);
+  if (!hoist) {
+    // upload_page_ranges are sorted, use them to determine the range for the
+    // ordering barrier.
+    Use(Usage::kTransferDestination,
+        std::make_pair(upload_page_ranges.front().first << page_size_log2(),
+                       (upload_page_ranges.back().first + upload_page_ranges.back().second -
+                        upload_page_ranges.front().first)
+                           << page_size_log2()));
+    command_processor_.SubmitBarriers(true);
+  }
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
@@ -383,7 +401,68 @@ bool VulkanSharedMemory::UploadRanges(
                                    uint32_t(upload_regions_.size()), upload_regions_.data());
     upload_regions_.clear();
   }
+  if (hoist) {
+    hoist_page_ranges_temp_.clear();
+    for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
+      hoist_page_ranges_temp_.emplace_back(range.first << page_size_log2(),
+                                           range.second << page_size_log2());
+    }
+    EndHoistedUpload(hoist_page_ranges_temp_);
+  }
   return successful;
+}
+
+bool VulkanSharedMemory::BeginHoistedUpload(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
+  // In a render pass whose draws have not read these pages, copy before the
+  // render pass instead of ending it: between a barrier after everything that
+  // read the buffer before the render pass and one before the render pass's
+  // reads, which all the uploads hoisted before the same render pass share.
+  if (last_usage_ != Usage::kRead || last_written_range_.second ||
+      !command_processor_.CanHoistSharedMemoryUpload(upload_page_ranges)) {
+    return false;
+  }
+  command_processor_.BeginHoistedCommands();
+  uint64_t hoist_render_pass_serial = command_processor_.hoist_render_pass_serial();
+  if (hoist_render_pass_serial_ != hoist_render_pass_serial) {
+    hoist_render_pass_serial_ = hoist_render_pass_serial;
+    WriteUsageBarrier(Usage::kRead, Usage::kTransferDestination);
+  } else {
+    command_processor_.deferred_command_buffer().TruncateHoistedStream(
+        hoist_closing_barrier_offset_);
+  }
+  return true;
+}
+
+void VulkanSharedMemory::EndHoistedUpload(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
+  hoist_closing_barrier_offset_ = command_processor_.deferred_command_buffer().hoisted_stream_size();
+  WriteUsageBarrier(Usage::kTransferDestination, Usage::kRead);
+  command_processor_.EndHoistedCommands();
+  // Another upload of these pages before this render pass would need a barrier
+  // between the two copies: let it end the render pass instead.
+  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
+    command_processor_.MarkSharedMemoryReadInRenderPass(range.first, range.second);
+  }
+}
+
+void VulkanSharedMemory::WriteUsageBarrier(Usage from, Usage to) {
+  VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+  VkAccessFlags src_access_mask, dst_access_mask;
+  GetUsageMasks(from, src_stage_mask, src_access_mask);
+  GetUsageMasks(to, dst_stage_mask, dst_access_mask);
+  VkBufferMemoryBarrier barrier;
+  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier.pNext = nullptr;
+  barrier.srcAccessMask = src_access_mask;
+  barrier.dstAccessMask = dst_access_mask;
+  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.buffer = buffer_;
+  barrier.offset = 0;
+  barrier.size = VK_WHOLE_SIZE;
+  command_processor_.deferred_command_buffer().CmdVkPipelineBarrier(
+      src_stage_mask, dst_stage_mask, 0, 0, nullptr, 1, &barrier, 0, nullptr);
 }
 
 void VulkanSharedMemory::GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
