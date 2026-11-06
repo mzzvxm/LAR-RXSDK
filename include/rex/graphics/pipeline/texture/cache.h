@@ -76,6 +76,10 @@ class TextureCache {
 
   virtual void ClearCache();
 
+  // While the host is short of video memory (gpu_memory_pressure_percent), the
+  // soft and the hard limit are halved: unused textures go sooner.
+  void set_memory_pressure(bool pressure) { memory_pressure_ = pressure; }
+
   virtual void CompletedSubmissionUpdated(uint64_t completed_submission_index);
   virtual void BeginSubmission(uint64_t new_submission_index);
   virtual void BeginFrame();
@@ -606,6 +610,7 @@ class TextureCache {
   std::unordered_map<TextureKey, std::unique_ptr<Texture>, TextureKey::Hasher> textures_;
 
   uint64_t textures_total_host_memory_usage_ = 0;
+  bool memory_pressure_ = false;
 
   Texture* texture_used_first_ = nullptr;
   Texture* texture_used_last_ = nullptr;
