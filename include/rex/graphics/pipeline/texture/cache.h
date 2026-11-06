@@ -432,6 +432,26 @@ class TextureCache {
     kLoadShaderIndexUnknown = kLoadShaderCount,
   };
 
+  // Direct loads: shaders decoding resolution-scaled single-level 2D
+  // textures straight into the host texture through an unsigned integer view of
+  // the texel size (R32_UINT for 32bpb, R16G16B16A16_UINT for 64bpb), instead of
+  // into a buffer that is then copied to the texture.
+  enum DirectLoadShader {
+    kDirectLoadShader32bpb,
+    kDirectLoadShader64bpb,
+    kDirectLoadShaderDepthFloat,
+    kDirectLoadShaderDepthUnorm,
+
+    kDirectLoadShaderCount,
+    kDirectLoadShaderUnknown = kDirectLoadShaderCount,
+  };
+  // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
+  static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
+  // Whether a texture with the key may be loaded directly: scaled, one level,
+  // 2D, one layer, not in the packed mip tail. The host format and the
+  // shader are checked separately.
+  static bool IsDirectLoadPossible(const TextureKey& key);
+
   struct LoadShaderInfo {
     // Log2 of the sizes, in bytes, of the elements in the source (guest) and
     // the destination (host) buffer bindings accessed by the copying shader,

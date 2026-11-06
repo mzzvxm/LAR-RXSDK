@@ -322,6 +322,28 @@ void TextureCache::BeginFrame() {
   ResetTextureBindings();
 }
 
+TextureCache::DirectLoadShader TextureCache::GetDirectLoadShader(LoadShaderIndex load_shader) {
+  switch (load_shader) {
+    case kLoadShaderIndex32bpb:
+      return kDirectLoadShader32bpb;
+    case kLoadShaderIndex64bpb:
+      return kDirectLoadShader64bpb;
+    case kLoadShaderIndexDepthFloat:
+      return kDirectLoadShaderDepthFloat;
+    case kLoadShaderIndexDepthUnorm:
+      return kDirectLoadShaderDepthUnorm;
+    default:
+      return kDirectLoadShaderUnknown;
+  }
+}
+
+bool TextureCache::IsDirectLoadPossible(const TextureKey& key) {
+  // Not if the base is in the packed mip tail (16 texels or less): that's
+  // loaded as the whole tail through the buffer.
+  return key.scaled_resolve && !key.mip_max_level && key.dimension != xenos::DataDimension::k3D &&
+         key.GetDepthOrArraySize() == 1 && key.GetGuestLayout().packed_level != 0;
+}
+
 void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
   if (length_unscaled == 0) {
     return;

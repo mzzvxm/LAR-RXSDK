@@ -104,6 +104,10 @@ namespace shaders {
 #include "../shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_32bpb_direct_scaled_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_64bpb_direct_scaled_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_depth_float_direct_scaled_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_depth_unorm_direct_scaled_cs.h"
 }  // namespace shaders
 
 namespace {
@@ -500,6 +504,14 @@ VulkanTextureCache::~VulkanTextureCache() {
   }
   if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE) {
     dfn.vkDestroyPipelineLayout(device, storage_copy_pipeline_layout_, nullptr);
+  }
+  for (VkPipeline load_direct_pipeline : load_direct_pipelines_) {
+    if (load_direct_pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, load_direct_pipeline, nullptr);
+    }
+  }
+  if (load_direct_pipeline_layout_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyPipelineLayout(device, load_direct_pipeline_layout_, nullptr);
   }
 
   // Textures memory is allocated using the Vulkan Memory Allocator, destroy all
@@ -1493,12 +1505,38 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         level_host_layout.y_pitch_blocks * level_guest_z_extent_texels;
     host_buffer_size += level_host_layout.slice_size_bytes * array_size;
   }
-  VulkanCommandProcessor::ScratchBufferAcquisition scratch_buffer_acquisition(
-      command_processor_.AcquireScratchGpuBuffer(
-          host_buffer_size, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT));
-  VkBuffer scratch_buffer = scratch_buffer_acquisition.buffer();
-  if (scratch_buffer == VK_NULL_HANDLE) {
-    return false;
+  // Direct load: decode straight into the image through its storage copy view,
+  // without the scratch buffer and the copy.
+  VkPipeline pipeline_direct = VK_NULL_HANDLE;
+  VkImageView direct_load_view = VK_NULL_HANDLE;
+  if (texture_key.scaled_resolve && vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED &&
+      level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
+      pipeline_float_convert == VK_NULL_HANDLE) {
+    DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
+    uint32_t direct_load_texel_size =
+        direct_load_shader == kDirectLoadShader64bpb ? UINT32_C(8) : UINT32_C(4);
+    if (direct_load_shader != kDirectLoadShaderUnknown &&
+        load_shader_info.bytes_per_host_block == direct_load_texel_size &&
+        load_direct_pipelines_[direct_load_shader] != VK_NULL_HANDLE) {
+      direct_load_view = vulkan_texture.GetStorageCopyView();
+      if (direct_load_view != VK_NULL_HANDLE) {
+        pipeline_direct = load_direct_pipelines_[direct_load_shader];
+      }
+    }
+  }
+  bool direct_load = pipeline_direct != VK_NULL_HANDLE;
+  VkPipelineLayout load_pipeline_layout =
+      direct_load ? load_direct_pipeline_layout_ : load_pipeline_layout_;
+
+  VulkanCommandProcessor::ScratchBufferAcquisition scratch_buffer_acquisition;
+  VkBuffer scratch_buffer = VK_NULL_HANDLE;
+  if (!direct_load) {
+    scratch_buffer_acquisition = command_processor_.AcquireScratchGpuBuffer(
+        host_buffer_size, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+    scratch_buffer = scratch_buffer_acquisition.buffer();
+    if (scratch_buffer == VK_NULL_HANDLE) {
+      return false;
+    }
   }
 
   // Begin loading.
@@ -1511,12 +1549,30 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   std::array<VkWriteDescriptorSet, 3> write_descriptor_sets;
   uint32_t write_descriptor_set_count = 0;
   VkDescriptorSet descriptor_set_dest = command_processor_.AllocateSingleTransientDescriptor(
-      VulkanCommandProcessor::SingleTransientDescriptorLayout ::kStorageBufferCompute);
+      direct_load ? VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute
+                  : VulkanCommandProcessor::SingleTransientDescriptorLayout ::kStorageBufferCompute);
   if (!descriptor_set_dest) {
     return false;
   }
   VkDescriptorBufferInfo write_descriptor_set_dest_buffer_info;
-  {
+  VkDescriptorImageInfo write_descriptor_set_dest_image_info;
+  if (direct_load) {
+    write_descriptor_set_dest_image_info.sampler = VK_NULL_HANDLE;
+    write_descriptor_set_dest_image_info.imageView = direct_load_view;
+    write_descriptor_set_dest_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet& write_descriptor_set_dest =
+        write_descriptor_sets[write_descriptor_set_count++];
+    write_descriptor_set_dest.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_descriptor_set_dest.pNext = nullptr;
+    write_descriptor_set_dest.dstSet = descriptor_set_dest;
+    write_descriptor_set_dest.dstBinding = 0;
+    write_descriptor_set_dest.dstArrayElement = 0;
+    write_descriptor_set_dest.descriptorCount = 1;
+    write_descriptor_set_dest.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write_descriptor_set_dest.pImageInfo = &write_descriptor_set_dest_image_info;
+    write_descriptor_set_dest.pBufferInfo = nullptr;
+    write_descriptor_set_dest.pTexelBufferView = nullptr;
+  } else {
     write_descriptor_set_dest_buffer_info.buffer = scratch_buffer;
     write_descriptor_set_dest_buffer_info.offset = 0;
     write_descriptor_set_dest_buffer_info.range = host_buffer_size;
@@ -1637,9 +1693,29 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
 
-  command_processor_.BindExternalComputePipeline(pipeline);
+  if (direct_load) {
+    // The only level and layer is overwritten: the old contents don't need to
+    // be kept, only the previous accesses completed. Not skipped if the
+    // previous usage is also a direct load, to order the two writes.
+    VulkanTexture::Usage texture_old_usage =
+        vulkan_texture.SetUsage(VulkanTexture::Usage::kStorageCopyDestination);
+    VkPipelineStageFlags texture_src_stage_mask, texture_dst_stage_mask;
+    VkAccessFlags texture_src_access_mask, texture_dst_access_mask;
+    VkImageLayout texture_old_layout, texture_new_layout;
+    GetTextureUsageMasks(texture_old_usage, texture_src_stage_mask, texture_src_access_mask,
+                         texture_old_layout);
+    GetTextureUsageMasks(VulkanTexture::Usage::kStorageCopyDestination, texture_dst_stage_mask,
+                         texture_dst_access_mask, texture_new_layout);
+    command_processor_.PushImageMemoryBarrier(
+        vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
+        texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
+        texture_dst_access_mask, VK_IMAGE_LAYOUT_UNDEFINED, texture_new_layout,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
+  }
 
-  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout_,
+  command_processor_.BindExternalComputePipeline(direct_load ? pipeline_direct : pipeline);
+
+  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout,
                                          kLoadDescriptorSetIndexDestination, 1,
                                          &descriptor_set_dest, 0, nullptr);
 
@@ -1663,7 +1739,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         is_base ? descriptor_set_source_base : descriptor_set_source_mips;
     if (descriptor_set_source_current != descriptor_set_source) {
       descriptor_set_source_current = descriptor_set_source;
-      command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout_,
+      command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout,
                                              kLoadDescriptorSetIndexSource, 1,
                                              &descriptor_set_source, 0, nullptr);
     }
@@ -1720,7 +1796,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     load_constants.host_pitch =
         load_shader_info.bytes_per_host_block * level_host_layout.x_pitch_blocks;
 
-    command_buffer.CmdVkPushConstants(load_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+    command_buffer.CmdVkPushConstants(load_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                       sizeof(load_constants), &load_constants);
 
     uint32_t level_array_slice_stride_bytes_scaled =
@@ -1728,11 +1804,11 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         (texture_resolution_scale_x * texture_resolution_scale_y);
     for (uint32_t slice = 0; slice < array_size; ++slice) {
       if (slice != 0) {
-        command_buffer.CmdVkPushConstants(load_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+        command_buffer.CmdVkPushConstants(load_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                                           offsetof(LoadConstants, guest_offset),
                                           sizeof(load_constants.guest_offset),
                                           &load_constants.guest_offset);
-        command_buffer.CmdVkPushConstants(load_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+        command_buffer.CmdVkPushConstants(load_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                                           offsetof(LoadConstants, host_offset),
                                           sizeof(load_constants.host_offset),
                                           &load_constants.host_offset);
@@ -1847,6 +1923,10 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
 
   vulkan_texture.MarkAsUsed();
+
+  if (direct_load) {
+    return true;
+  }
 
   // vulkan_texture_load_storage_copy: write the image in a compute shader
   // through an unsigned integer view of the texel size. vkCmdCopyBufferToImage
@@ -3250,6 +3330,57 @@ bool VulkanTextureCache::Initialize() {
             storage_copy_shader_code[i].second);
         if (storage_copy_pipelines_[i] == VK_NULL_HANDLE) {
           REXGPU_ERROR("VulkanTextureCache: Failed to create texture storage copy pipeline {}", i);
+        }
+      }
+    }
+
+    // Direct load pipelines, for textures with a storage copy view. Without one,
+    // its textures are loaded through the scratch buffer.
+    if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE && IsDrawResolutionScaled()) {
+      VkDescriptorSetLayout load_direct_descriptor_set_layouts[] = {
+          command_processor_.GetSingleTransientDescriptorLayout(
+              VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute),
+          load_descriptor_set_layout_storage_buffer,
+      };
+      VkPushConstantRange load_direct_push_constant_range;
+      load_direct_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+      load_direct_push_constant_range.offset = 0;
+      load_direct_push_constant_range.size = sizeof(LoadConstants);
+      VkPipelineLayoutCreateInfo load_direct_pipeline_layout_create_info;
+      load_direct_pipeline_layout_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      load_direct_pipeline_layout_create_info.pNext = nullptr;
+      load_direct_pipeline_layout_create_info.flags = 0;
+      load_direct_pipeline_layout_create_info.setLayoutCount =
+          uint32_t(rex::countof(load_direct_descriptor_set_layouts));
+      load_direct_pipeline_layout_create_info.pSetLayouts = load_direct_descriptor_set_layouts;
+      load_direct_pipeline_layout_create_info.pushConstantRangeCount = 1;
+      load_direct_pipeline_layout_create_info.pPushConstantRanges =
+          &load_direct_push_constant_range;
+      if (dfn.vkCreatePipelineLayout(device, &load_direct_pipeline_layout_create_info, nullptr,
+                                     &load_direct_pipeline_layout_) != VK_SUCCESS) {
+        REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline layout");
+        load_direct_pipeline_layout_ = VK_NULL_HANDLE;
+      } else {
+        const std::pair<const uint32_t*, size_t> load_direct_shader_code[] = {
+            {shaders::texture_load_32bpb_direct_scaled_cs,
+             sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
+            {shaders::texture_load_64bpb_direct_scaled_cs,
+             sizeof(shaders::texture_load_64bpb_direct_scaled_cs)},
+            {shaders::texture_load_depth_float_direct_scaled_cs,
+             sizeof(shaders::texture_load_depth_float_direct_scaled_cs)},
+            {shaders::texture_load_depth_unorm_direct_scaled_cs,
+             sizeof(shaders::texture_load_depth_unorm_direct_scaled_cs)},
+        };
+        static_assert(rex::countof(load_direct_shader_code) == kDirectLoadShaderCount);
+        for (uint32_t i = 0; i < kDirectLoadShaderCount; ++i) {
+          load_direct_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
+              vulkan_device, load_direct_pipeline_layout_, load_direct_shader_code[i].first,
+              load_direct_shader_code[i].second);
+          if (load_direct_pipelines_[i] == VK_NULL_HANDLE) {
+            REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline {}",
+                         i);
+          }
         }
       }
     }
