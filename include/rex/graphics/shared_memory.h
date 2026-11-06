@@ -95,6 +95,16 @@ class SharedMemory {
   // regions in those pages.
   void RangeWrittenByGpu(uint32_t start, uint32_t length);
 
+  // Makes sure the host GPU memory behind the range exists (the sparse
+  // allocations of the backends that use them), without uploading anything or
+  // changing which pages are valid. RequestRange allocates too, but it also
+  // uploads what is not valid, and a range that RangeWrittenByGpu has marked
+  // valid after a resolution-scaled resolve may never have had its memory
+  // allocated, and then be written from the GPU (the unscaled resolve copy).
+  bool EnsureRangeAllocated(uint32_t start, uint32_t length) {
+    return EnsureHostGpuMemoryAllocated(start, length);
+  }
+
  protected:
   SharedMemory(memory::Memory& memory);
   // Call in implementation-specific initialization.

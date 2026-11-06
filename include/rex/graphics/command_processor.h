@@ -271,8 +271,31 @@ class CommandProcessor {
                                                 uint32_t written_address,
                                                 uint32_t written_length);
 
+  // Writing the unscaled version of selected scaled resolves to the shared
+  // memory on the GPU. With draw resolution scaling a resolve writes only the
+  // scaled resolve buffer, which the GPU reads as textures but not as anything
+  // else (vertex data, for instance). A resolve that matches a rule of
+  // resolve_unscaled_copy_rules (the rules of readback_resolve_rules, the mode
+  // not used) also gets its 1x version, made by the readback path's downscale
+  // pass, written to the destination range of the shared memory, with no wait.
+  // IssueCopy takes the longer path (the one that sees the written range) only
+  // when this says there are rules; MatchUnscaledResolveCopyRule is the index of
+  // the rule the resolve that has just been made (it wrote [written_address,
+  // written_address + written_length)) matches, or -1. Command processor
+  // thread only.
+  bool IsUnscaledResolveCopyEnabled();
+  int MatchUnscaledResolveCopyRule(uint32_t written_address, uint32_t written_length);
+  // The first copies, the first failures and every 1024th copy are logged.
+  // result is a short text.
+  void LogUnscaledResolveCopy(uint32_t written_address, uint32_t written_length, int rule,
+                              const char* result, bool done);
+
   std::string readback_rules_text_;
   std::vector<ReadbackRule> readback_rules_;
+  std::string unscaled_copy_rules_text_;
+  std::vector<ReadbackRule> unscaled_copy_rules_;
+  uint32_t unscaled_copy_log_count_ = 0;
+  uint32_t unscaled_copy_done_count_ = 0;
 
   memory::Memory* memory_ = nullptr;
   system::KernelState* kernel_state_ = nullptr;
