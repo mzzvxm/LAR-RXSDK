@@ -46,6 +46,40 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
 #endif
 }
 
+RenderDocAPI* RenderDocAPI::Get() {
+  // Never destroyed: RenderDoc stays loaded until the process ends, and a static
+  // destructor would unload it while other threads can still be capturing.
+  static RenderDocAPI* const instance = CreateIfConnected().release();
+  return instance;
+}
+
+void RenderDocAPI::StartFrameCapture([[maybe_unused]] void* device,
+                                     [[maybe_unused]] void* window) const {
+#if !REX_PLATFORM_MAC
+  api_1_0_0_->StartFrameCapture(device, window);
+#endif
+}
+
+bool RenderDocAPI::EndFrameCapture([[maybe_unused]] void* device,
+                                   [[maybe_unused]] void* window) const {
+#if REX_PLATFORM_MAC
+  return false;
+#else
+  return api_1_0_0_->EndFrameCapture(device, window) != 0;
+#endif
+}
+
+// CHECK: the API is asked for as 1.0.0, where RenderDoc's IsFrameCapturing misses a capture its own
+// key or TriggerCapture started (fixed in 1.0.1). Right for a capture begun with StartFrameCapture,
+// which is all LARecomp does.
+bool RenderDocAPI::IsFrameCapturing() const {
+#if REX_PLATFORM_MAC
+  return false;
+#else
+  return api_1_0_0_->IsFrameCapturing() != 0;
+#endif
+}
+
 RenderDocAPI::~RenderDocAPI() {
   library_.Close();
 }

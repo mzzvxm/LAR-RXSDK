@@ -51,6 +51,17 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Defined with the application's ReXApp, not in the GPU plugin, so it exists whether or not a
+// plugin is loaded (an application can render with a graphics layer of its own).
+// CHECK: kRequiresRestart is chosen from how LARecomp uses it (read once at startup), not copied
+// from another SDK build.
+REXCVAR_DEFINE_STRING(graphics_backend, "auto", "GPU",
+                      "Graphics API: auto, d3d12, vulkan. Read at startup by the application, "
+                      "which loads the GPU plugin and any renderer of its own with it; the "
+                      "SDK's default plugin load does not use it")
+    .allowed({"auto", "d3d12", "vulkan"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex {
 
 // --- ReXApp ---

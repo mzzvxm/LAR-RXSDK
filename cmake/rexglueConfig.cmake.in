@@ -17,7 +17,24 @@ find_dependency(spdlog CONFIG)
 find_dependency(utf8cpp CONFIG)
 find_dependency(SDL3 CONFIG)
 
+set(REXGLUE_USE_D3D12 @REXGLUE_USE_D3D12@)
 set(REXGLUE_USE_VULKAN @REXGLUE_USE_VULKAN@)
+
+# A project that needs graphics backends built into this SDK names them in
+# REXGLUE_REQUIRED_GRAPHICS_BACKENDS (for example "d3d12;vulkan") before it finds
+# the SDK, and gets the fix here instead of a missing backend at run time.
+# CHECK: written from how LARecomp's CMakeLists.txt sets the variable; not compared with any other
+# SDK build's handling of it.
+foreach(_rexglue_required_backend IN LISTS REXGLUE_REQUIRED_GRAPHICS_BACKENDS)
+    string(TOUPPER "${_rexglue_required_backend}" _rexglue_required_option)
+    if(NOT REXGLUE_USE_${_rexglue_required_option})
+        message(FATAL_ERROR
+            "This ReXGlue SDK was built without the ${_rexglue_required_backend} graphics "
+            "backend, which the project requires (REXGLUE_REQUIRED_GRAPHICS_BACKENDS). "
+            "Rebuild the SDK with -DREXGLUE_USE_${_rexglue_required_option}=ON.")
+    endif()
+endforeach()
+
 if(REXGLUE_USE_VULKAN)
     find_dependency(VulkanHeaders CONFIG)
     find_dependency(VulkanMemoryAllocator CONFIG)

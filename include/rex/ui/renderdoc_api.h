@@ -27,6 +27,11 @@ class RenderDocAPI {
  public:
   static std::unique_ptr<RenderDocAPI> CreateIfConnected();
 
+  // The process-wide instance, connected on first use. nullptr if RenderDoc is
+  // not attached. It lives until the process ends, so everything in the process
+  // that brackets frame captures goes through the same RenderDoc state.
+  static RenderDocAPI* Get();
+
   RenderDocAPI(const RenderDocAPI&) = delete;
   RenderDocAPI& operator=(const RenderDocAPI&) = delete;
 
@@ -34,6 +39,13 @@ class RenderDocAPI {
 
   // Always present if this object exists.
   const RENDERDOC_API_1_0_0* api_1_0_0() const { return api_1_0_0_; }
+
+  // Frame capture bracketing. A null device or window matches any device or
+  // window.
+  void StartFrameCapture(void* device, void* window) const;
+  // True if RenderDoc wrote the capture.
+  bool EndFrameCapture(void* device, void* window) const;
+  bool IsFrameCapturing() const;
 
  private:
   explicit RenderDocAPI() = default;
