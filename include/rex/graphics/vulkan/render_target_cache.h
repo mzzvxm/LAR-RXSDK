@@ -170,6 +170,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   RenderTarget* CreateRenderTarget(RenderTargetKey key) override;
 
+  // Framebuffers reference the views of the render targets freed.
+  void OnRenderTargetsTrimmed() override;
+
   bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const override;
 
   bool IsGammaFormatHostStorageSeparate() const override;

@@ -49,6 +49,15 @@ REXCVAR_DEFINE_UINT32(render_target_max_height, 0, "GPU",
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_UINT32(render_target_trim_seconds, 0, "GPU",
+                      "With host render targets, free the ones that hold no EDRAM data (another "
+                      "render target has the tiles they last had) and haven't been used for this "
+                      "many seconds (0: keep every one made, as before). They are made again if "
+                      "needed, which takes a few milliseconds each (a hitch when the pause menu "
+                      "opens after a long time). A trim waits for the GPU to finish a frame")
+    .range(0, 3600)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                     "Resolve from host render targets directly to shared memory when possible")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -418,6 +427,107 @@ void RenderTargetCache::ClearCache() {
 
 void RenderTargetCache::BeginFrame() {
   ResetAccumulatedRenderTargets();
+}
+
+uint64_t RenderTargetCache::GetRenderTargetsHostMemoryBytes(uint32_t* count_out) const {
+  uint64_t bytes = 0;
+  uint32_t count = 0;
+  for (const auto& render_target_pair : render_targets_) {
+    if (render_target_pair.second) {
+      ++count;
+      bytes += render_target_pair.second->host_memory_bytes();
+    }
+  }
+  if (count_out) {
+    *count_out = count;
+  }
+  return bytes;
+}
+
+bool RenderTargetCache::IsTrimDue(uint64_t now_ms) {
+  const bool first_call = !trim_now_ms_;
+  trim_now_ms_ = now_ms;
+  if (first_call) {
+    // The render targets made until now carry no time: give them a while.
+    trim_next_check_ms_ = now_ms + 5000;
+    return false;
+  }
+  const uint32_t trim_seconds = REXCVAR_GET(render_target_trim_seconds);
+  if (!trim_seconds || GetPath() != Path::kHostRenderTargets || now_ms < trim_next_check_ms_) {
+    return false;
+  }
+  trim_next_check_ms_ = now_ms + 1000;
+  // Short of video memory: what was used in the last couple of seconds is the
+  // working set (freeing it would only make it again), the rest goes.
+  trim_min_idle_ms_ = trim_pressure_ ? std::min(uint64_t(trim_seconds) * 1000, uint64_t(2000))
+                                     : uint64_t(trim_seconds) * 1000;
+  // The render targets holding data (the owners of EDRAM ranges), as in
+  // ClearCache.
+  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
+  for (const auto& ownership_range_pair : ownership_ranges_) {
+    const OwnershipRange& ownership_range = ownership_range_pair.second;
+    owners.emplace(ownership_range.render_target);
+    owners.emplace(ownership_range.host_depth_render_target_unorm24);
+    owners.emplace(ownership_range.host_depth_render_target_float24);
+  }
+  for (const auto& render_target_pair : render_targets_) {
+    const RenderTarget* render_target = render_target_pair.second;
+    if (render_target && owners.find(render_target_pair.first) == owners.end() &&
+        render_target->last_used_ms() + trim_min_idle_ms_ <= now_ms) {
+      return true;
+    }
+  }
+  return false;
+}
+
+uint32_t RenderTargetCache::TrimUnusedRenderTargets(uint64_t* freed_bytes_out) {
+  uint64_t freed_bytes = 0;
+  uint32_t freed_count = 0;
+  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
+  for (const auto& ownership_range_pair : ownership_ranges_) {
+    const OwnershipRange& ownership_range = ownership_range_pair.second;
+    owners.emplace(ownership_range.render_target);
+    owners.emplace(ownership_range.host_depth_render_target_unorm24);
+    owners.emplace(ownership_range.host_depth_render_target_float24);
+  }
+  for (auto it = render_targets_.begin(); it != render_targets_.end();) {
+    RenderTarget* render_target = it->second;
+    if (!render_target) {
+      // Failed to make (memory may be there now): let the next use try again.
+      it = render_targets_.erase(it);
+      continue;
+    }
+    if (owners.find(it->first) == owners.end() &&
+        render_target->last_used_ms() + trim_min_idle_ms_ <= trim_now_ms_) {
+      freed_bytes += render_target->host_memory_bytes();
+      ++freed_count;
+      delete render_target;
+      it = render_targets_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (freed_count) {
+    // Nothing of the common code may keep a pointer to one that's gone.
+    std::memset(last_update_used_render_targets_, 0, sizeof(last_update_used_render_targets_));
+    std::memset(last_update_accumulated_render_targets_, 0,
+                sizeof(last_update_accumulated_render_targets_));
+    ResetAccumulatedRenderTargets();
+    for (std::vector<Transfer>& transfers : last_update_transfers_) {
+      transfers.clear();
+    }
+    OnRenderTargetsTrimmed();
+    REXGPU_INFO(
+        "RenderTargetCache: freed {} unused render targets ({} MB), {} left ({} MB), idle limit "
+        "{} s{}",
+        freed_count, freed_bytes >> 20, render_targets_.size(),
+        GetRenderTargetsHostMemoryBytes() >> 20, trim_min_idle_ms_ / 1000,
+        trim_pressure_ ? ", the video memory is short" : "");
+  }
+  if (freed_bytes_out) {
+    *freed_bytes_out = freed_bytes;
+  }
+  return freed_count;
 }
 
 bool RenderTargetCache::Update(bool is_rasterization_done,
@@ -1780,6 +1890,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
   RenderTarget* render_target;
   if (it_rt != render_targets_.end()) {
     render_target = it_rt->second;
+    if (render_target) {
+      render_target->set_last_used_ms(trim_now_ms_);
+    }
   } else {
     render_target = CreateRenderTarget(key);
     uint32_t width = key.GetWidth();
@@ -1798,6 +1911,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
           width, height, uint32_t(1) << uint32_t(key.msaa_samples),
           key.is_depth ? "depth" : "color", static_cast<uint32_t>(key.resource_format),
           static_cast<uint32_t>(key.base_tiles));
+    }
+    if (render_target) {
+      render_target->set_last_used_ms(trim_now_ms_);
     }
     // Insert even if failed to create, not to try to create again.
     render_targets_.emplace(key, render_target);

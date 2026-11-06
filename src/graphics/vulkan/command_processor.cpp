@@ -24,6 +24,7 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <glslang/Public/ShaderLang.h>
 #include <rex/assert.h>
+#include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -5743,6 +5744,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
 
+    // render_target_trim_seconds: whether host render targets can be given back.
+    const bool render_targets_trim_due =
+        render_target_cache_ &&
+        render_target_cache_->IsTrimDue(rex::chrono::Clock::QueryHostUptimeMillis());
+
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
 
@@ -5773,6 +5779,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       primitive_processor_->ClearCache();
 
       shared_memory_->ClearCache();
+    } else if (!cache_clear_requested_ && render_targets_trim_due &&
+               AwaitAllQueueOperationsCompletion()) {
+      // The GPU is done with everything submitted: render targets that hold no
+      // data can go.
+      render_target_cache_->TrimUnusedRenderTargets();
     }
   }
 
