@@ -125,6 +125,17 @@ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
 //     "96 MB, and with 3x3, it will be 360 + 216 MB.",
 //     "GPU");
 
+// CHECK: that the stores through the unsigned view of a typeless (Direct3D 12) or storage-capable
+// (Vulkan) image leave the bits the copy left, on every GPU, is not proved: the fork's first
+// picture check was invalid and its later one (eight pictures a block, sham blocks as the
+// reference) was never run on this setting. Gains were measured on the integrated Radeon only
+// (frame -4.1%); the RTX 5080's GPU busy time was 1 to 4% longer.
+REXCVAR_DEFINE_BOOL(texture_load_direct_unscaled, true, "GPU",
+                    "At native resolution, load single-level 2D textures over memory that a "
+                    "resolve has written straight into the host texture in one compute pass, "
+                    "instead of decoding into a buffer and copying that into the texture")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex::graphics {
 
 const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCount] = {
@@ -222,6 +233,10 @@ TextureCache::TextureCache(const RegisterFile& register_file, SharedMemory& shar
     std::memset(scaled_resolve_pages_l2_, 0, sizeof(scaled_resolve_pages_l2_));
     scaled_resolve_global_watch_handle_ =
         shared_memory.RegisterGlobalWatch(ScaledResolveGlobalWatchCallbackThunk, this);
+  } else if (REXCVAR_GET(texture_load_direct_unscaled)) {
+    constexpr uint32_t kResolvedPageDwordCount = SharedMemory::kBufferSize / 4096 / 32;
+    resolved_pages_ = std::unique_ptr<uint32_t[]>(new uint32_t[kResolvedPageDwordCount]);
+    std::memset(resolved_pages_.get(), 0, kResolvedPageDwordCount * sizeof(uint32_t));
   }
 }
 
@@ -338,10 +353,22 @@ TextureCache::DirectLoadShader TextureCache::GetDirectLoadShader(LoadShaderIndex
 }
 
 bool TextureCache::IsDirectLoadPossible(const TextureKey& key) {
+  if (key.mip_max_level || key.dimension == xenos::DataDimension::k3D ||
+      key.GetDepthOrArraySize() != 1) {
+    return false;
+  }
+  if (!key.scaled_resolve &&
+      (!key.resolved_unscaled || !key.tiled || key.dimension != xenos::DataDimension::k2DOrStacked ||
+       !REXCVAR_GET(texture_load_direct_unscaled))) {
+    return false;
+  }
   // Not if the base is in the packed mip tail (16 texels or less): that's
   // loaded as the whole tail through the buffer.
-  return key.scaled_resolve && !key.mip_max_level && key.dimension != xenos::DataDimension::k3D &&
-         key.GetDepthOrArraySize() == 1 && key.GetGuestLayout().packed_level != 0;
+  return key.GetGuestLayout().packed_level != 0;
+}
+
+bool TextureCache::IsDirectLoadUnscaledWanted() const {
+  return !IsDrawResolutionScaled() && REXCVAR_GET(texture_load_direct_unscaled);
 }
 
 void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
@@ -367,6 +394,22 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_
       }
       scaled_resolve_pages_[i] |= add_bits;
       scaled_resolve_pages_l2_[i >> 6] |= UINT64_C(1) << (i & 63);
+    }
+  } else if (resolved_pages_) {
+    uint32_t page_first = start_unscaled >> 12;
+    uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
+    uint32_t block_first = page_first >> 5;
+    uint32_t block_last = page_last >> 5;
+    auto global_lock = global_critical_region_.Acquire();
+    for (uint32_t i = block_first; i <= block_last; ++i) {
+      uint32_t add_bits = UINT32_MAX;
+      if (i == block_first) {
+        add_bits &= ~((UINT32_C(1) << (page_first & 31)) - 1);
+      }
+      if (i == block_last && (page_last & 31) != 31) {
+        add_bits &= (UINT32_C(1) << ((page_last & 31) + 1)) - 1;
+      }
+      resolved_pages_[i] |= add_bits;
     }
   }
 
@@ -639,7 +682,8 @@ void TextureCache::TextureKey::LogAction(const char* action) const {
   REXGPU_TRACE(
       "{} {} {}{}x{}x{} {} {} texture with {} {}packed mip level{}, "
       "base at 0x{:08X} (pitch {}), mips at 0x{:08X}",
-      action, tiled ? "tiled" : "linear", scaled_resolve ? "scaled " : "", GetWidth(), GetHeight(),
+      action, tiled ? "tiled" : "linear",
+      scaled_resolve ? "scaled " : (resolved_unscaled ? "resolved " : ""), GetWidth(), GetHeight(),
       GetDepthOrArraySize(), GetLogDimensionName(), FormatInfo::Get(format)->name,
       mip_max_level + 1, packed_mips ? "" : "un", mip_max_level != 0 ? "s" : "", base_page << 12,
       pitch << 5, mip_page << 12);
@@ -650,7 +694,8 @@ void TextureCache::Texture::LogAction(const char* action) const {
       "{} {} {}{}x{}x{} {} {} texture with {} {}packed mip level{}, "
       "base at 0x{:08X} (pitch {}, size 0x{:08X}), mips at 0x{:08X} (size "
       "0x{:08X})",
-      action, key_.tiled ? "tiled" : "linear", key_.scaled_resolve ? "scaled " : "",
+      action, key_.tiled ? "tiled" : "linear",
+      key_.scaled_resolve ? "scaled " : (key_.resolved_unscaled ? "resolved " : ""),
       key_.GetWidth(), key_.GetHeight(), key_.GetDepthOrArraySize(), key_.GetLogDimensionName(),
       FormatInfo::Get(key_.format)->name, key_.mip_max_level + 1, key_.packed_mips ? "" : "un",
       key_.mip_max_level != 0 ? "s" : "", key_.base_page << 12, key_.pitch << 5, GetGuestBaseSize(),
@@ -798,6 +843,33 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
          IsRangeScaledResolved(key.mip_page << 12,
                                scaled_resolve_guest_layout.mips_total_extent_bytes))) {
       key.scaled_resolve = 1;
+    }
+  }
+
+  // texture_load_direct_unscaled: a single-level tiled 2D texture of 32 or 64
+  // bits a texel over memory that a resolve has written at native resolution is
+  // created for loading straight into. Whether the host can is up to its texture
+  // cache (the format, a pipeline for it, and IsDirectLoadPossible: the base not
+  // in the packed mip tail). This runs whenever the bindings are looked up again,
+  // which is every frame after a resolve, so the extent is the cheap upper bound
+  // of the tiled base level (rows of the pitch, a multiple of 32, for the height
+  // rounded up to a tile) rather than the guest layout; it only picks the pages
+  // to look at.
+  if (resolved_pages_ && !key.scaled_resolve && key.tiled &&
+      key.dimension == xenos::DataDimension::k2DOrStacked && !key.mip_max_level &&
+      key.GetDepthOrArraySize() == 1 && (key.GetWidth() > 16 || key.GetHeight() > 16) &&
+      REXCVAR_GET(texture_load_direct_unscaled)) {
+    const FormatInfo* direct_format_info = FormatInfo::Get(key.format);
+    uint32_t direct_bytes_per_block = direct_format_info->bytes_per_block();
+    if (direct_format_info->block_width == 1 && direct_format_info->block_height == 1 &&
+        (direct_bytes_per_block == 4 || direct_bytes_per_block == 8)) {
+      uint64_t direct_base_size =
+          uint64_t(key.pitch << 5) *
+          rex::align(key.GetHeight(), xenos::kTextureTileWidthHeight) * direct_bytes_per_block;
+      if (IsRangeResolvedUnscaled(key.base_page << 12,
+                                  uint32_t(std::min(direct_base_size, uint64_t(UINT32_MAX))))) {
+        key.resolved_unscaled = 1;
+      }
     }
   }
 
@@ -1084,6 +1156,35 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled, uint32_t lengt
       if (scaled_resolve_pages_[block_index] & check_bits) {
         return true;
       }
+    }
+  }
+  return false;
+}
+
+bool TextureCache::IsRangeResolvedUnscaled(uint32_t start_unscaled, uint32_t length_unscaled) {
+  if (!resolved_pages_) {
+    return false;
+  }
+  start_unscaled = std::min(start_unscaled, SharedMemory::kBufferSize);
+  length_unscaled = std::min(length_unscaled, SharedMemory::kBufferSize - start_unscaled);
+  if (!length_unscaled) {
+    return false;
+  }
+  uint32_t page_first = start_unscaled >> 12;
+  uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
+  uint32_t block_first = page_first >> 5;
+  uint32_t block_last = page_last >> 5;
+  auto global_lock = global_critical_region_.Acquire();
+  for (uint32_t i = block_first; i <= block_last; ++i) {
+    uint32_t check_bits = UINT32_MAX;
+    if (i == block_first) {
+      check_bits &= ~((UINT32_C(1) << (page_first & 31)) - 1);
+    }
+    if (i == block_last && (page_last & 31) != 31) {
+      check_bits &= (UINT32_C(1) << ((page_last & 31) + 1)) - 1;
+    }
+    if (resolved_pages_[i] & check_bits) {
+      return true;
     }
   }
   return false;
