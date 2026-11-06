@@ -55,6 +55,22 @@ add_library(rex::kernel ALIAS rexruntime)
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
+if(MINGW AND NOT PS5)
+    # CMake implements WINDOWS_EXPORT_ALL_SYMBOLS only for MSVC-style tools; with
+    # MinGW, lld exports everything by itself but leaves out symbols named
+    # __imp_*, which is how the recompiler names a title's kernel imports. List
+    # those in a .def of their own; --export-all-symbols keeps the rest exported.
+    set(_rex_imp_rsp "${CMAKE_CURRENT_BINARY_DIR}/rexruntime-objects-$<CONFIG>.rsp")
+    set(_rex_imp_def "${CMAKE_CURRENT_BINARY_DIR}/rexruntime-imports-$<CONFIG>.def")
+    file(GENERATE OUTPUT "${_rex_imp_rsp}"
+         CONTENT "\"$<JOIN:$<TARGET_OBJECTS:rexruntime>,\"\n\">\"\n")
+    add_custom_command(TARGET rexruntime PRE_LINK
+        COMMAND ${CMAKE_COMMAND} "-DNM=${CMAKE_NM}" "-DRSP=${_rex_imp_rsp}"
+                "-DOUT=${_rex_imp_def}" -P "${REXGLUE_ROOT}/cmake/mingw_imp_exports.cmake"
+        VERBATIM)
+    target_link_options(rexruntime PRIVATE "LINKER:--export-all-symbols" "${_rex_imp_def}")
+endif()
+
 rex_target_pch(rexruntime
     <mutex>
     <unordered_map>
