@@ -11,11 +11,13 @@
  */
 
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -151,6 +153,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   }
 
   bool submission_open() const { return submission_open_; }
+  // Draws in an occlusion query aren't left out for a pipeline being created.
+  bool IsOcclusionQueryActive() const { return active_occlusion_query_.valid; }
   uint64_t GetCurrentSubmission() const {
     return submission_completed_ + uint64_t(submissions_in_flight_fences_.size()) + 1;
   }
@@ -430,6 +434,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Keep primary-buffer-end submit behavior aligned with D3D12: only submit
   // when immediate submission is safe.
   bool CanEndSubmissionImmediately() const;
+  // For a draw that got a placeholder pipeline, waits for the real one within
+  // what is left of the frame's async_pipeline_wait_budget_ms. Returns whether
+  // it's no longer a placeholder.
+  bool AwaitAsyncPipeline(void* pipeline_handle);
 
   void ClearTransientDescriptorPools();
   bool IssueCopy_ReadbackResolvePath();
@@ -560,6 +568,12 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Tracks whether any draw in the current frame used an async placeholder
   // graphics pipeline and may have produced incomplete output.
   bool frame_used_async_placeholder_pipeline_ = false;
+  // Time this frame's draws have waited for pipelines being created
+  // asynchronously (async_pipeline_wait_budget_ms).
+  uint64_t frame_async_pipeline_wait_us_ = 0;
+  // When the presents being skipped for placeholder pipelines started
+  // (vulkan_async_skip_incomplete_frames_max_ms), or none.
+  std::optional<std::chrono::steady_clock::time_point> incomplete_frames_skipped_since_;
   // Guest frame index, since some transient resources can be reused across
   // submissions. Values updated in the beginning of a frame.
   uint64_t frame_current_ = 1;

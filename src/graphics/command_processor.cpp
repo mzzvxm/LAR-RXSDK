@@ -132,6 +132,14 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                     "pipelines are being prepared.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_INT32(async_pipeline_wait_budget_ms, 4, "GPU",
+                     "With async_shader_compilation, how long a frame may wait in total for "
+                     "pipelines its draws need that are still being created, before those draws "
+                     "are left out until their pipelines are ready. 0 leaves them out at once, "
+                     "-1 waits as long as it takes.")
+    .range(-1, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics {
 
 using namespace rex::graphics::xenos;

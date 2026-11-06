@@ -92,6 +92,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12RootSignature* GetRootSignature(const DxbcShader* vertex_shader,
                                         const DxbcShader* pixel_shader, bool tessellated);
 
+  // Draws in an occlusion query aren't left out for a pipeline being created.
+  bool IsOcclusionQueryActive() const { return active_occlusion_query_.valid; }
+
   ui::d3d12::D3D12UploadBufferPool& GetConstantBufferPool() const { return *constant_buffer_pool_; }
 
   D3D12_CPU_DESCRIPTOR_HANDLE GetViewBindlessHeapCPUStart() const {
@@ -336,6 +339,10 @@ class D3D12CommandProcessor : public CommandProcessor {
   // as when there are unfinished graphics pipeline creation requests that would
   // need to be fulfilled before actually submitting the command list.
   bool CanEndSubmissionImmediately() const;
+  // For a draw whose pipeline is still being created asynchronously, waits for
+  // it within what is left of the frame's async_pipeline_wait_budget_ms.
+  // Returns whether the creation has finished.
+  bool AwaitAsyncPipeline(void* pipeline_handle);
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionFence(submission_current_);
     return submission_completed_ + 1 >= submission_current_;
@@ -482,6 +489,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool queue_operations_done_since_submission_signal_ = false;
 
   bool frame_open_ = false;
+  // Time this frame's draws have waited for pipelines being created
+  // asynchronously (async_pipeline_wait_budget_ms).
+  uint64_t frame_async_pipeline_wait_us_ = 0;
   // Guest frame index, since some transient resources can be reused across
   // submissions. Values updated in the beginning of a frame.
   uint64_t frame_current_ = 1;
@@ -586,6 +596,7 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   // Root signatures for different descriptor counts.
   std::unordered_map<uint32_t, ID3D12RootSignature*> root_signatures_bindful_;
+  std::mutex root_signatures_bindful_mutex_;
   ID3D12RootSignature* root_signature_bindless_vs_ = nullptr;
   ID3D12RootSignature* root_signature_bindless_ds_ = nullptr;
 

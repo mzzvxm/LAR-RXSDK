@@ -101,6 +101,14 @@ class PipelineCache {
   // any other pipeline (and with the ROV path, where the pipeline's sample count
   // is 1). Reads only the description, which never changes after creation.
   uint32_t GetMsaaLineGuardSamples(void* handle) const;
+  ID3D12RootSignature* GetRootSignatureByHandle(void* handle) const {
+    return reinterpret_cast<const Pipeline*>(handle)->root_signature.load(
+        std::memory_order_acquire);
+  }
+  // Waits up to timeout_us for a pipeline queued for asynchronous creation.
+  // Returns whether its creation has finished (it may have failed - check the
+  // state).
+  bool AwaitAsyncPipelineCreation(void* handle, uint64_t timeout_us);
 
  private:
   REXPACKEDSTRUCT(ShaderStoredHeader, {
@@ -358,6 +366,9 @@ class PipelineCache {
     D3D12Shader::D3D12Translation* pending_vertex_shader = nullptr;
     D3D12Shader::D3D12Translation* pending_pixel_shader = nullptr;
     uint8_t priority = 0;
+    // Queued by a draw for asynchronous creation and not created (or failed)
+    // yet.
+    std::atomic<bool> async_creation_pending{false};
   };
   struct PipelineCreationPriorityComparator {
     bool operator()(const Pipeline* a, const Pipeline* b) const {
@@ -407,6 +418,9 @@ class PipelineCache {
   void CreateQueuedPipelinesOnProcessorThread();
   std::mutex creation_request_lock_;
   std::condition_variable creation_request_cond_;
+  // Notified (with creation_request_lock_ taken and released after clearing
+  // async_creation_pending) when a pipeline queued by a draw is created.
+  std::condition_variable async_creation_done_cond_;
   // Protected with creation_request_lock_, notify_one creation_request_cond_
   // when set.
   std::priority_queue<Pipeline*, std::vector<Pipeline*>, PipelineCreationPriorityComparator>

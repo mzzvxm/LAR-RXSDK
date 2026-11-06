@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
@@ -229,6 +230,9 @@ ID3D12RootSignature* D3D12CommandProcessor::GetRootSignature(const DxbcShader* v
   index |= uint32_t(vertex_visibility == D3D12_SHADER_VISIBILITY_DOMAIN) << index_offset;
   ++index_offset;
   assert_true(index_offset <= 32);
+
+  // Also called by the pipeline creation threads.
+  std::lock_guard<std::mutex> root_signatures_bindful_lock(root_signatures_bindful_mutex_);
 
   // Try an existing root signature.
   auto it = root_signatures_bindful_.find(index);
@@ -2422,9 +2426,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
           bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
     return false;
   }
-  if (REXCVAR_GET(async_shader_compilation) &&
-      pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
-    return true;
+  if (REXCVAR_GET(async_shader_compilation)) {
+    // Left out until the pipeline is ready, unless it's ready within the
+    // frame's waiting budget.
+    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
+        (!AwaitAsyncPipeline(pipeline_handle) ||
+         pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr)) {
+      return true;
+    }
+    // A pipeline created asynchronously gets its root signature on the
+    // creation thread, stored before the pipeline, possibly after
+    // ConfigurePipeline returned.
+    root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
   }
 
   // Update the textures - this may bind pipelines.
@@ -3604,6 +3617,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 
   if (is_opening_frame) {
     frame_open_ = true;
+    frame_async_pipeline_wait_us_ = 0;
 
     // Reset bindings that depend on the data stored in the pools.
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
@@ -3776,7 +3790,37 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
 }
 
 bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
-  return !submission_open_ || !pipeline_cache_->IsCreatingPipelines();
+  // Pending pipelines of asynchronous creation don't hold a submission: the end
+  // of one doesn't wait for them.
+  return !submission_open_ || REXCVAR_GET(async_shader_compilation) ||
+         !pipeline_cache_->IsCreatingPipelines();
+}
+
+bool D3D12CommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
+  // A draw in an occlusion query whose pipeline an earlier draw queued waits
+  // (up to half a second, outside the budget) rather than being left out, which
+  // the query would count as hidden.
+  if (active_occlusion_query_.valid) {
+    return pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, UINT64_C(500000));
+  }
+  int32_t budget_ms = REXCVAR_GET(async_pipeline_wait_budget_ms);
+  if (!budget_ms) {
+    return false;
+  }
+  uint64_t timeout_us = UINT64_C(60000000);
+  if (budget_ms > 0) {
+    uint64_t budget_us = uint64_t(budget_ms) * 1000;
+    if (frame_async_pipeline_wait_us_ >= budget_us) {
+      return false;
+    }
+    timeout_us = budget_us - frame_async_pipeline_wait_us_;
+  }
+  auto wait_start = std::chrono::steady_clock::now();
+  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
+  frame_async_pipeline_wait_us_ += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - wait_start)
+                                                .count());
+  return created;
 }
 
 void D3D12CommandProcessor::ClearCommandAllocatorCache() {
