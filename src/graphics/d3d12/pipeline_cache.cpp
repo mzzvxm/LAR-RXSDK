@@ -1474,9 +1474,18 @@ bool PipelineCache::GetCurrentStateDescription(
           description_out.stencil_back_func = description_out.stencil_front_func;
         }
       }
+      // A test that always passes, without writing, is removed from every guest draw
+      // (draw_util::GetNormalizedDepthControl); the command processor puts it back for a draw in an
+      // occlusion query that has nothing else for Direct3D 12 to rasterize with.
+      if (normalized_depth_control.z_enable &&
+          normalized_depth_control.zfunc == xenos::CompareFunction::kAlways &&
+          !normalized_depth_control.z_write_enable) {
+        description_out.depth_test_always = 1;
+      }
       // If not binding the DSV, ignore the format in the hash.
       if (description_out.depth_func != xenos::CompareFunction::kAlways ||
-          description_out.depth_write || description_out.stencil_enable) {
+          description_out.depth_write || description_out.stencil_enable ||
+          description_out.depth_test_always) {
         description_out.depth_format =
             xenos::DepthRenderTargetFormat(bound_depth_and_color_render_target_formats[0]);
         depth_stencil_bound_and_used = true;
@@ -2966,7 +2975,8 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
   if (!edram_rov_used) {
     // Depth/stencil.
-    if (description.depth_func != xenos::CompareFunction::kAlways || description.depth_write) {
+    if (description.depth_func != xenos::CompareFunction::kAlways || description.depth_write ||
+        description.depth_test_always) {
       state_desc.DepthStencilState.DepthEnable = TRUE;
       state_desc.DepthStencilState.DepthWriteMask =
           description.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
