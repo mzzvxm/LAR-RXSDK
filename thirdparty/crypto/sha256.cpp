@@ -14,7 +14,8 @@
 #define __BYTE_ORDER __BYTE_ORDER__
 #define __BIG_ENDIAN __ORDER_BIG_ENDIAN__
 #endif
-#else
+// Windows is little-endian, and older mingw-w64 (llvm-mingw 20250709) has no endian.h.
+#elif !defined(_WIN32)
 #include <endian.h>
 #endif
 #endif

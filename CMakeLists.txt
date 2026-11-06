@@ -12,6 +12,19 @@ project(ReXGlue
     LANGUAGES ${REXGLUE_LANGUAGES}
     DESCRIPTION "Xbox 360 Recompilation SDK"
 )
+if(MINGW)
+    # Windows file names, as with MSVC: the GPU plugin is loaded at run time as
+    # rexgpu-<name>.dll (gpu_plugin_loader.cpp), not CMake's MinGW libfoo.dll.
+    set(CMAKE_SHARED_LIBRARY_PREFIX "")
+    set(CMAKE_IMPORT_LIBRARY_PREFIX "")
+    # mingw-w64 assumes Windows 7 (_WIN32_WINNT=0x601) where the Windows SDK
+    # assumes the current Windows; the SDK calls newer APIs (SetProcessInformation
+    # in frame_timing.cpp). In the flags rather than add_compile_definitions, so
+    # that the configure checks of the libraries below see them too.
+    # -fms-extensions: __try/__except, as with MSVC.
+    string(APPEND CMAKE_C_FLAGS " -D_WIN32_WINNT=0x0A00")
+    string(APPEND CMAKE_CXX_FLAGS " -D_WIN32_WINNT=0x0A00 -fms-extensions")
+endif()
 # Floor only: bump MAJOR.MINOR for API changes. Patch is derived from git tags
 # in cmake/rex_version.cmake. See docs/RELEASING.md.
 
