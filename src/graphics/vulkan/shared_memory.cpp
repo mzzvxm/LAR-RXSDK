@@ -268,6 +268,60 @@ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_alloca
   return true;
 }
 
+bool VulkanSharedMemory::UploadByteRanges(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
+  if (upload_byte_ranges.empty()) {
+    return true;
+  }
+  uint32_t bounds_start = UINT32_MAX;
+  uint32_t bounds_end = 0;
+  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
+    bounds_start = std::min(bounds_start, range.first);
+    bounds_end = std::max(bounds_end, range.first + range.second);
+  }
+  Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
+  command_processor_.SubmitBarriers(true);
+  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+  uint64_t submission_current = command_processor_.GetCurrentSubmission();
+  upload_regions_.clear();
+  VkBuffer upload_buffer_previous = VK_NULL_HANDLE;
+  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
+    uint32_t start = range.first;
+    uint32_t remaining = range.second;
+    while (remaining) {
+      VkBuffer upload_buffer;
+      VkDeviceSize upload_buffer_offset, upload_buffer_size;
+      uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
+          submission_current, remaining, 64, upload_buffer, upload_buffer_offset,
+          upload_buffer_size);
+      if (upload_buffer_mapping == nullptr) {
+        REXGPU_ERROR("Shared memory: Failed to get a Vulkan upload buffer");
+        return false;
+      }
+      upload_buffer_size = std::min(upload_buffer_size, VkDeviceSize(remaining));
+      std::memcpy(upload_buffer_mapping, memory().TranslatePhysical(start), upload_buffer_size);
+      if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+        command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+                                       uint32_t(upload_regions_.size()), upload_regions_.data());
+        upload_regions_.clear();
+      }
+      upload_buffer_previous = upload_buffer;
+      VkBufferCopy& upload_region = upload_regions_.emplace_back();
+      upload_region.srcOffset = upload_buffer_offset;
+      upload_region.dstOffset = VkDeviceSize(start);
+      upload_region.size = upload_buffer_size;
+      start += uint32_t(upload_buffer_size);
+      remaining -= uint32_t(upload_buffer_size);
+    }
+  }
+  if (!upload_regions_.empty()) {
+    command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+                                   uint32_t(upload_regions_.size()), upload_regions_.data());
+    upload_regions_.clear();
+  }
+  return true;
+}
+
 bool VulkanSharedMemory::UploadRanges(
     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
   if (upload_page_ranges.empty()) {
