@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -195,6 +196,41 @@ class CommandProcessor {
                                           uint32_t count);
   virtual bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count);
+
+  // Guest occlusion queries. Direct3D 9 on the console issues EVENT_WRITE_ZPD twice for a query, to
+  // the two halves of a 64-byte record: the end snapshot goes to +0x00 (with 0xFFFFFEED in its
+  // ZPass words until the GPU has written it), the begin snapshot to +0x20. The game subtracts the
+  // begin from the end. The two events are paired by their order (an event 0x20 below the open
+  // begin is its end whatever the snapshot holds: the game stores the sentinel with the CPU, which
+  // a late count written to the record could undo); the host query between them is read back
+  // without waiting. At the end event the game is told the newest real count the host has
+  // delivered so far (the fake count before the first), a few milliseconds old (the time the host
+  // GPU needs for the submission the query is in); the count of this very query is written to the
+  // record only if the record still holds that guess.
+  // The host side is the backends' (the defaults: no host queries, the fake count only).
+  virtual bool HostOcclusionQueriesUsable() const { return false; }
+  // Starts a host query at this point of the command stream; false: none was started.
+  virtual bool HostOcclusionQueryBegin() { return false; }
+  // Whether the host query is still recording (a submission ending inside it cuts it).
+  virtual bool HostOcclusionQueryRecording() const { return false; }
+  // Ends the recording host query and queues a copy of its count. submission_out is the submission
+  // whose completion makes the count readable.
+  virtual bool HostOcclusionQueryEnd(uint32_t& /*host_index_out*/, uint64_t& /*submission_out*/) {
+    return false;
+  }
+  // Ends the recording host query without keeping its count.
+  virtual void HostOcclusionQueryAbandon() {}
+  // Reads the count of an ended host query if the GPU has it (never waits), normalized to the
+  // guest's 1x resolution.
+  virtual bool HostOcclusionQueryRead(uint32_t /*host_index*/, uint64_t /*submission*/,
+                                      uint64_t& /*samples_out*/) {
+    return false;
+  }
+  // Writes the counts of the host queries the GPU has finished to the guest. Cheap when none is
+  // pending; the command processor calls it after every chunk of the primary buffer and while idle.
+  void PollOcclusionQueryResults();
+  // Forgets the open guest query and the pending counts (the host side is gone or restarting).
+  void ClearOcclusionQueryState();
   bool ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet, const char* opcode_name,
                               uint32_t viz_query_condition, uint32_t count_remaining);
   bool ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
@@ -285,6 +321,32 @@ class CommandProcessor {
   // Set by backend command processors to their legacy memexport readback cvar
   // name (for explicit-override compatibility).
   const char* legacy_readback_memexport_cvar_name_ = nullptr;
+
+  // Guest occlusion queries (ExecuteGuestOcclusionEvent).
+  bool ExecuteGuestOcclusionEvent(uint32_t sample_count_address,
+                                  xenos::xe_gpu_depth_sample_counts* sample_counts,
+                                  bool sentinel_present);
+  // Writes the ZPass words (and the other counters) of an end snapshot: samples is the count the
+  // game will take; returns the 64-bit value of the ZPass pair as written.
+  uint64_t WriteOcclusionCounts(xenos::xe_gpu_depth_sample_counts* sample_counts,
+                                uint32_t samples);
+  // The count the game is told at an end event: the newest real one (the fake count before the
+  // first); false when there is none to tell (a negative fake count and no real one).
+  bool OcclusionGuessSamples(uint32_t& samples_out) const;
+  void DropPendingOcclusionResult(uint32_t end_address);
+  struct OcclusionPending {
+    uint32_t end_address;  // the record's end snapshot (the guest's sample counts)
+    uint32_t host_index;
+    uint64_t submission;
+    uint64_t guess_zpass;  // the ZPass pair the record held after the end event
+  };
+  bool occlusion_guest_open_ = false;
+  bool occlusion_host_began_ = false;
+  uint32_t occlusion_begin_address_ = 0;
+  std::deque<OcclusionPending> occlusion_pending_;
+  // The newest real count the host delivered (what an end event tells the game).
+  bool occlusion_latest_valid_ = false;
+  uint32_t occlusion_latest_samples_ = 0;
 
  private:
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};

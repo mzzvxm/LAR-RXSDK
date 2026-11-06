@@ -250,12 +250,19 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void WriteRegister(uint32_t index, uint32_t value) override;
   void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
-  bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, uint32_t packet,
-                                          uint32_t count) override;
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
   void OnPrimaryBufferEnd() override;
+
+  // Guest occlusion queries (CommandProcessor::ExecuteGuestOcclusionEvent).
+  bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
+  bool HostOcclusionQueryBegin() override;
+  bool HostOcclusionQueryRecording() const override { return active_occlusion_query_.valid; }
+  bool HostOcclusionQueryEnd(uint32_t& host_index_out, uint64_t& submission_out) override;
+  void HostOcclusionQueryAbandon() override;
+  bool HostOcclusionQueryRead(uint32_t host_index, uint64_t submission,
+                              uint64_t& samples_out) override;
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -434,12 +441,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   void DestroyScratchBuffer();
   bool InitializeOcclusionQueryResources();
   void ShutdownOcclusionQueryResources();
-  bool BeginGuestOcclusionQuery(uint32_t sample_count_address);
-  bool EndGuestOcclusionQuery(uint32_t sample_count_address);
   bool AcquireOcclusionQueryIndex(uint32_t& host_index_out);
-  void DisableHostOcclusionQueries();
   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
-  void WriteGuestOcclusionResult(uint32_t sample_count_address, uint64_t samples);
   void InvalidateAllVertexBufferResidency();
   void InvalidateVertexBufferResidency(uint32_t vfetch_index);
   void InvalidateVertexBufferResidencyRange(uint32_t first_vfetch, uint32_t last_vfetch);
@@ -738,7 +741,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t occlusion_query_cursor_ = 0;
   bool occlusion_query_resources_available_ = false;
   struct ActiveOcclusionQuery {
-    uint32_t sample_count_address = 0;
     uint32_t host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;

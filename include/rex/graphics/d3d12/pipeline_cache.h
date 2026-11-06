@@ -211,6 +211,9 @@ class PipelineCache {
     uint32_t depth_write : 1;                         // 18
     uint32_t stencil_enable : 1;                      // 19
     uint32_t stencil_read_mask : 8;                   // 27
+    // A depth test that always passes, without writing, kept enabled (a draw in an occlusion
+    // query: without depth / stencil and a pixel shader Direct3D 12 doesn't rasterize it).
+    uint32_t depth_test_always : 1;  // 28
 
     uint32_t stencil_write_mask : 8;                   // 8
     xenos::StencilOp stencil_front_fail_op : 3;        // 11

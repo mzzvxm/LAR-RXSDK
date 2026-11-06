@@ -151,73 +151,6 @@ void D3D12CommandProcessor::InitializeShaderStorage(const std::filesystem::path&
   pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking);
 }
 
-bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
-                                                               uint32_t packet, uint32_t count) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
-    return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
-  }
-
-  const uint32_t kQueryFinished = rex::byte_swap(0xFFFFFEED);
-  assert_true(count == 1);
-  uint32_t initiator = reader->ReadAndSwap<uint32_t>();
-  WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
-
-  uint32_t sample_count_addr = register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
-  auto* sample_counts =
-      memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
-  if (!sample_counts) {
-    DisableHostOcclusionQueries();
-    return true;
-  }
-
-  auto write_fallback_result = [sample_counts, kQueryFinished]() -> bool {
-    auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
-    if (fake_sample_count < 0) {
-      return true;
-    }
-    bool is_end_via_z_pass =
-        sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished;
-    bool is_end_via_z_fail =
-        sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
-    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
-    if (is_end_via_z_pass || is_end_via_z_fail) {
-      sample_counts->ZPass_A = fake_sample_count;
-      sample_counts->Total_A = fake_sample_count;
-    }
-    return true;
-  };
-
-  bool is_end_via_z_pass =
-      sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished;
-  bool is_end_via_z_fail =
-      sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
-  bool is_end = is_end_via_z_pass || is_end_via_z_fail;
-
-  if (!is_end) {
-    if (active_occlusion_query_.valid &&
-        active_occlusion_query_.sample_count_address != sample_count_addr) {
-      DisableHostOcclusionQueries();
-      return write_fallback_result();
-    }
-    if (!BeginGuestOcclusionQuery(sample_count_addr)) {
-      return write_fallback_result();
-    }
-    return true;
-  }
-
-  if (!active_occlusion_query_.valid ||
-      active_occlusion_query_.sample_count_address != sample_count_addr) {
-    DisableHostOcclusionQueries();
-    return write_fallback_result();
-  }
-
-  if (!EndGuestOcclusionQuery(sample_count_addr, sample_counts)) {
-    return write_fallback_result();
-  }
-
-  return true;
-}
-
 bool D3D12CommandProcessor::PushTransitionBarrier(ID3D12Resource* resource,
                                                   D3D12_RESOURCE_STATES old_state,
                                                   D3D12_RESOURCE_STATES new_state,
@@ -2324,8 +2257,12 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
 }
 
 void D3D12CommandProcessor::OnPrimaryBufferEnd() {
+  // The end of a chunk of the primary buffer (where the game's last kick left off) can fall between
+  // the begin and the end of a guest occlusion query. A host query cannot span submissions, so
+  // ending the submission there cut it: the guest's end then found none. With the query open the
+  // submission goes on with the next chunk, and ends at the next point that is not inside a query.
   if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
-      CanEndSubmissionImmediately()) {
+      CanEndSubmissionImmediately() && !active_occlusion_query_.valid) {
     EndSubmission(false);
   }
 }
@@ -2409,6 +2346,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   }
 
   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
+  if (active_occlusion_query_.valid && is_rasterization_done && pixel_shader == nullptr &&
+      !memexport_used && !normalized_depth_control.z_enable &&
+      !normalized_depth_control.stencil_enable &&
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+    // Without a pixel shader and without depth / stencil, Direct3D 12 does not rasterize the draw
+    // at all (the way rasterization is switched off in it), so the query would count nothing; the
+    // console counts the samples that pass, and with no test all of them. A test that always
+    // passes, against the frame's depth target (the pipeline cache keeps it enabled).
+    normalized_depth_control.z_enable = 1;
+    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
+    normalized_depth_control.z_write_enable = 0;
+  }
 
   // Shader modifications.
   uint32_t ps_param_gen_pos = UINT32_MAX;
@@ -4947,7 +4896,10 @@ bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
 }
 
 void D3D12CommandProcessor::ShutdownOcclusionQueryResources() {
-  DisableHostOcclusionQueries();
+  active_occlusion_query_ = {};
+  occlusion_query_cursor_ = 0;
+  occlusion_query_resources_available_ = false;
+  ClearOcclusionQueryState();
 
   if (occlusion_query_readback_ && occlusion_query_readback_mapping_) {
     occlusion_query_readback_->Unmap(0, nullptr);
@@ -4965,35 +4917,11 @@ bool D3D12CommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out)
   return true;
 }
 
-void D3D12CommandProcessor::DisableHostOcclusionQueries() {
-  if (active_occlusion_query_.valid && occlusion_query_heap_) {
-    uint32_t host_index = active_occlusion_query_.host_index;
-    // Clear before EndSubmission to prevent the EndSubmission safety net from issuing a second
-    // EndQuery for the same index.
-    active_occlusion_query_ = {};
-    if (BeginSubmission(true)) {
-      deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
-                                         host_index);
-      EndSubmission(false);
-    }
-  } else {
-    active_occlusion_query_ = {};
-  }
-  occlusion_query_cursor_ = 0;
-  occlusion_query_resources_available_ = false;
-}
-
-bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_address) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
+bool D3D12CommandProcessor::HostOcclusionQueryBegin() {
+  if (!occlusion_query_resources_available_ || !occlusion_query_heap_) {
     return false;
   }
-  if (active_occlusion_query_.valid) {
-    REXGPU_WARN(
-        "D3D12CommandProcessor: Occlusion query begin issued while another query is active");
-    DisableHostOcclusionQueries();
-    return false;
-  }
-
+  active_occlusion_query_ = {};
   uint32_t host_index = 0;
   if (!AcquireOcclusionQueryIndex(host_index)) {
     return false;
@@ -5001,51 +4929,65 @@ bool D3D12CommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addre
   if (!BeginSubmission(true)) {
     return false;
   }
-
   deferred_command_list_.D3DBeginQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
                                        host_index);
-  active_occlusion_query_.sample_count_address = sample_count_address;
   active_occlusion_query_.host_index = host_index;
   active_occlusion_query_.valid = true;
   return true;
 }
 
-bool D3D12CommandProcessor::EndGuestOcclusionQuery(
-    uint32_t sample_count_address, xenos::xe_gpu_depth_sample_counts* sample_counts) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_ ||
-      !active_occlusion_query_.valid || !occlusion_query_heap_ || !occlusion_query_readback_) {
+void D3D12CommandProcessor::HostOcclusionQueryAbandon() {
+  if (!active_occlusion_query_.valid) {
+    return;
+  }
+  const uint32_t host_index = active_occlusion_query_.host_index;
+  active_occlusion_query_ = {};
+  // A query is recording only while its submission is open (the end of the submission ends it).
+  if (occlusion_query_heap_ && submission_open_) {
+    deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
+                                       host_index);
+  }
+}
+
+bool D3D12CommandProcessor::HostOcclusionQueryEnd(uint32_t& host_index_out,
+                                                  uint64_t& submission_out) {
+  if (!active_occlusion_query_.valid || !occlusion_query_heap_ || !occlusion_query_readback_) {
     return false;
   }
-
-  uint32_t host_index = active_occlusion_query_.host_index;
+  const uint32_t host_index = active_occlusion_query_.host_index;
   active_occlusion_query_ = {};
-
   if (!BeginSubmission(true)) {
     return false;
   }
-
+  // The count is copied to the readback buffer in the same list; nothing waits for it here: it is
+  // read once the submission has completed (HostOcclusionQueryRead).
   deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
                                      host_index);
   deferred_command_list_.D3DResolveQueryData(
       occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, host_index, 1,
       occlusion_query_readback_.Get(), sizeof(uint64_t) * host_index);
+  host_index_out = host_index;
+  submission_out = submission_current_;
+  return true;
+}
 
-  if (!EndSubmission(false)) {
+bool D3D12CommandProcessor::HostOcclusionQueryRead(uint32_t host_index, uint64_t submission,
+                                                   uint64_t& samples_out) {
+  if (!occlusion_query_readback_mapping_ || host_index >= kMaxOcclusionQueries) {
     return false;
   }
-
-  uint64_t query_submission = submission_current_ ? submission_current_ - 1 : 0;
-  CheckSubmissionFence(query_submission);
-  if (submission_completed_ < query_submission) {
-    return false;
+  if (submission_completed_ < submission) {
+    if (submission >= submission_current_) {
+      // Still being recorded.
+      return false;
+    }
+    // Only looks at the fence, never waits.
+    CheckSubmissionFence(0);
+    if (submission_completed_ < submission) {
+      return false;
+    }
   }
-  if (!occlusion_query_readback_mapping_) {
-    return false;
-  }
-
-  uint64_t samples = occlusion_query_readback_mapping_[host_index];
-  samples = NormalizeOcclusionSamples(samples);
-  WriteGuestOcclusionResult(sample_counts, samples);
+  samples_out = NormalizeOcclusionSamples(occlusion_query_readback_mapping_[host_index]);
   return true;
 }
 
@@ -5060,22 +5002,6 @@ uint64_t D3D12CommandProcessor::NormalizeOcclusionSamples(uint64_t samples) cons
     return samples;
   }
   return (samples + (scale >> 1)) / scale;
-}
-
-void D3D12CommandProcessor::WriteGuestOcclusionResult(
-    xenos::xe_gpu_depth_sample_counts* sample_counts, uint64_t samples) {
-  if (!sample_counts) {
-    return;
-  }
-  uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
-  sample_counts->Total_A = clamped;
-  sample_counts->Total_B = 0;
-  sample_counts->ZPass_A = clamped;
-  sample_counts->ZPass_B = 0;
-  sample_counts->ZFail_A = 0;
-  sample_counts->ZFail_B = 0;
-  sample_counts->StencilFail_A = 0;
-  sample_counts->StencilFail_B = 0;
 }
 
 void D3D12CommandProcessor::WriteGammaRampSRV(bool is_pwl,
