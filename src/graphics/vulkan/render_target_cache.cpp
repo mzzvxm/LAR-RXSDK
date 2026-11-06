@@ -4550,7 +4550,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     uint32_t render_target_count, RenderTarget* const* render_targets,
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
-    const Transfer::Rectangle* resolve_clear_rectangle) {
+    const Transfer::Rectangle* resolve_clear_rectangle,
+    const float* color_resolve_clear_host_value) {
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
@@ -5400,6 +5401,11 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                           sizeof(component_1));
             }
           } break;
+        }
+        if (color_resolve_clear_host_value) {
+          // The values for the host render target as they are.
+          std::memcpy(resolve_clear_attachment.clearValue.color.float32,
+                      color_resolve_clear_host_value, sizeof(float) * 4);
         }
       }
       command_buffer.CmdVkClearAttachments(1, &resolve_clear_attachment, 1, &resolve_clear_rect);

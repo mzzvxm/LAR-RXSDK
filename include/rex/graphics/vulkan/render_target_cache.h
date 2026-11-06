@@ -794,11 +794,21 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // resolve_clear_rectangle is expected to be provided by
   // PrepareHostRenderTargetsResolveClear which should do all the needed size
   // bound checks.
+  void TransferAndClearRenderTargets(uint32_t render_target_count,
+                                     RenderTarget* const* render_targets,
+                                     const std::vector<Transfer>* transfers,
+                                     const uint64_t* clear_values,
+                                     const float* color_host_clear_value,
+                                     const Transfer::Rectangle& clear_rectangle) override {
+    PerformTransfersAndResolveClears(render_target_count, render_targets, transfers,
+                                     clear_values, &clear_rectangle, color_host_clear_value);
+  }
   void PerformTransfersAndResolveClears(
       uint32_t render_target_count, RenderTarget* const* render_targets,
       const std::vector<Transfer>* render_target_transfers,
       const uint64_t* render_target_resolve_clear_values = nullptr,
-      const Transfer::Rectangle* resolve_clear_rectangle = nullptr);
+      const Transfer::Rectangle* resolve_clear_rectangle = nullptr,
+      const float* color_resolve_clear_host_value = nullptr);
 
   VkPipeline GetDumpPipeline(DumpPipelineKey key);
   VkPipeline GetDirectResolvePipeline(DirectResolvePipelineKey key);

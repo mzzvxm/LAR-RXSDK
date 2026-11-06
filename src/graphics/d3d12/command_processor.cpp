@@ -2347,6 +2347,17 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     return false;
   }
 
+  // Direct3D 9 clears, drawn as rectangles, as clears of the render targets.
+  if (primitive_type == xenos::PrimitiveType::kRectangleList && !memexport_used &&
+      !active_occlusion_query_.valid &&
+      render_target_cache_->ClearRectangleDraw(
+          is_rasterization_done, *vertex_shader, pixel_shader,
+          draw_util::GetNormalizedDepthControl(regs),
+          pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
+                       : 0)) {
+    return true;
+  }
+
   // Process primitives.
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
   if (!primitive_processor_->Process(primitive_processing_result)) {

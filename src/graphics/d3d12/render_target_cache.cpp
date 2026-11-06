@@ -3797,7 +3797,8 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
     uint32_t render_target_count, RenderTarget* const* render_targets,
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
-    const Transfer::Rectangle* resolve_clear_rectangle) {
+    const Transfer::Rectangle* resolve_clear_rectangle,
+    const float* color_resolve_clear_host_value) {
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
@@ -4646,6 +4647,12 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
               clear_via_drawing = true;
             }
           } break;
+        }
+        if (color_resolve_clear_host_value) {
+          // The values for the host render target as they are.
+          std::memcpy(color_clear_value, color_resolve_clear_host_value,
+                      sizeof(color_clear_value));
+          clear_via_drawing = false;
         }
         command_processor_.PushTransitionBarrier(
             dest_d3d12_rt.resource(),
