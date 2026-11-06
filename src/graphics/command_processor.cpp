@@ -70,6 +70,31 @@ REXCVAR_DEFINE_STRING(readback_resolve_rules, "", "GPU",
                       "(the default).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(resolve_unscaled_copy_rules, "", "GPU",
+                      "With draw resolution scaling (resolution_scale above 1), also write the "
+                      "unscaled (1x) version of the resolves that match a rule into the shared "
+                      "memory, on the GPU and without waiting. A scaled resolve writes only the "
+                      "scaled resolve buffer, which the GPU reads as a texture; a title that "
+                      "then reads the same memory as something else on the GPU (vertex data, "
+                      "for instance: a particle system whose state is rendered to a texture and "
+                      "fetched as vertices) saw whatever the shared memory held. The scaled "
+                      "data is downscaled to the 1x layout by the pass readback_resolve uses "
+                      "and written to the destination range; texture fetches are still served "
+                      "from the scaled buffer. Rules are those of readback_resolve_rules "
+                      "(addr, len, pitch, height, fmt, src; mode is not used). Nothing happens "
+                      "without draw resolution scaling. Empty, or \"off\": no rules (the "
+                      "default).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(resolve_unscaled_copy_batch, true, "GPU",
+                    "With resolve_unscaled_copy_rules: the copies of the scaled resolves wait for "
+                    "the next draw, swap or end of the submission and are made together, with one "
+                    "set of barriers around them, instead of one set around each copy (the game's "
+                    "four copies of a frame cost 3.4% of the GPU time at 2x on an RTX 5080 when each "
+                    "had its own barriers). The result is the same. Off: each copy right after its "
+                    "resolve")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "When draw resolution scaling is active, sample from the center of each "
                     "scaled block during resolve readback downscale")
@@ -183,7 +208,8 @@ bool ParseRuleRange(std::string_view text, ReadbackRuleRange& range) {
 
 // readback_resolve_rules: rules separated by ';', each key=value pairs
 // separated by ','. A rule that does not parse is left out (logged).
-void ParseReadbackRules(std::string_view text, std::vector<ReadbackRule>& rules) {
+void ParseReadbackRules(std::string_view text, std::vector<ReadbackRule>& rules,
+                        const char* option_name) {
   rules.clear();
   size_t position = 0;
   while (position <= text.size()) {
@@ -233,9 +259,9 @@ void ParseReadbackRules(std::string_view text, std::vector<ReadbackRule>& rules)
         // phase= keys on the title's render phase markers, which this SDK has no source
         // for. Say so instead of silently ignoring the key.
         REXGPU_WARN(
-            "readback_resolve_rules: the rule \"{}\" uses phase=, which isn't supported here "
-            "(there are no guest render markers), so the rule is left out",
-            rule.text);
+            "{}: the rule \"{}\" uses phase=, which isn't supported here (there are no guest "
+            "render markers), so the rule is left out",
+            option_name, rule.text);
         valid = false;
         warned = true;
       } else if (key == "mode") {
@@ -258,10 +284,28 @@ void ParseReadbackRules(std::string_view text, std::vector<ReadbackRule>& rules)
     if (valid) {
       rules.push_back(std::move(rule));
     } else if (!warned) {
-      REXGPU_WARN("readback_resolve_rules: the rule \"{}\" is not valid and is left out",
-                  rule.text);
+      REXGPU_WARN("{}: the rule \"{}\" is not valid and is left out", option_name, rule.text);
     }
   }
+}
+
+// The index of the first rule that a resolve matches, or -1. The resolve wrote the guest memory
+// [first, last] (inclusive) and has the destination described by the other arguments.
+int FindMatchingReadbackRule(const std::vector<ReadbackRule>& rules, uint64_t first, uint64_t last,
+                             uint32_t written_length, uint32_t dest_pitch, uint32_t dest_height,
+                             uint32_t dest_format, uint32_t copy_source) {
+  for (size_t i = 0; i < rules.size(); ++i) {
+    const ReadbackRule& rule = rules[i];
+    if (rule.address.set && (last < rule.address.lo || first > rule.address.hi)) {
+      continue;
+    }
+    if (rule.length.Contains(written_length) && rule.pitch.Contains(dest_pitch) &&
+        rule.height.Contains(dest_height) && rule.format.Contains(dest_format) &&
+        rule.source.Contains(copy_source)) {
+      return int(i);
+    }
+  }
+  return -1;
 }
 
 }  // namespace
@@ -357,7 +401,7 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
   const std::string& rules_text = REXCVAR_GET(readback_resolve_rules);
   if (rules_text != readback_rules_text_) {
     readback_rules_text_ = rules_text;
-    ParseReadbackRules(readback_rules_text_, readback_rules_);
+    ParseReadbackRules(readback_rules_text_, readback_rules_, "readback_resolve_rules");
     REXGPU_INFO("readback_resolve_rules: {} rule(s) from \"{}\"", readback_rules_.size(),
                 readback_rules_text_);
   }
@@ -370,19 +414,68 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
   const reg::RB_COPY_DEST_PITCH copy_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
   const uint64_t first = written_address;
   const uint64_t last = first + (written_length ? written_length - 1 : 0);
-  for (const ReadbackRule& rule : readback_rules_) {
-    if (rule.address.set && (last < rule.address.lo || first > rule.address.hi)) {
-      continue;
-    }
-    if (rule.length.Contains(written_length) &&
-        rule.pitch.Contains(copy_dest_pitch.copy_dest_pitch) &&
-        rule.height.Contains(copy_dest_pitch.copy_dest_height) &&
-        rule.format.Contains(uint32_t(copy_dest_info.copy_dest_format)) &&
-        rule.source.Contains(copy_control.copy_src_select)) {
-      return rule.mode;
-    }
+  const int matched = FindMatchingReadbackRule(
+      readback_rules_, first, last, written_length, uint32_t(copy_dest_pitch.copy_dest_pitch),
+      uint32_t(copy_dest_pitch.copy_dest_height), uint32_t(copy_dest_info.copy_dest_format),
+      uint32_t(copy_control.copy_src_select));
+  return matched >= 0 ? readback_rules_[size_t(matched)].mode : mode;
+}
+
+bool CommandProcessor::IsUnscaledResolveCopyEnabled() {
+  // "off" is the same as empty (a script that sets options with the dev pad cannot set an empty
+  // value).
+  const std::string& rules_text = REXCVAR_GET(resolve_unscaled_copy_rules);
+  return !rules_text.empty() && rules_text != "off";
+}
+
+int CommandProcessor::MatchUnscaledResolveCopyRule(uint32_t written_address,
+                                                   uint32_t written_length) {
+  const std::string& rules_text = REXCVAR_GET(resolve_unscaled_copy_rules);
+  if (rules_text.empty() || rules_text == "off") {
+    return -1;
   }
-  return mode;
+  if (rules_text != unscaled_copy_rules_text_) {
+    unscaled_copy_rules_text_ = rules_text;
+    ParseReadbackRules(unscaled_copy_rules_text_, unscaled_copy_rules_,
+                       "resolve_unscaled_copy_rules");
+    REXGPU_INFO("resolve_unscaled_copy_rules: {} rule(s) from \"{}\"", unscaled_copy_rules_.size(),
+                unscaled_copy_rules_text_);
+  }
+  if (unscaled_copy_rules_.empty() || !written_length) {
+    return -1;
+  }
+  const reg::RB_COPY_CONTROL copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
+  const reg::RB_COPY_DEST_INFO copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+  const reg::RB_COPY_DEST_PITCH copy_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+  const uint64_t first = written_address;
+  const uint64_t last = first + (written_length - 1);
+  return FindMatchingReadbackRule(
+      unscaled_copy_rules_, first, last, written_length, uint32_t(copy_dest_pitch.copy_dest_pitch),
+      uint32_t(copy_dest_pitch.copy_dest_height), uint32_t(copy_dest_info.copy_dest_format),
+      uint32_t(copy_control.copy_src_select));
+}
+
+void CommandProcessor::LogUnscaledResolveCopy(uint32_t written_address, uint32_t written_length,
+                                              int rule, const char* result, bool done) {
+  if (done) {
+    ++unscaled_copy_done_count_;
+  }
+  // The first ones and every 1024th copy.
+  const bool periodic = done && (unscaled_copy_done_count_ & 1023) == 0;
+  if (unscaled_copy_log_count_ >= 16 && !periodic) {
+    return;
+  }
+  if (unscaled_copy_log_count_ < 16) {
+    ++unscaled_copy_log_count_;
+  }
+  REXGPU_INFO(
+      "unscaled resolve copy: swap {} address 0x{:08X} length {} (rule {}: {}) -> {} ({} done so "
+      "far)",
+      counter_, written_address, written_length, rule,
+      rule >= 0 && size_t(rule) < unscaled_copy_rules_.size()
+          ? unscaled_copy_rules_[size_t(rule)].text
+          : std::string(),
+      result, unscaled_copy_done_count_);
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
