@@ -1622,6 +1622,10 @@ bool D3D12CommandProcessor::CreateMsaaLineGuardPipelines() {
   return any;
 }
 
+// CHECK: with threaded submission this runs on the submission thread, while the deferred list is
+// replayed. It reads only what is immutable after the pipeline was created (its description,
+// the render target cache's path and 2x support), the guard pipelines (created in SetupContext,
+// released after the thread stops) and an atomic counter. Read from the code, not run.
 ID3D12PipelineState* D3D12CommandProcessor::GetMsaaLineGuardPipeline(void* handle) const {
   uint32_t samples = pipeline_cache_->GetMsaaLineGuardSamples(handle);
   if (!samples) {
@@ -2403,6 +2407,20 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
   EndSubmission(true);
+}
+
+void D3D12CommandProcessor::PrepareForWait() {
+  // This thread is about to spin (SwitchToThread in a loop) or wait for more
+  // guest commands, while the submission thread may still be replaying and
+  // submitting the lists of the guest command buffer that just ended. Spinning
+  // meanwhile ended, on an AMD GPU, in bursts of 2 to 3 frames of garbage
+  // 8x8-pixel blocks over the scene; waiting here does not, and costs no
+  // overlap, as this thread has nothing else to process.
+  // CHECK: the MSAA line guard fixes the same kind of corruption at its root, and with it the
+  // wait made no difference on the integrated Radeon in the fork's runs (msaa-line-guard note); it
+  // is kept because it is cheap. Drop this override if an A/B on the iGPU shows nothing.
+  AwaitSubmissionThread();
+  CommandProcessor::PrepareForWait();
 }
 
 void D3D12CommandProcessor::OnPrimaryBufferEnd() {

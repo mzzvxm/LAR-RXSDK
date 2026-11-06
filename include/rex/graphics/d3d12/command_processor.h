@@ -226,6 +226,10 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void OnPrimaryBufferEnd() override;
 
+  // The command processor is about to idle or wait on a register or memory
+  // condition: the submission thread puts its lists in the queue first.
+  void PrepareForWait() override;
+
   // Guest occlusion queries (CommandProcessor::ExecuteGuestOcclusionEvent).
   bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
   bool HostOcclusionQueryBegin() override;
