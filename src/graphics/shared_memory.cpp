@@ -342,6 +342,50 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     return true;
   }
 
+  // Fast path for the common case: every page the request covers is valid
+  // already (vertex buffers and textures that did not change). Reading the
+  // validity bits without the lock can only see a page as valid that a
+  // concurrent invalidation is about to clear, the same race as an
+  // invalidation right after a locked check (xenia-canary's texture cache
+  // pre-check accepts it the same way). The request's pages are taken to be
+  // backed by host memory already, as a valid page was uploaded or written by
+  // the GPU. CHECK: the fork relies on this on both backends (sparse and tiled
+  // buffers); not re-verified here.
+  {
+    bool all_valid = true;
+    for (size_t r = 0; r < count && all_valid; ++r) {
+      const uint32_t start = ranges[r].first;
+      const uint32_t length = ranges[r].second;
+      if (!length) {
+        continue;
+      }
+      if (start > kBufferSize || (kBufferSize - start) < length) {
+        all_valid = false;  // The full path reports the bad range.
+        break;
+      }
+      const uint32_t page_first = start >> page_size_log2_;
+      const uint32_t page_last = (start + length - 1) >> page_size_log2_;
+      const uint32_t block_first = page_first >> 6;
+      const uint32_t block_last = page_last >> 6;
+      for (uint32_t i = block_first; i <= block_last; ++i) {
+        uint64_t needed = UINT64_MAX;
+        if (i == block_first) {
+          needed &= ~((uint64_t(1) << (page_first & 63)) - 1);
+        }
+        if (i == block_last && (page_last & 63) != 63) {
+          needed &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+        }
+        if ((system_page_flags_valid_[i] & needed) != needed) {
+          all_valid = false;
+          break;
+        }
+      }
+    }
+    if (all_valid) {
+      return true;
+    }
+  }
+
   // Some texture or buffer is empty, for example - safe to draw in this case.
   std::vector<std::pair<uint32_t, uint32_t>> merged_ranges;
   merged_ranges.reserve(count);
