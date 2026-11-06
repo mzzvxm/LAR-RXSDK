@@ -191,6 +191,9 @@ class VulkanTextureCache final : public TextureCache {
     enum class Usage {
       kUndefined,
       kTransferDestination,
+      // Written by the compute shader copying a loaded texture into the image
+      // (vulkan_texture_load_storage_copy), in VK_IMAGE_LAYOUT_GENERAL.
+      kStorageCopyDestination,
       kGuestShaderSampled,
       kSwapSampled,
     };
@@ -211,6 +214,14 @@ class VulkanTextureCache final : public TextureCache {
 
     VkImageView GetView(bool is_signed, uint32_t host_swizzle, bool is_array = true);
     VkImageView GetOrCreate3DAs2DImageView(bool is_signed, uint32_t host_swizzle);
+
+    // The unsigned integer format of the storage view loads are copied through
+    // (vulkan_texture_load_storage_copy), or VK_FORMAT_UNDEFINED if loads use
+    // vkCmdCopyBufferToImage. The image must have been created for it.
+    VkFormat storage_copy_format() const { return storage_copy_format_; }
+    void set_storage_copy_format(VkFormat format) { storage_copy_format_ = format; }
+    // The 2D array storage view of the base level, created on first use.
+    VkImageView GetStorageCopyView();
 
    private:
     union ViewKey {
@@ -269,7 +280,27 @@ class VulkanTextureCache final : public TextureCache {
     std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
     VkImageView image_view_3d_as_2d_unsigned_ = VK_NULL_HANDLE;
     VkImageView image_view_3d_as_2d_signed_ = VK_NULL_HANDLE;
+
+    VkFormat storage_copy_format_ = VK_FORMAT_UNDEFINED;
+    VkImageView storage_copy_view_ = VK_NULL_HANDLE;
   };
+
+  // vulkan_texture_load_storage_copy: push constants of
+  // texture_load_copy_to_image_*bpp_cs, in texels.
+  struct StorageCopyConstants {
+    uint32_t offset;
+    uint32_t row_pitch;
+    uint32_t layer_pitch;
+    uint32_t width;
+    uint32_t height;
+  };
+  enum StorageCopyDescriptorSetIndex {
+    kStorageCopyDescriptorSetIndexSource,
+    kStorageCopyDescriptorSetIndexDestination,
+    kStorageCopyDescriptorSetCount,
+  };
+  // By log2 of the texel size in dwords: 32, 64 and 128 bits per texel.
+  static constexpr uint32_t kStorageCopyTexelSizeCount = 3;
 
   struct VulkanTextureBinding {
     VkImageView image_view_unsigned;
@@ -321,6 +352,13 @@ class VulkanTextureCache final : public TextureCache {
 
   void GetTextureUsageMasks(VulkanTexture::Usage usage, VkPipelineStageFlags& stage_mask,
                             VkAccessFlags& access_mask, VkImageLayout& layout);
+  // vulkan_texture_load_storage_copy: the format of the storage view a new
+  // texture with these view formats (VK_FORMAT_UNDEFINED where unused) will be
+  // copied to through, or VK_FORMAT_UNDEFINED if it will use
+  // vkCmdCopyBufferToImage.
+  VkFormat GetStorageCopyFormat(TextureKey key, const VkFormat* view_formats,
+                                uint32_t view_format_count);
+  bool IsStorageImageFormat(VkFormat format);
   bool EnsureScaledResolveBufferAllocated(uint64_t start_scaled, uint64_t length_scaled);
   void GetScaledResolveUsageMasks(VkPipelineStageFlags& stage_mask_out,
                                   VkAccessFlags& access_mask_out, bool write) const;
@@ -349,6 +387,11 @@ class VulkanTextureCache final : public TextureCache {
   VkPipelineLayout load_pipeline_layout_ = VK_NULL_HANDLE;
   std::array<VkPipeline, kLoadShaderCount> load_pipelines_{};
   std::array<VkPipeline, kLoadShaderCount> load_pipelines_scaled_{};
+
+  VkPipelineLayout storage_copy_pipeline_layout_ = VK_NULL_HANDLE;
+  std::array<VkPipeline, kStorageCopyTexelSizeCount> storage_copy_pipelines_{};
+  // Whether a format can be a storage image with optimal tiling.
+  std::unordered_map<VkFormat, bool> storage_image_formats_;
 
   // If both images can be placed in the same allocation, it's one allocation,
   // otherwise it's two separate.

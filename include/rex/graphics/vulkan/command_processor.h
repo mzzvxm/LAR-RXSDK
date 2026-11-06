@@ -53,6 +53,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   enum class SingleTransientDescriptorLayout {
     kStorageBufferCompute,
     kStorageBufferPairCompute,
+    // A storage image (VK_IMAGE_LAYOUT_GENERAL) written by a compute shader.
+    kStorageImageCompute,
     kCount,
   };
 
@@ -632,8 +634,14 @@ class VulkanCommandProcessor : public CommandProcessor {
   static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBuffer;
   static const VkDescriptorPoolSize kDescriptorPoolSizeStorageBuffer;
   static const VkDescriptorPoolSize kDescriptorPoolSizeTextures[2];
+  // Storage images are only written by the texture loads that copy to the image
+  // in a compute shader (vulkan_texture_load_storage_copy), far fewer than the
+  // other transient descriptors.
+  static constexpr uint32_t kStorageImageDescriptorPoolSetCount = 1024;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeStorageImage;
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_uniform_buffer_;
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_buffer_;
+  ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_storage_image_;
   std::deque<UsedSingleTransientDescriptor> single_transient_descriptors_used_;
   std::array<std::vector<VkDescriptorSet>, size_t(SingleTransientDescriptorLayout::kCount)>
       single_transient_descriptors_free_;
