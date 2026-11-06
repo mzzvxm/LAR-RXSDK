@@ -35,6 +35,22 @@ class DeferredCommandList {
   void Reset();
   void Execute(ID3D12GraphicsCommandList* command_list, ID3D12GraphicsCommandList1* command_list_1);
 
+  // Swaps the recorded commands with `stream` (normally an empty one, whose
+  // allocation is reused) and starts recording anew, for another thread to
+  // execute them (threaded submission).
+  void TakeStream(std::vector<uintmax_t>& stream) {
+    command_stream_.swap(stream);
+    Reset();
+  }
+  // Executes commands taken with TakeStream. Touches nothing else in the
+  // deferred command list, so it may run on another thread while new commands
+  // are recorded.
+  void ExecuteStream(ID3D12GraphicsCommandList* command_list,
+                     ID3D12GraphicsCommandList1* command_list_1,
+                     const std::vector<uintmax_t>& stream) const {
+    ExecuteCommands(command_list, command_list_1, stream.data(), stream.size());
+  }
+
   D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
                                                   D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
                                                   UINT8 stencil, UINT num_rects) {
@@ -639,6 +655,9 @@ class DeferredCommandList {
   };
 
   void* WriteCommand(Command command, size_t arguments_size_bytes);
+  void ExecuteCommands(ID3D12GraphicsCommandList* command_list,
+                       ID3D12GraphicsCommandList1* command_list_1, const uintmax_t* stream,
+                       size_t stream_remaining) const;
 
   const D3D12CommandProcessor& command_processor_;
 
