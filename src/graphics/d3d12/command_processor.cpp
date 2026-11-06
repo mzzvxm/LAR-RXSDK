@@ -49,6 +49,13 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
                     "Submit command list when PM4 primary buffer ends")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(d3d12_hoist_shared_memory_uploads, false, "GPU/D3D12",
+                    "Record the shared memory uploads (vertex and index data the CPU rewrote, "
+                    "textures) at the start of the run of draws they are for, between one pair of "
+                    "barriers for the run, when no draw before the upload has read the uploaded "
+                    "pages, instead of copying between the draws")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics::d3d12 {
 
 // Generated with `xb buildshaders`.
@@ -2840,9 +2847,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     if (memexport_used) {
       shared_memory_->UseForWriting();
     } else {
-      shared_memory_->UseForReading();
+      shared_memory_->UseForReadingInDraw();
     }
     SubmitBarriers();
+    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
     PROFILE_DRAW_CALL();
     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
     deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
@@ -2899,9 +2907,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     if (memexport_used) {
       shared_memory_->UseForWriting();
     } else {
-      shared_memory_->UseForReading();
+      shared_memory_->UseForReadingInDraw();
     }
     SubmitBarriers();
+    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
     PROFILE_DRAW_CALL();
     PROFILE_VERTICES(primitive_processing_result.host_draw_vertex_count);
     deferred_command_list_.D3DDrawIndexedInstanced(
@@ -2945,6 +2954,42 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   }
 
   return true;
+}
+
+// Upload hoisting (d3d12_hoist_shared_memory_uploads): the draw about to be recorded reads the
+// shared memory in the reading state, with the barriers before it submitted. Starts a run of
+// draws if there is none, and says which pages this draw reads, so no upload of them is moved
+// before it (D3D12SharedMemory::BeginDrawReads). A superset of what the draw reads is safe: the
+// vertex fetch constants of both shaders, whether or not the draw's fetches were found in sync
+// with the shared memory, and the guest indices. A draw that exports to the shared memory ends
+// the run (UseForWriting).
+void D3D12CommandProcessor::BeginSharedMemoryDrawReads(bool memexport_used,
+                                                       const D3D12Shader* vertex_shader,
+                                                       const D3D12Shader* pixel_shader) {
+  if (!REXCVAR_GET(d3d12_hoist_shared_memory_uploads) || memexport_used) {
+    shared_memory_->EndHoistRun();
+    return;
+  }
+  shared_memory_->BeginDrawReads();
+  const RegisterFile& regs = *register_file_;
+  for (const Shader* shader :
+       {static_cast<const Shader*>(vertex_shader), static_cast<const Shader*>(pixel_shader)}) {
+    if (!shader) {
+      continue;
+    }
+    const Shader::ConstantRegisterMap& constant_map = shader->constant_register_map();
+    for (uint32_t i = 0; i < rex::countof(constant_map.vertex_fetch_bitmap); ++i) {
+      uint32_t vfetch_bits_remaining = constant_map.vertex_fetch_bitmap[i];
+      uint32_t j;
+      while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+        vfetch_bits_remaining &= ~(uint32_t(1) << j);
+        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(i * 32 + j);
+        shared_memory_->MarkReadByDraw(vfetch_constant.address << 2, vfetch_constant.size << 2);
+      }
+    }
+  }
+  std::pair<uint32_t, uint32_t> guest_index_range = primitive_processor_->last_guest_index_range();
+  shared_memory_->MarkReadByDraw(guest_index_range.first, guest_index_range.second);
 }
 
 bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_size) {
@@ -3769,6 +3814,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     // end of the submission (when async pipeline creation requests are
     // fulfilled).
     deferred_command_list_.Reset();
+    if (shared_memory_) {
+      shared_memory_->EndHoistRun();
+    }
 
     // Reset cached state of the command list.
     ff_viewport_update_needed_ = true;
@@ -3875,6 +3923,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
 
   if (submission_open_) {
     assert_false(scratch_buffer_used_);
+
+    // The deferred commands are about to go; no run goes on into the next list.
+    if (shared_memory_) {
+      shared_memory_->EndHoistRun();
+    }
 
     if (active_occlusion_query_.valid && occlusion_query_heap_) {
       deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,

@@ -80,6 +80,12 @@ bool D3D12SharedMemory::Initialize() {
   }
   buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
   buffer_uav_writes_commit_needed_ = false;
+  {
+    size_t hoist_page_words = ((size_t(kBufferSize) >> page_size_log2()) + 63) / 64;
+    hoist_run_active_ = false;
+    hoist_pages_.assign(hoist_page_words, 0);
+    hoist_pages_serial_.assign(hoist_page_words, 0);
+  }
 
   D3D12_DESCRIPTOR_HEAP_DESC buffer_descriptor_heap_desc;
   buffer_descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -184,6 +190,9 @@ void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES
     }
     return;
   }
+  // A run of draws (BeginDrawReads) needs the buffer to stay in the reading
+  // state.
+  EndHoistRun();
   command_processor_.PushTransitionBarrier(buffer_, buffer_state_, new_state);
   buffer_state_ = new_state;
   // "UAV -> anything" transition commits the writes implicitly.
@@ -307,9 +316,13 @@ bool D3D12SharedMemory::UploadRanges(
   if (upload_page_ranges.empty()) {
     return true;
   }
-  CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
-  command_processor_.SubmitBarriers();
+  bool hoist = BeginHoistedUpload(upload_page_ranges);
+  if (!hoist) {
+    CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+    command_processor_.SubmitBarriers();
+  }
   auto& command_list = command_processor_.GetDeferredCommandList();
+  bool successful = true;
   for (auto upload_range : upload_page_ranges) {
     uint32_t upload_range_start = upload_range.first;
     uint32_t upload_range_length = upload_range.second;
@@ -322,7 +335,8 @@ bool D3D12SharedMemory::UploadRanges(
           nullptr);
       if (upload_buffer_mapping == nullptr) {
         REXGPU_ERROR("Shared memory: Failed to get an upload buffer");
-        return false;
+        successful = false;
+        break;
       }
       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
       std::memcpy(upload_buffer_mapping,
@@ -335,8 +349,165 @@ bool D3D12SharedMemory::UploadRanges(
       upload_range_start += upload_buffer_pages;
       upload_range_length -= upload_buffer_pages;
     }
+    if (!successful) {
+      break;
+    }
+  }
+  if (hoist) {
+    // Also after a failure, to leave the hoisted stream well-formed.
+    hoist_byte_ranges_temp_.clear();
+    for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
+      hoist_byte_ranges_temp_.emplace_back(range.first << page_size_log2(),
+                                           range.second << page_size_log2());
+    }
+    EndHoistedUpload(hoist_byte_ranges_temp_);
+  }
+  return successful;
+}
+
+// Upload hoisting (d3d12_hoist_shared_memory_uploads): the scheme (a hoist point in the deferred
+// command stream, the uploads recorded in a second stream and replayed there, a bit per page for
+// what the draws of the run have read) follows ForzaHorizon1-ReImagined's patch 0036
+// (https://github.com/Dyotson/ForzaHorizon1-ReImagined, patches/rexglue-sdk), as ported to
+// Vulkan in VulkanCommandProcessor::CanHoistSharedMemoryUpload, and the page bit code is its
+// code; what a run is on Direct3D 12 (no render passes), and what ends it, is written here.
+// Under its licence:
+//
+//   MIT License
+//
+//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+
+bool D3D12SharedMemory::BeginHoistedUpload(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
+  if (!hoist_run_active_) {
+    return false;
+  }
+  // The buffer has been in the reading state since the start of the run (any
+  // change ends it), and no draw of the run has read these pages nor an upload
+  // of the run written them.
+  assert_true(buffer_state_ == kReadState);
+  for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
+    if (!range.second) {
+      continue;
+    }
+    uint32_t page_first = range.first;
+    uint32_t page_last = range.first + range.second - 1;
+    if ((page_last >> 6) >= hoist_pages_.size()) {
+      return false;
+    }
+    for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
+      if (hoist_pages_serial_[word] != hoist_serial_) {
+        continue;
+      }
+      uint64_t mask = ~uint64_t(0);
+      if (word == (page_first >> 6)) {
+        mask &= ~uint64_t(0) << (page_first & 63);
+      }
+      if (word == (page_last >> 6)) {
+        mask &= ~uint64_t(0) >> (63 - (page_last & 63));
+      }
+      if (hoist_pages_[word] & mask) {
+        return false;
+      }
+    }
+  }
+  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
+  command_list.SetWritingHoisted(true);
+  if (!hoist_run_has_uploads_) {
+    hoist_run_has_uploads_ = true;
+    WriteHoistedBarrier(kReadState, D3D12_RESOURCE_STATE_COPY_DEST);
+  } else {
+    command_list.TruncateHoistedStream(hoist_closing_barrier_offset_);
   }
   return true;
+}
+
+void D3D12SharedMemory::EndHoistedUpload(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_byte_ranges) {
+  DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
+  hoist_closing_barrier_offset_ = command_list.hoisted_stream_size();
+  WriteHoistedBarrier(D3D12_RESOURCE_STATE_COPY_DEST, kReadState);
+  command_list.SetWritingHoisted(false);
+  command_list.ExtendHoistPoint(hoist_point_);
+  // Another upload of these pages in the run would have to come after the first
+  // one but before the draws that read them, which the hoisted copies, all at
+  // the start of the run, cannot do: it is done in place.
+  for (const std::pair<uint32_t, uint32_t>& range : upload_byte_ranges) {
+    MarkPages(range.first, range.second);
+  }
+}
+
+void D3D12SharedMemory::BeginDrawReads() {
+  if (hoist_run_active_) {
+    return;
+  }
+  if (buffer_state_ != kReadState || hoist_pages_.empty()) {
+    return;
+  }
+  hoist_point_ = command_processor_.GetDeferredCommandList().CmdHoistPoint();
+  ++hoist_serial_;
+  hoist_run_has_uploads_ = false;
+  hoist_run_active_ = true;
+}
+
+void D3D12SharedMemory::MarkReadByDraw(uint32_t start, uint32_t length) {
+  if (!hoist_run_active_) {
+    return;
+  }
+  MarkPages(start, length);
+}
+
+void D3D12SharedMemory::MarkPages(uint32_t start, uint32_t length) {
+  if (!length || start >= kBufferSize) {
+    return;
+  }
+  length = std::min(length, kBufferSize - start);
+  uint32_t page_first = start >> page_size_log2();
+  uint32_t page_last = (start + length - 1) >> page_size_log2();
+  for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
+    uint64_t mask = ~uint64_t(0);
+    if (word == (page_first >> 6)) {
+      mask &= ~uint64_t(0) << (page_first & 63);
+    }
+    if (word == (page_last >> 6)) {
+      mask &= ~uint64_t(0) >> (63 - (page_last & 63));
+    }
+    if (hoist_pages_serial_[word] != hoist_serial_) {
+      hoist_pages_serial_[word] = hoist_serial_;
+      hoist_pages_[word] = 0;
+    }
+    hoist_pages_[word] |= mask;
+  }
+}
+
+void D3D12SharedMemory::WriteHoistedBarrier(D3D12_RESOURCE_STATES state_before,
+                                            D3D12_RESOURCE_STATES state_after) {
+  D3D12_RESOURCE_BARRIER barrier;
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  barrier.Transition.pResource = buffer_;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  barrier.Transition.StateBefore = state_before;
+  barrier.Transition.StateAfter = state_after;
+  command_processor_.GetDeferredCommandList().D3DResourceBarrier(1, &barrier);
 }
 
 }  // namespace rex::graphics::d3d12
