@@ -43,12 +43,19 @@ entry_inputs_end_code_begin_compute_xe
       resolve_info.edram_msaa_samples,
       XeResolveFirstSampleIndex(resolve_info.sample_select));
   uint pixel_stride_samples = XeResolveDirectPixelStrideSamples(resolve_info);
-  uint4_xe pixels_0123 = XeResolveDirectLoad4Pixels32bpp(
-      resolve_info, source_info, edram_sample, pixel_stride_samples);
-  uint4_xe pixels_4567 = XeResolveDirectLoad4Pixels32bpp(
-      resolve_info, source_info,
-      edram_sample + uint2_xe(4u * pixel_stride_samples, 0u),
-      pixel_stride_samples);
+  #ifdef XE_RESOLVE_DIRECT_BATCHED_LOADS
+    uint4_xe pixels_0123, pixels_4567;
+    XeResolveDirectLoad8Pixels32bpp(resolve_info, source_info, edram_sample,
+                                    pixel_stride_samples, pixels_0123,
+                                    pixels_4567);
+  #else
+    uint4_xe pixels_0123 = XeResolveDirectLoad4Pixels32bpp(
+        resolve_info, source_info, edram_sample, pixel_stride_samples);
+    uint4_xe pixels_4567 = XeResolveDirectLoad4Pixels32bpp(
+        resolve_info, source_info,
+        edram_sample + uint2_xe(4u * pixel_stride_samples, 0u),
+        pixel_stride_samples);
+  #endif
   dont_flatten_xe
   if (pixel_index.x == 0u &&
       resolve_info.half_pixel_offset_fill_source.x != 0u) {

@@ -1,0 +1,4 @@
+#define XE_RESOLVE_DIRECT_BATCHED_LOADS
+#define XE_RESOLVE_DIRECT_SOURCE_MSAA
+#define XE_RESOLVE_RESOLUTION_SCALED
+#include "resolve_direct_full_64bpp.xesli"
