@@ -268,6 +268,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
       resolve_copy_pipelines_{};
+  // Direct resolve shaders (resolve_direct.xesli, for direct_host_resolve) for
+  // each copy shader, reading single-sampled and multisampled render targets,
+  // null if there's none for the copy shader.
+  struct ResolveDirectShaderCode {
+    const uint32_t* unscaled;
+    size_t unscaled_size_bytes;
+    const uint32_t* scaled;
+    size_t scaled_size_bytes;
+  };
+  static const ResolveDirectShaderCode
+      kResolveDirectShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
 
   // On the fragment shader interlock path, the render pass key is used purely
   // for passing parameters to pipeline setup - there's always only one render
@@ -361,6 +372,16 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     uint32_t temporary_sort_index() const { return temporary_sort_index_; }
     void SetTemporarySortIndex(uint32_t index) { temporary_sort_index_ = index; }
 
+    // For color render targets, 2 sampled images - the render target and a
+    // dummy - for direct resolves, allocated on the first one. For depth, the
+    // transfer source descriptor set is used.
+    size_t descriptor_set_index_direct_resolve_source() const {
+      return descriptor_set_index_direct_resolve_source_;
+    }
+    void SetDescriptorSetIndexDirectResolveSource(size_t index) {
+      descriptor_set_index_direct_resolve_source_ = index;
+    }
+
    private:
     VulkanRenderTargetCache& render_target_cache_;
 
@@ -378,6 +399,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
     // 2 sampled images for depth / stencil, 1 sampled image for color.
     size_t descriptor_set_index_transfer_source_;
+    // In descriptor_set_pool_sampled_image_x2_, SIZE_MAX if not allocated.
+    size_t descriptor_set_index_direct_resolve_source_ = SIZE_MAX;
 
     VkPipelineStageFlags current_stage_mask_ = 0;
     VkAccessFlags current_access_mask_ = 0;
@@ -753,31 +776,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     }
   };
 
-  struct DirectResolvePushConstants {
-    draw_util::ResolveCopyShaderConstants resolve;
-    uint32_t source_base_tiles;
-    uint32_t source_pitch_tiles;
-    uint32_t dispatch_first_tile;
-  };
-
-  struct DirectResolvePipelineKey {
-    DumpPipelineKey dump_pipeline_key;
-    draw_util::ResolveCopyShaderIndex copy_shader;
-    bool draw_resolution_scaled;
-    uint64_t packed() const {
-      return uint64_t(dump_pipeline_key.key) | (uint64_t(size_t(copy_shader)) << 32) |
-             (uint64_t(draw_resolution_scaled ? 1 : 0) << 40);
-    }
-    struct Hasher {
-      size_t operator()(const DirectResolvePipelineKey& key) const {
-        return std::hash<uint64_t>{}(key.packed());
-      }
-    };
-    bool operator==(const DirectResolvePipelineKey& other_key) const {
-      return packed() == other_key.packed();
-    }
-  };
-
   // Returns the framebuffer object, or VK_NULL_HANDLE if failed to create.
   const Framebuffer* GetHostRenderTargetsFramebuffer(
       RenderPassKey render_pass_key, uint32_t pitch_tiles_at_32bpp,
@@ -811,10 +809,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       const float* color_resolve_clear_host_value = nullptr);
 
   VkPipeline GetDumpPipeline(DumpPipelineKey key);
-  VkPipeline GetDirectResolvePipeline(DirectResolvePipelineKey key);
-  bool TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
-                              draw_util::ResolveCopyShaderIndex copy_shader,
-                              bool draw_resolution_scaled);
+  // How the render target dumping converts the samples of a render target to
+  // the EDRAM representation, if direct resolves can read it.
+  bool GetDirectResolveSourceConversion(RenderTargetKey key,
+                                        DirectResolveSourceConversion& conversion_out) const;
+  // The source descriptor set for a direct resolve from the render target,
+  // VK_NULL_HANDLE if failed to allocate.
+  VkDescriptorSet GetDirectResolveSourceDescriptorSet(VulkanRenderTarget& render_target,
+                                                      bool source_is_uint);
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
@@ -862,10 +864,19 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Compute pipelines for copying host render target contents to the EDRAM
   // buffer. VK_NULL_HANDLE if failed to create.
   std::unordered_map<DumpPipelineKey, VkPipeline, DumpPipelineKey::Hasher> dump_pipelines_;
-  VkPipelineLayout direct_resolve_pipeline_layout_color_ = VK_NULL_HANDLE;
-  VkPipelineLayout direct_resolve_pipeline_layout_depth_ = VK_NULL_HANDLE;
-  std::unordered_map<DirectResolvePipelineKey, VkPipeline, DirectResolvePipelineKey::Hasher>
-      direct_resolve_pipelines_;
+  // Direct resolves: source images in set 0 (float - color or depth - at
+  // binding 0, uint - color or stencil - at binding 1), the destination in set
+  // 1, and the resolve copy push constants followed by
+  // DirectResolveSourceConstants.
+  VkPipelineLayout direct_resolve_pipeline_layout_ = VK_NULL_HANDLE;
+  // [copy shader][multisampled source], VK_NULL_HANDLE if not available.
+  VkPipeline direct_resolve_pipelines_[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2] = {};
+  // 1x1 images for the unused source binding of a color render target -
+  // [uint][multisampled].
+  VkImage direct_resolve_dummy_images_[2][2] = {};
+  VkDeviceMemory direct_resolve_dummy_image_memory_[2][2] = {};
+  VkImageView direct_resolve_dummy_image_views_[2][2] = {};
+  bool direct_resolve_dummy_images_initialized_ = false;
 
   // Temporary storage for Resolve.
   std::vector<Transfer> clear_transfers_[2];
@@ -876,10 +887,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Temporary storage for DumpRenderTargets.
   std::vector<ResolveCopyDumpRectangle> dump_rectangles_;
   std::vector<DumpInvocation> dump_invocations_;
-  std::vector<ResolveCopyDispatch> direct_resolve_dispatches_;
-  uint64_t direct_resolve_attempt_count_ = 0;
-  uint64_t direct_resolve_success_count_ = 0;
-  uint64_t direct_resolve_fallback_count_ = 0;
 
   // For pixel (fragment) shader interlock.
 

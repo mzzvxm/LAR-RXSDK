@@ -188,6 +188,17 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   ID3D12PipelineState* resolve_copy_pipelines_[size_t(draw_util::ResolveCopyShaderIndex::kCount)] =
       {};
+  // Direct resolve shaders (resolve_direct.xesli, for direct_host_resolve) for
+  // each copy shader, reading single-sampled and multisampled render targets,
+  // null if there's none for the copy shader.
+  struct ResolveDirectShaderCode {
+    const void* unscaled;
+    size_t unscaled_size;
+    const void* scaled;
+    size_t scaled_size;
+  };
+  static const ResolveDirectShaderCode
+      kResolveDirectShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)][2];
 
   // For host render targets.
 
@@ -577,32 +588,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
     }
   };
 
-  struct DirectResolvePushConstants {
-    draw_util::ResolveCopyShaderConstants resolve;
-    uint32_t source_base_tiles;
-    uint32_t source_pitch_tiles;
-    uint32_t dispatch_first_tile;
-  };
-
-  struct DirectResolvePipelineKey {
-    DumpPipelineKey dump_pipeline_key;
-    draw_util::ResolveCopyShaderIndex copy_shader;
-    bool draw_resolution_scaled;
-
-    uint64_t packed() const {
-      return uint64_t(dump_pipeline_key.key) | (uint64_t(size_t(copy_shader)) << 32) |
-             (uint64_t(draw_resolution_scaled ? 1 : 0) << 40);
-    }
-    struct Hasher {
-      size_t operator()(const DirectResolvePipelineKey& key) const {
-        return std::hash<uint64_t>{}(key.packed());
-      }
-    };
-    bool operator==(const DirectResolvePipelineKey& other_key) const {
-      return packed() == other_key.packed();
-    }
-  };
-
   // Returns:
   // - A pointer to 1 pipeline for writing color or depth (or stencil via
   //   SV_StencilRef).
@@ -654,10 +639,10 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   void SetCommandListRenderTargets(RenderTarget* const* depth_and_color_render_targets);
 
   ID3D12PipelineState* GetOrCreateDumpPipeline(DumpPipelineKey key);
-  ID3D12PipelineState* GetOrCreateDirectResolvePipeline(DirectResolvePipelineKey key);
-  bool TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
-                              draw_util::ResolveCopyShaderIndex copy_shader,
-                              bool draw_resolution_scaled);
+  // How the render target dumping converts the samples of a render target to
+  // the EDRAM representation, if direct resolves can read it.
+  bool GetDirectResolveSourceConversion(RenderTargetKey key,
+                                        DirectResolveSourceConversion& conversion_out) const;
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
@@ -726,7 +711,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // Temporary storage for DumpRenderTargets.
   std::vector<ResolveCopyDumpRectangle> dump_rectangles_;
   std::vector<DumpInvocation> dump_invocations_;
-  std::vector<ResolveCopyDispatch> direct_resolve_dispatches_;
 
   ID3D12RootSignature* dump_root_signature_color_ = nullptr;
   ID3D12RootSignature* dump_root_signature_depth_ = nullptr;
@@ -734,14 +718,15 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // buffer. May be null if failed to create.
   std::unordered_map<DumpPipelineKey, ID3D12PipelineState*, DumpPipelineKey::Hasher>
       dump_pipelines_;
-  ID3D12RootSignature* direct_resolve_root_signature_color_ = nullptr;
-  ID3D12RootSignature* direct_resolve_root_signature_depth_ = nullptr;
-  std::unordered_map<DirectResolvePipelineKey, ID3D12PipelineState*,
-                     DirectResolvePipelineKey::Hasher>
-      direct_resolve_pipelines_;
-  uint64_t direct_resolve_attempt_count_ = 0;
-  uint64_t direct_resolve_success_count_ = 0;
-  uint64_t direct_resolve_fallback_count_ = 0;
+  // Direct resolves: the resolve copy root signature with 2 more constants
+  // (DirectResolveSourceConstants), and 2 source SRVs instead of the EDRAM
+  // buffer - t0 float (color or depth), t1 uint (color or stencil).
+  ID3D12RootSignature* direct_resolve_root_signature_ = nullptr;
+  // [copy shader][multisampled source], null if not available.
+  ID3D12PipelineState* direct_resolve_pipelines_[size_t(draw_util::ResolveCopyShaderIndex::kCount)]
+                                                [2] = {};
+  // Null SRVs for the unused source binding - [uint][multisampled].
+  ui::d3d12::D3D12CpuDescriptorPool::Descriptor direct_resolve_null_srvs_[2][2];
 
   // Parameter 0 - 2 root constants (red, green).
   ID3D12RootSignature* uint32_rtv_clear_root_signature_ = nullptr;

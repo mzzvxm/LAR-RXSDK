@@ -1,0 +1,619 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// Resolve copying straight from a host render target, for the ReXGlue SDK's
+// direct_host_resolve, instead of dumping the host render targets into the
+// EDRAM buffer and copying from that. Built with the xenia-project/xenia
+// 0b2ffa3 shader sources, which the SDK's resolve shaders are built from.
+//
+// The guest addressing, sample selection, format conversion, endian swapping
+// and destination addressing are those of resolve.xesli. Only the loads differ:
+// where the copy shaders read a sample from the EDRAM buffer, these read the
+// same sample from the host render target that owns it, and convert it to its
+// EDRAM representation exactly as the render target dumping shaders do
+// (D3D12RenderTargetCache::GetOrCreateDumpPipeline and
+// VulkanRenderTargetCache::GetDumpPipeline). The host code uses this only when
+// a single render target with the resolve's pitch and sample count owns the
+// whole resolve area, and EDRAM addressing doesn't wrap around within it.
+//
+// A sample of the resolve's area in the EDRAM sample grid of XeEdramOffsetInts
+// (before the tiling), plus the offset of the resolve's base tile from the
+// render target's (xe_resolve_direct_source_offset), is the sample in the host
+// render target's sample grid: the render target's tiles are placed in its
+// texture in the same rows with the same pitch. The depth half-tile swapping
+// is a part of the EDRAM addressing on both sides of a dump, so it doesn't
+// apply here.
+//
+// Bindings: set 0 / t0 - the float view (color, or depth); set 0 binding 1 /
+// t1 - the unsigned integer view (color, or stencil). The view that isn't
+// used is a dummy (null on Direct3D 12).
+//
+// XE_RESOLVE_DIRECT_SOURCE_MSAA: the source is multisampled.
+
+#ifndef XENIA_GPU_SHADERS_RESOLVE_DIRECT_XESLI_
+#define XENIA_GPU_SHADERS_RESOLVE_DIRECT_XESLI_
+
+// Must be included before anything else, for the extension.
+#if SHADING_LANGUAGE_GLSL_XE
+  #extension GL_EXT_spirv_intrinsics : require
+#endif
+
+#include "../../ui/shaders/xesl.xesli"
+
+// The direct source constants go after the resolve copy constants.
+#undef push_const_end_xe
+#if SHADING_LANGUAGE_GLSL_XE
+  #define push_const_end_xe                  \
+      uint xe_resolve_direct_source_info;    \
+      uint xe_resolve_direct_source_offset;  \
+      } push_consts_xe;
+#elif SHADING_LANGUAGE_HLSL_XE
+  #define push_const_end_xe                  \
+      uint xe_resolve_direct_source_info;    \
+      uint xe_resolve_direct_source_offset;  \
+      };
+#else
+  #error Direct resolve not implemented for the target language.
+#endif
+// No EDRAM buffer.
+#undef array_buffer_declare_xe
+#define array_buffer_declare_xe(value_type, name, glsl_set, glsl_binding, \
+                                hlsl_t, hlsl_t_space)
+
+#include "endian.xesli"
+#include "pixel_formats.xesli"
+#include "resolve.xesli"
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+    layout(set=0, binding=0) uniform texture2DMS xe_resolve_direct_source_float;
+    layout(set=0, binding=1) uniform utexture2DMS xe_resolve_direct_source_uint;
+  #else
+    layout(set=0, binding=0) uniform texture2D xe_resolve_direct_source_float;
+    layout(set=0, binding=1) uniform utexture2D xe_resolve_direct_source_uint;
+  #endif
+  // The clamping the Vulkan render target dumping shaders do (NaN to the
+  // minimum).
+  spirv_instruction(set = "GLSL.std.450", id = 81)
+  float xe_resolve_direct_nclamp(float x, float min_value, float max_value);
+#elif SHADING_LANGUAGE_HLSL_XE
+  #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+    Texture2DMS<float4_xe> xe_resolve_direct_source_float : register(t0, space0);
+    Texture2DMS<uint4_xe> xe_resolve_direct_source_uint : register(t1, space0);
+  #else
+    Texture2D<float4_xe> xe_resolve_direct_source_float : register(t0, space0);
+    Texture2D<uint4_xe> xe_resolve_direct_source_uint : register(t1, space0);
+  #endif
+#endif
+
+#define kXeResolveDirectSourceConversion_8_8_8_8 0u
+// Linear in R16G16B16A16_UNORM (or as the Direct3D 12 dumping does, any float
+// view) to the piecewise linear gamma, then 8_8_8_8.
+#define kXeResolveDirectSourceConversion_8_8_8_8_PWLGamma 1u
+#define kXeResolveDirectSourceConversion_2_10_10_10 2u
+// Float16 or wider to 7e3 color and 2-bit alpha.
+#define kXeResolveDirectSourceConversion_2_10_10_10_Float 3u
+#define kXeResolveDirectSourceConversion_UInt16x2 4u
+#define kXeResolveDirectSourceConversion_UInt16x4 5u
+#define kXeResolveDirectSourceConversion_UInt32 6u
+#define kXeResolveDirectSourceConversion_UInt32x2 7u
+#define kXeResolveDirectSourceConversion_DepthUNorm24 8u
+#define kXeResolveDirectSourceConversion_DepthFloat24 9u
+#define kXeResolveDirectSourceConversion_DepthFloat24Round 10u
+
+struct XeResolveDirectSourceInfo {
+  uint conversion;
+  // Host sample indices of guest 2x MSAA samples 0 and 1.
+  uint2_xe host_2x_samples;
+  // Offset of the resolve area in the render target, in samples.
+  uint2_xe offset;
+};
+
+XeResolveDirectSourceInfo XeResolveDirectGetSourceInfo(param_push_consts_xe) {
+  XeResolveDirectSourceInfo source_info;
+  uint info = push_const_xe(xe_resolve_direct_source_info);
+  source_info.conversion = info & ((1u << 4u) - 1u);
+  source_info.host_2x_samples =
+      (uint_x2_xe(info) >> uint2_xe(4u, 6u)) & ((1u << 2u) - 1u);
+  uint offset = push_const_xe(xe_resolve_direct_source_offset);
+  source_info.offset =
+      (uint_x2_xe(offset) >> uint2_xe(0u, 16u)) & ((1u << 16u) - 1u);
+  return source_info;
+}
+
+// The sample in the EDRAM sample grid, before the tiling, that
+// XeEdramOffsetInts addresses for the pixel (with the EDRAM offset already
+// added) and its sample.
+uint2_xe XeResolveDirectEdramSample(uint2_xe pixel_index, uint msaa_samples,
+                                    uint pixel_sample_index) {
+  uint2_xe rt_sample_index =
+      pixel_index <<
+      uint2_xe(greater_than_equal_xe(
+          uint_x2_xe(msaa_samples),
+          uint2_xe(kXenosMsaaSamples_4X, kXenosMsaaSamples_2X)));
+  rt_sample_index += (uint_x2_xe(pixel_sample_index) >> uint2_xe(1u, 0u)) & 1u;
+  return rt_sample_index;
+}
+
+// For XeResolveColorCopySourcePixelAddressIntsYHalfPixelOffsetFilling.
+uint2_xe XeResolveDirectColorCopySourceSampleYHalfPixelOffsetFilling(
+    XeResolveInfo resolve_info, uint2_xe pixel_index) {
+  return XeResolveDirectEdramSample(
+      uint2_xe(pixel_index.x,
+               max(pixel_index.y,
+                   resolve_info.half_pixel_offset_fill_source.y)) +
+          resolve_info.edram_offset_scaled,
+      resolve_info.edram_msaa_samples,
+      XeResolveFirstSampleIndex(resolve_info.sample_select));
+}
+
+// Horizontal distance between the samples of adjacent pixels.
+uint XeResolveDirectPixelStrideSamples(XeResolveInfo resolve_info) {
+  return 1u << uint(resolve_info.edram_msaa_samples >= kXenosMsaaSamples_4X);
+}
+
+float4_xe XeResolveDirectFetchFloat(int2_xe pixel, uint host_sample) {
+  #if SHADING_LANGUAGE_GLSL_XE
+    #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+      return texelFetch(xe_resolve_direct_source_float, pixel,
+                        int(host_sample));
+    #else
+      return texelFetch(xe_resolve_direct_source_float, pixel, 0);
+    #endif
+  #else
+    #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+      return xe_resolve_direct_source_float.Load(pixel, int(host_sample));
+    #else
+      return xe_resolve_direct_source_float.Load(int3_xe(pixel, 0));
+    #endif
+  #endif
+}
+
+uint4_xe XeResolveDirectFetchUInt(int2_xe pixel, uint host_sample) {
+  #if SHADING_LANGUAGE_GLSL_XE
+    #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+      return texelFetch(xe_resolve_direct_source_uint, pixel,
+                        int(host_sample));
+    #else
+      return texelFetch(xe_resolve_direct_source_uint, pixel, 0);
+    #endif
+  #else
+    #ifdef XE_RESOLVE_DIRECT_SOURCE_MSAA
+      return xe_resolve_direct_source_uint.Load(pixel, int(host_sample));
+    #else
+      return xe_resolve_direct_source_uint.Load(int3_xe(pixel, 0));
+    #endif
+  #endif
+}
+
+// The host pixel and sample of an EDRAM sample (DumpRenderTargets).
+void XeResolveDirectHostSample(XeResolveInfo resolve_info,
+                               XeResolveDirectSourceInfo source_info,
+                               uint2_xe edram_sample,
+                               out_param_xe(int2_xe, pixel),
+                               out_param_xe(uint, host_sample)) {
+  uint2_xe rt_sample = edram_sample + source_info.offset;
+  if (resolve_info.edram_msaa_samples >= kXenosMsaaSamples_4X) {
+    pixel = int2_xe(rt_sample >> 1u);
+    host_sample = (rt_sample.x & 1u) | ((rt_sample.y & 1u) << 1u);
+  } else if (resolve_info.edram_msaa_samples == kXenosMsaaSamples_2X) {
+    pixel = int2_xe(uint2_xe(rt_sample.x, rt_sample.y >> 1u));
+    host_sample = (rt_sample.y & 1u) != 0u ? source_info.host_2x_samples.y
+                                           : source_info.host_2x_samples.x;
+  } else {
+    pixel = int2_xe(rt_sample);
+    host_sample = 0u;
+  }
+}
+
+// Float32 color, clamped to [0, 31.875] the way each backend's dumping does,
+// to 7e3 (DxbcShaderTranslator / SpirvShaderTranslator UnclampedFloat32To7e3).
+uint XeResolveDirectFloat32To7e3(float f32) {
+  #if SHADING_LANGUAGE_GLSL_XE
+    f32 = xe_resolve_direct_nclamp(f32, 0.0f, 31.875f);
+  #else
+    f32 = min(max(f32, 0.0f), 31.875f);
+  #endif
+  uint f32u32 = float_bits_to_uint_xe(f32);
+  uint biased_f32 =
+      (f32u32 < 0x3E800000u)
+          ? (((f32u32 & 0x7FFFFFu) | 0x800000u) >>
+             min(125u - (f32u32 >> 23u), 24u))
+          : (f32u32 + 0xC2000000u);
+  return ((biased_f32 + 0x7FFFu + ((biased_f32 >> 16u) & 1u)) >> 16u) &
+         0x3FFu;
+}
+
+// [0, 0.5) float32 host depth to 20e4 (PreClampedDepthTo20e4 with the
+// remapping from [0, 0.5)).
+uint XeResolveDirectDepthToFloat24(float f32, bool round_to_nearest_even) {
+  uint f32u32 = float_bits_to_uint_xe(f32);
+  uint biased_f32 =
+      (f32u32 < (0x38800000u - (1u << 23u)))
+          ? (((f32u32 & 0x7FFFFFu) | 0x800000u) >>
+             min(112u - (f32u32 >> 23u), 24u))
+          : (f32u32 + (0xC8000000u + (1u << 23u)));
+  if (round_to_nearest_even) {
+    biased_f32 += 3u + ((biased_f32 >> 3u) & 1u);
+  }
+  return (biased_f32 >> 3u) & 0xFFFFFFu;
+}
+
+// PreSaturatedLinearToPWLGamma.
+float XeResolveDirectLinearToPWLGamma(float linear_value) {
+  float scale, offset;
+  if (linear_value >= (128.0f / 1023.0f)) {
+    bool is_piece_3 = linear_value >= (512.0f / 1023.0f);
+    scale = is_piece_3 ? (1023.0f / 8.0f) : (1023.0f / 4.0f);
+    offset = is_piece_3 ? (128.0f / 255.0f) : (64.0f / 255.0f);
+  } else {
+    bool is_piece_1 = linear_value >= (64.0f / 1023.0f);
+    scale = is_piece_1 ? (1023.0f / 2.0f) : 1023.0f;
+    offset = is_piece_1 ? (32.0f / 255.0f) : 0.0f;
+  }
+  return trunc(linear_value * scale) * (1.0f / 255.0f) + offset;
+}
+
+// A 32bpp sample in its EDRAM representation.
+uint XeResolveDirectLoad32bppSample(XeResolveInfo resolve_info,
+                                    XeResolveDirectSourceInfo source_info,
+                                    uint2_xe edram_sample) {
+  int2_xe pixel;
+  uint host_sample;
+  XeResolveDirectHostSample(resolve_info, source_info, edram_sample, pixel,
+                            host_sample);
+  uint packed;
+  dont_flatten_xe
+  if (source_info.conversion <= kXeResolveDirectSourceConversion_2_10_10_10) {
+    float4_xe color = XeResolveDirectFetchFloat(pixel, host_sample);
+    dont_flatten_xe
+    if (source_info.conversion ==
+        kXeResolveDirectSourceConversion_2_10_10_10) {
+      uint4_xe color_unorm = uint4_xe(
+          color * float4_xe(1023.0f, 1023.0f, 1023.0f, 3.0f) + 0.5f);
+      packed = color_unorm.r | (color_unorm.g << 10u) |
+               (color_unorm.b << 20u) | (color_unorm.a << 30u);
+    } else {
+      dont_flatten_xe
+      if (source_info.conversion ==
+          kXeResolveDirectSourceConversion_8_8_8_8_PWLGamma) {
+        color.r = XeResolveDirectLinearToPWLGamma(color.r);
+        color.g = XeResolveDirectLinearToPWLGamma(color.g);
+        color.b = XeResolveDirectLinearToPWLGamma(color.b);
+      }
+      uint4_xe color_unorm = uint4_xe(color * 255.0f + 0.5f);
+      packed = color_unorm.r | (color_unorm.g << 8u) |
+               (color_unorm.b << 16u) | (color_unorm.a << 24u);
+    }
+  } else if (source_info.conversion ==
+             kXeResolveDirectSourceConversion_2_10_10_10_Float) {
+    float4_xe color = XeResolveDirectFetchFloat(pixel, host_sample);
+    packed = XeResolveDirectFloat32To7e3(color.r) |
+             (XeResolveDirectFloat32To7e3(color.g) << 10u) |
+             (XeResolveDirectFloat32To7e3(color.b) << 20u);
+    #if SHADING_LANGUAGE_GLSL_XE
+      float alpha = xe_resolve_direct_nclamp(color.a, 0.0f, 1.0f);
+    #else
+      float alpha = saturate(color.a);
+    #endif
+    packed |= uint(alpha * 3.0f + 0.5f) << 30u;
+  } else if (source_info.conversion >=
+             kXeResolveDirectSourceConversion_DepthUNorm24) {
+    float depth = XeResolveDirectFetchFloat(pixel, host_sample).r;
+    #if SHADING_LANGUAGE_GLSL_XE
+      uint stencil = XeResolveDirectFetchUInt(pixel, host_sample).r;
+    #else
+      // X24_TYPELESS_G8_UINT / X32_TYPELESS_G8X24_UINT.
+      uint stencil = XeResolveDirectFetchUInt(pixel, host_sample).g;
+    #endif
+    dont_flatten_xe
+    if (source_info.conversion ==
+        kXeResolveDirectSourceConversion_DepthUNorm24) {
+      // Round to the nearest even like the dumping (round_ne, RoundEven).
+      #if SHADING_LANGUAGE_GLSL_XE
+        packed = uint(roundEven(depth * 16777215.0f));
+      #else
+        packed = uint(round(depth * 16777215.0f));
+      #endif
+    } else {
+      packed = XeResolveDirectDepthToFloat24(
+          depth, source_info.conversion ==
+                     kXeResolveDirectSourceConversion_DepthFloat24Round);
+    }
+    packed = (packed << 8u) | (stencil & 0xFFu);
+  } else {
+    uint4_xe color = XeResolveDirectFetchUInt(pixel, host_sample);
+    packed = source_info.conversion == kXeResolveDirectSourceConversion_UInt32
+                 ? color.r
+                 : (color.r | (color.g << 16u));
+  }
+  return packed;
+}
+
+// A 64bpp sample in its EDRAM representation.
+uint2_xe XeResolveDirectLoad64bppSample(XeResolveInfo resolve_info,
+                                        XeResolveDirectSourceInfo source_info,
+                                        uint2_xe edram_sample) {
+  int2_xe pixel;
+  uint host_sample;
+  XeResolveDirectHostSample(resolve_info, source_info, edram_sample, pixel,
+                            host_sample);
+  uint4_xe color = XeResolveDirectFetchUInt(pixel, host_sample);
+  return source_info.conversion == kXeResolveDirectSourceConversion_UInt32x2
+             ? color.rg
+             : (color.rb | (color.ga << 16u));
+}
+
+// Consecutive pixels in the EDRAM representation, in the order of the vector
+// components (the values are rotated in so the loops don't need dynamic
+// indexing, and are not unrolled so the conversions are not duplicated).
+
+uint2_xe XeResolveDirectLoad2Pixels32bpp(XeResolveInfo resolve_info,
+                                         XeResolveDirectSourceInfo source_info,
+                                         uint2_xe edram_sample,
+                                         uint pixel_stride_samples) {
+  uint2_xe packed = uint_x2_xe(0u);
+  dont_unroll for (uint i = 0u; i < 2u; ++i) {
+    packed = uint2_xe(
+        packed.y,
+        XeResolveDirectLoad32bppSample(
+            resolve_info, source_info,
+            edram_sample + uint2_xe(i * pixel_stride_samples, 0u)));
+  }
+  return packed;
+}
+
+uint4_xe XeResolveDirectLoad4Pixels32bpp(XeResolveInfo resolve_info,
+                                         XeResolveDirectSourceInfo source_info,
+                                         uint2_xe edram_sample,
+                                         uint pixel_stride_samples) {
+  uint4_xe packed = uint4_xe(0u, 0u, 0u, 0u);
+  dont_unroll for (uint i = 0u; i < 4u; ++i) {
+    packed = uint4_xe(
+        packed.yzw,
+        XeResolveDirectLoad32bppSample(
+            resolve_info, source_info,
+            edram_sample + uint2_xe(i * pixel_stride_samples, 0u)));
+  }
+  return packed;
+}
+
+// 2 64bpp pixels.
+uint4_xe XeResolveDirectLoad2Pixels64bpp(XeResolveInfo resolve_info,
+                                         XeResolveDirectSourceInfo source_info,
+                                         uint2_xe edram_sample,
+                                         uint pixel_stride_samples) {
+  uint4_xe packed = uint4_xe(0u, 0u, 0u, 0u);
+  dont_unroll for (uint i = 0u; i < 2u; ++i) {
+    packed = uint4_xe(
+        packed.zw,
+        XeResolveDirectLoad64bppSample(
+            resolve_info, source_info,
+            edram_sample + uint2_xe(i * pixel_stride_samples, 0u)));
+  }
+  return packed;
+}
+
+// 4 64bpp pixels, 0 and 1 in packed_01, 2 and 3 in packed_23.
+void XeResolveDirectLoad4Pixels64bpp(XeResolveInfo resolve_info,
+                                     XeResolveDirectSourceInfo source_info,
+                                     uint2_xe edram_sample,
+                                     uint pixel_stride_samples,
+                                     out_param_xe(uint4_xe, packed_01),
+                                     out_param_xe(uint4_xe, packed_23)) {
+  packed_01 = uint4_xe(0u, 0u, 0u, 0u);
+  packed_23 = uint4_xe(0u, 0u, 0u, 0u);
+  dont_unroll for (uint i = 0u; i < 4u; ++i) {
+    packed_01 = uint4_xe(packed_01.zw, packed_23.xy);
+    packed_23 = uint4_xe(
+        packed_23.zw,
+        XeResolveDirectLoad64bppSample(
+            resolve_info, source_info,
+            edram_sample + uint2_xe(i * pixel_stride_samples, 0u)));
+  }
+}
+
+#ifndef XE_RESOLVE_CLEAR
+  // XeResolveLoad*FromRaw and XeResolveLoad*Colors, with samples instead of
+  // EDRAM addresses: the pixel stride is XeResolveDirectPixelStrideSamples, the
+  // tile row stride (the next sample row) is one sample down, the sample stride
+  // (the next sample column) is one sample to the right.
+
+  void XeResolveDirectLoad2RGBAUnswappedPixelSamples(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, uint pixel_stride_samples,
+      out_param_xe(float4_xe, pixel_0), out_param_xe(float4_xe, pixel_1)) {
+    dont_flatten_xe if (resolve_info.edram_format_ints_log2 != 0u) {
+      XeResolveUnpack64bpp2Samples(
+          XeResolveDirectLoad2Pixels64bpp(resolve_info, source_info,
+                                          edram_sample, pixel_stride_samples),
+          resolve_info.edram_format, pixel_0, pixel_1);
+    } else {
+      XeResolveUnpack32bpp2Samples(
+          XeResolveDirectLoad2Pixels32bpp(resolve_info, source_info,
+                                          edram_sample, pixel_stride_samples),
+          resolve_info.edram_format, pixel_0, pixel_1);
+    }
+  }
+
+  void XeResolveDirectLoad4RGBAUnswappedPixelSamples(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, uint pixel_stride_samples,
+      out_param_xe(float4_xe, pixel_0), out_param_xe(float4_xe, pixel_1),
+      out_param_xe(float4_xe, pixel_2), out_param_xe(float4_xe, pixel_3)) {
+    dont_flatten_xe if (resolve_info.edram_format_ints_log2 != 0u) {
+      uint4_xe packed_01, packed_23;
+      XeResolveDirectLoad4Pixels64bpp(resolve_info, source_info, edram_sample,
+                                      pixel_stride_samples, packed_01,
+                                      packed_23);
+      XeResolveUnpack64bpp4Samples(packed_01, packed_23,
+                                   resolve_info.edram_format, pixel_0,
+                                   pixel_1, pixel_2, pixel_3);
+    } else {
+      XeResolveUnpack32bpp4Samples(
+          XeResolveDirectLoad4Pixels32bpp(resolve_info, source_info,
+                                          edram_sample, pixel_stride_samples),
+          resolve_info.edram_format, pixel_0, pixel_1, pixel_2, pixel_3);
+    }
+  }
+
+  void XeResolveDirectLoad8RedPixelSamples(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, uint pixel_stride_samples, bool swap,
+      out_param_xe(float4_xe, pixels_0123),
+      out_param_xe(float4_xe, pixels_4567)) {
+    uint4_xe packed_0123, packed_4567;
+    dont_flatten_xe if (resolve_info.edram_format_ints_log2 != 0u) {
+      // The blue part for red / blue swapping is in the second half of the
+      // 64bpp sample.
+      uint4_xe packed_01, packed_23;
+      XeResolveDirectLoad4Pixels64bpp(resolve_info, source_info, edram_sample,
+                                      pixel_stride_samples, packed_01,
+                                      packed_23);
+      packed_0123 = swap ? uint4_xe(packed_01.yw, packed_23.yw)
+                         : uint4_xe(packed_01.xz, packed_23.xz);
+      XeResolveDirectLoad4Pixels64bpp(
+          resolve_info, source_info,
+          edram_sample + uint2_xe(4u * pixel_stride_samples, 0u),
+          pixel_stride_samples, packed_01, packed_23);
+      packed_4567 = swap ? uint4_xe(packed_01.yw, packed_23.yw)
+                         : uint4_xe(packed_01.xz, packed_23.xz);
+      XeResolveUnpack64bpp8RedUnswappedSamples(packed_0123, packed_4567,
+                                               resolve_info.edram_format,
+                                               pixels_0123, pixels_4567);
+    } else {
+      packed_0123 = XeResolveDirectLoad4Pixels32bpp(
+          resolve_info, source_info, edram_sample, pixel_stride_samples);
+      packed_4567 = XeResolveDirectLoad4Pixels32bpp(
+          resolve_info, source_info,
+          edram_sample + uint2_xe(4u * pixel_stride_samples, 0u),
+          pixel_stride_samples);
+      XeResolveUnpack32bpp8RedSamples(packed_0123, packed_4567,
+                                      resolve_info.edram_format, swap,
+                                      pixels_0123, pixels_4567);
+    }
+  }
+
+  // The samples averaged, in the order of XeResolveLoad*Colors: the first
+  // sample, the one below it, then the ones to the right of those two. A loop
+  // rather than separate loads to have one copy of the loading and unpacking
+  // code; the first iteration assigns rather than adds, as adding to zero
+  // would turn -0 into +0.
+  uint XeResolveDirectColorSampleCount(XeResolveInfo resolve_info) {
+    return resolve_info.sample_select >= kXenosCopySampleSelect_0123
+               ? 4u
+               : (resolve_info.sample_select >= kXenosCopySampleSelect_01 ? 2u
+                                                                          : 1u);
+  }
+
+  float XeResolveDirectColorExpBias(XeResolveInfo resolve_info) {
+    float exp_bias = resolve_info.dest_exp_bias_factor;
+    if (resolve_info.sample_select >= kXenosCopySampleSelect_01) {
+      // TODO(Triang3l): Gamma-correct resolve for 8_8_8_8_GAMMA.
+      exp_bias *= 0.5f;
+      if (resolve_info.sample_select >= kXenosCopySampleSelect_0123) {
+        exp_bias *= 0.5f;
+      }
+    }
+    return exp_bias;
+  }
+
+  uint2_xe XeResolveDirectColorSampleOffset(uint sample_index) {
+    return uint2_xe(sample_index >> 1u, sample_index & 1u);
+  }
+
+  void XeResolveDirectLoad2RGBAColors(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, out_param_xe(float4_xe, pixel_0),
+      out_param_xe(float4_xe, pixel_1)) {
+    uint pixel_stride_samples = XeResolveDirectPixelStrideSamples(resolve_info);
+    uint sample_count = XeResolveDirectColorSampleCount(resolve_info);
+    pixel_0 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    pixel_1 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    dont_unroll for (uint i = 0u; i < sample_count; ++i) {
+      float4_xe sample_pixel_0, sample_pixel_1;
+      XeResolveDirectLoad2RGBAUnswappedPixelSamples(
+          resolve_info, source_info,
+          edram_sample + XeResolveDirectColorSampleOffset(i),
+          pixel_stride_samples, sample_pixel_0, sample_pixel_1);
+      pixel_0 = i != 0u ? pixel_0 + sample_pixel_0 : sample_pixel_0;
+      pixel_1 = i != 0u ? pixel_1 + sample_pixel_1 : sample_pixel_1;
+    }
+    float exp_bias = XeResolveDirectColorExpBias(resolve_info);
+    pixel_0 *= exp_bias;
+    pixel_1 *= exp_bias;
+    dont_flatten_xe if (resolve_info.dest_swap) {
+      pixel_0 = pixel_0.bgra;
+      pixel_1 = pixel_1.bgra;
+    }
+  }
+
+  void XeResolveDirectLoad4RGBAColors(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, out_param_xe(float4_xe, pixel_0),
+      out_param_xe(float4_xe, pixel_1), out_param_xe(float4_xe, pixel_2),
+      out_param_xe(float4_xe, pixel_3)) {
+    uint pixel_stride_samples = XeResolveDirectPixelStrideSamples(resolve_info);
+    uint sample_count = XeResolveDirectColorSampleCount(resolve_info);
+    pixel_0 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    pixel_1 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    pixel_2 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    pixel_3 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    dont_unroll for (uint i = 0u; i < sample_count; ++i) {
+      float4_xe sample_pixel_0, sample_pixel_1, sample_pixel_2, sample_pixel_3;
+      XeResolveDirectLoad4RGBAUnswappedPixelSamples(
+          resolve_info, source_info,
+          edram_sample + XeResolveDirectColorSampleOffset(i),
+          pixel_stride_samples, sample_pixel_0, sample_pixel_1,
+          sample_pixel_2, sample_pixel_3);
+      pixel_0 = i != 0u ? pixel_0 + sample_pixel_0 : sample_pixel_0;
+      pixel_1 = i != 0u ? pixel_1 + sample_pixel_1 : sample_pixel_1;
+      pixel_2 = i != 0u ? pixel_2 + sample_pixel_2 : sample_pixel_2;
+      pixel_3 = i != 0u ? pixel_3 + sample_pixel_3 : sample_pixel_3;
+    }
+    float exp_bias = XeResolveDirectColorExpBias(resolve_info);
+    pixel_0 *= exp_bias;
+    pixel_1 *= exp_bias;
+    pixel_2 *= exp_bias;
+    pixel_3 *= exp_bias;
+    dont_flatten_xe if (resolve_info.dest_swap) {
+      pixel_0 = pixel_0.bgra;
+      pixel_1 = pixel_1.bgra;
+      pixel_2 = pixel_2.bgra;
+      pixel_3 = pixel_3.bgra;
+    }
+  }
+
+  void XeResolveDirectLoad8RedColors(
+      XeResolveInfo resolve_info, XeResolveDirectSourceInfo source_info,
+      uint2_xe edram_sample, out_param_xe(float4_xe, pixels_0123),
+      out_param_xe(float4_xe, pixels_4567)) {
+    uint pixel_stride_samples = XeResolveDirectPixelStrideSamples(resolve_info);
+    uint sample_count = XeResolveDirectColorSampleCount(resolve_info);
+    pixels_0123 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    pixels_4567 = float4_xe(0.0f, 0.0f, 0.0f, 0.0f);
+    dont_unroll for (uint i = 0u; i < sample_count; ++i) {
+      float4_xe sample_pixels_0123, sample_pixels_4567;
+      XeResolveDirectLoad8RedPixelSamples(
+          resolve_info, source_info,
+          edram_sample + XeResolveDirectColorSampleOffset(i),
+          pixel_stride_samples, resolve_info.dest_swap, sample_pixels_0123,
+          sample_pixels_4567);
+      pixels_0123 =
+          i != 0u ? pixels_0123 + sample_pixels_0123 : sample_pixels_0123;
+      pixels_4567 =
+          i != 0u ? pixels_4567 + sample_pixels_4567 : sample_pixels_4567;
+    }
+    float exp_bias = XeResolveDirectColorExpBias(resolve_info);
+    pixels_0123 *= exp_bias;
+    pixels_4567 *= exp_bias;
+  }
+#endif  // !XE_RESOLVE_CLEAR
+
+#endif  // XENIA_GPU_SHADERS_RESOLVE_DIRECT_XESLI_
