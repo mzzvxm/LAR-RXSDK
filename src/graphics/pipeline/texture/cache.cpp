@@ -267,6 +267,10 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
   uint32_t limit_hard_mb =
       REXCVAR_GET(texture_cache_memory_limit_hard) + limit_scaled_resolve_add_mb;
   uint32_t limit_soft_lifetime = REXCVAR_GET(texture_cache_memory_limit_soft_lifetime) * 1000;
+  if (memory_pressure_) {
+    limit_soft_mb /= 2;
+    limit_hard_mb /= 2;
+  }
   bool destroyed_any = false;
   while (texture_used_first_ != nullptr) {
     uint64_t total_host_memory_usage_mb =

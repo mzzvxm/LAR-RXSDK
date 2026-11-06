@@ -39,6 +39,13 @@
 #include <rex/system/user_module.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+REXCVAR_DEFINE_UINT32(gpu_memory_pressure_percent, 0, "GPU",
+                      "When the process uses this percentage of its video memory budget (from the "
+                      "OS), give memory back: render targets that hold no data and weren't used "
+                      "for 2 seconds go (render_target_trim_seconds must be set) and the texture "
+                      "cache's limits are halved; it ends 8 points under it (0: off)")
+    .range(0, 100)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
@@ -379,6 +386,36 @@ void CommandProcessor::CallInThread(std::function<void()> fn) {
     fn();
   } else {
     pending_fns_.push(std::move(fn));
+  }
+}
+
+void CommandProcessor::UpdateGpuMemory(uint64_t now_ms) {
+  const uint32_t pressure_percent = REXCVAR_GET(gpu_memory_pressure_percent);
+  if (!pressure_percent) {
+    if (gpu_memory_pressure_) {
+      gpu_memory_pressure_ = false;
+      OnGpuMemoryPressure(false);
+    }
+    return;
+  }
+  if (now_ms < gpu_memory_next_check_ms_) {
+    return;
+  }
+  gpu_memory_next_check_ms_ = now_ms + 250;
+  GpuMemoryInfo info;
+  if (QueryGpuMemoryInfo(info) && info.budget_bytes) {
+    const uint64_t percent = info.usage_bytes * 100 / info.budget_bytes;
+    const bool pressure =
+        gpu_memory_pressure_ ? percent + 8 >= pressure_percent : percent >= pressure_percent;
+    if (pressure != gpu_memory_pressure_) {
+      gpu_memory_pressure_ = pressure;
+      REXGPU_INFO("Video memory: {} ({} MB of {} MB, {}%)", pressure ? "short" : "no longer short",
+                  info.usage_bytes >> 20, info.budget_bytes >> 20, percent);
+      OnGpuMemoryPressure(pressure);
+    }
+  } else if (gpu_memory_pressure_) {
+    gpu_memory_pressure_ = false;
+    OnGpuMemoryPressure(false);
   }
 }
 

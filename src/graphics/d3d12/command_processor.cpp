@@ -111,6 +111,19 @@ void D3D12CommandProcessor::ClearCaches() {
   cache_clear_requested_ = true;
 }
 
+bool D3D12CommandProcessor::QueryGpuMemoryInfo(GpuMemoryInfo& info_out) {
+  return GetD3D12Provider().QueryVideoMemory(info_out.usage_bytes, info_out.budget_bytes);
+}
+
+void D3D12CommandProcessor::OnGpuMemoryPressure(bool pressure) {
+  if (render_target_cache_) {
+    render_target_cache_->set_trim_pressure(pressure);
+  }
+  if (texture_cache_) {
+    texture_cache_->set_memory_pressure(pressure);
+  }
+}
+
 void D3D12CommandProcessor::InvalidateGpuMemory() {
   if (shared_memory_) {
     shared_memory_->InvalidateAllPages();
@@ -3810,6 +3823,9 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     frame_open_ = false;
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
+
+    // gpu_memory_pressure_percent: the video memory in use, and what to do about a shortage.
+    UpdateGpuMemory(rex::chrono::Clock::QueryHostUptimeMillis());
 
     // render_target_trim_seconds: whether host render targets can be given back.
     const bool render_targets_trim_due =

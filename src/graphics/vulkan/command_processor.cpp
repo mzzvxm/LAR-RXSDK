@@ -612,6 +612,49 @@ void VulkanCommandProcessor::ClearCaches() {
   cache_clear_requested_ = true;
 }
 
+// CHECK: the budget query was seen working on Vulkan, but the pressure response has only been seen
+// on Direct3D 12 (a pretended small card); not compiled or run here. To try it on a big card, set
+// gpu_memory_pressure_percent low (say 10) and watch for "Video memory: short" in the log.
+bool VulkanCommandProcessor::QueryGpuMemoryInfo(GpuMemoryInfo& info_out) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  if (!vulkan_device || !vulkan_device->extensions().ext_EXT_memory_budget ||
+      !vulkan_device->vulkan_instance()->extensions().ext_1_1_KHR_get_physical_device_properties2) {
+    return false;
+  }
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
+  budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+  VkPhysicalDeviceMemoryProperties2 properties = {};
+  properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+  properties.pNext = &budget;
+  vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceMemoryProperties2(
+      vulkan_device->physical_device(), &properties);
+  // The biggest device-local heap is the video memory (a small one of the
+  // same kind, the part the CPU can map, may follow it).
+  uint32_t local_heap = UINT32_MAX;
+  for (uint32_t i = 0; i < properties.memoryProperties.memoryHeapCount; ++i) {
+    if ((properties.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+        (local_heap == UINT32_MAX || properties.memoryProperties.memoryHeaps[i].size >
+                                         properties.memoryProperties.memoryHeaps[local_heap].size)) {
+      local_heap = i;
+    }
+  }
+  if (local_heap == UINT32_MAX) {
+    return false;
+  }
+  info_out.usage_bytes = budget.heapUsage[local_heap];
+  info_out.budget_bytes = budget.heapBudget[local_heap];
+  return true;
+}
+
+void VulkanCommandProcessor::OnGpuMemoryPressure(bool pressure) {
+  if (render_target_cache_) {
+    render_target_cache_->set_trim_pressure(pressure);
+  }
+  if (texture_cache_) {
+    texture_cache_->set_memory_pressure(pressure);
+  }
+}
+
 void VulkanCommandProcessor::InvalidateGpuMemory() {
   if (shared_memory_) {
     shared_memory_->InvalidateAllPages();
@@ -5743,6 +5786,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     frame_open_ = false;
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] = GetCurrentSubmission() - 1;
+
+    // gpu_memory_pressure_percent: the video memory in use, and what to do about a shortage.
+    UpdateGpuMemory(rex::chrono::Clock::QueryHostUptimeMillis());
 
     // render_target_trim_seconds: whether host render targets can be given back.
     const bool render_targets_trim_due =

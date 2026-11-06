@@ -416,8 +416,26 @@ class CommandProcessor {
   // The newest real count the host delivered (what an end event tells the game).
   bool occlusion_latest_valid_ = false;
   uint32_t occlusion_latest_samples_ = 0;
+  // Video memory (gpu_memory_pressure_percent): the implementations call
+  // UpdateGpuMemory at the end of each frame (with the host time in
+  // milliseconds) and answer these.
+  struct GpuMemoryInfo {
+    // What the process uses of the video memory, and the budget the OS gives
+    // it now.
+    uint64_t usage_bytes = 0;
+    uint64_t budget_bytes = 0;
+  };
+  void UpdateGpuMemory(uint64_t now_ms);
+  // False if the host can't say.
+  virtual bool QueryGpuMemoryInfo([[maybe_unused]] GpuMemoryInfo& info_out) { return false; }
+  // The host is (or is no longer) short of video memory: give back what's not
+  // needed, and keep less of what's cached.
+  virtual void OnGpuMemoryPressure([[maybe_unused]] bool pressure) {}
 
  private:
+  uint64_t gpu_memory_next_check_ms_ = 0;
+  bool gpu_memory_pressure_ = false;
+
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
   reg::DC_LUT_PWL_DATA gamma_ramp_pwl_rgb_[128][3] = {};
   uint32_t gamma_ramp_rw_component_ = 0;

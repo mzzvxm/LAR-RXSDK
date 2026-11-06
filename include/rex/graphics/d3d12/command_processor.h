@@ -235,6 +235,9 @@ class D3D12CommandProcessor : public CommandProcessor {
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
 
+  bool QueryGpuMemoryInfo(GpuMemoryInfo& info_out) override;
+  void OnGpuMemoryPressure(bool pressure) override;
+
  private:
   static constexpr uint32_t kQueueFrames = 3;
 
