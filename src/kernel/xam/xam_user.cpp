@@ -339,14 +339,13 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
       case UserProfile::Setting::Type::BINARY: {
         uint8_t* binary_ptr = REX_KERNEL_MEMORY()->TranslateVirtual(setting.data.binary.ptr);
         size_t binary_size = setting.data.binary.size;
-        std::vector<uint8_t> bytes;
-        if (setting.data.binary.ptr) {
-          // Copy provided data
-          bytes.resize(binary_size);
+        // Zero-filled when the data pointer is NULL. An empty vector has a
+        // null data(), and memcpy with a null pointer is undefined even for
+        // size 0 (clang then drops the size check from the allocation), so
+        // only copy when there is something to copy.
+        std::vector<uint8_t> bytes(binary_size);
+        if (setting.data.binary.ptr && binary_size) {
           std::memcpy(bytes.data(), binary_ptr, binary_size);
-        } else {
-          // Data pointer was NULL, so just fill with zeroes
-          bytes.resize(binary_size, 0);
         }
         user_profile->AddSetting(
             std::make_unique<xam::UserProfile::BinarySetting>(setting.setting_id, bytes));
