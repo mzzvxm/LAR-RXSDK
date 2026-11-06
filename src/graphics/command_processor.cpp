@@ -12,8 +12,11 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -52,6 +55,19 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
                       " some: Read previous frame (delayed, copy on cache miss)\n"
                       " full: Immediate sync readback (accurate but stalls)")
     .allowed({"none", "fast", "some", "full"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(readback_resolve_rules, "", "GPU",
+                      "Read back only the resolves that match a rule, whatever readback_resolve "
+                      "says (readback_resolve=none and rules set: just those, synchronously, which "
+                      "costs nothing for the others). Rules are separated by ';', a rule is "
+                      "key=value pairs separated by ',', all of which must match: addr=LO-HI "
+                      "(the written memory touches that range of guest physical addresses), "
+                      "len=LO-HI (bytes written), pitch=LO-HI and height=LO-HI (the destination's, "
+                      "in pixels), fmt=N (its xenos::ColorFormat), src=N (RB_COPY_CONTROL "
+                      "copy_src_select, 4 is depth), mode=full|fast|some (default full). A range "
+                      "is N, LO-HI, LO- or -HI (inclusive; decimal or 0x hex). Empty: no rules "
+                      "(the default).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
@@ -108,6 +124,144 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
     return ReadbackResolveMode::kFull;
   }
   return ReadbackResolveMode::kDisabled;
+}
+
+std::string_view TrimRuleText(std::string_view text) {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+    text.remove_prefix(1);
+  }
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
+    text.remove_suffix(1);
+  }
+  return text;
+}
+
+bool ParseRuleNumber(std::string_view text, uint64_t& value) {
+  if (text.empty() || text.size() > 20) {
+    return false;
+  }
+  char buffer[24];
+  std::memcpy(buffer, text.data(), text.size());
+  buffer[text.size()] = '\0';
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(buffer, &end, 0);
+  if (end == buffer || *end != '\0') {
+    return false;
+  }
+  value = parsed;
+  return true;
+}
+
+// "N", "LO-HI", "LO-" or "-HI".
+bool ParseRuleRange(std::string_view text, ReadbackRuleRange& range) {
+  uint64_t lo = 0;
+  uint64_t hi = ~uint64_t(0);
+  const size_t dash = text.find('-');
+  if (dash == std::string_view::npos) {
+    if (!ParseRuleNumber(text, lo)) {
+      return false;
+    }
+    hi = lo;
+  } else {
+    const std::string_view left = TrimRuleText(text.substr(0, dash));
+    const std::string_view right = TrimRuleText(text.substr(dash + 1));
+    if (left.empty() && right.empty()) {
+      return false;
+    }
+    if (!left.empty() && !ParseRuleNumber(left, lo)) {
+      return false;
+    }
+    if (!right.empty() && !ParseRuleNumber(right, hi)) {
+      return false;
+    }
+  }
+  range.set = true;
+  range.lo = lo;
+  range.hi = hi;
+  return true;
+}
+
+// readback_resolve_rules: rules separated by ';', each key=value pairs
+// separated by ','. A rule that does not parse is left out (logged).
+void ParseReadbackRules(std::string_view text, std::vector<ReadbackRule>& rules) {
+  rules.clear();
+  size_t position = 0;
+  while (position <= text.size()) {
+    const size_t semicolon = text.find(';', position);
+    const std::string_view rule_text = TrimRuleText(text.substr(
+        position,
+        semicolon == std::string_view::npos ? std::string_view::npos : semicolon - position));
+    position = semicolon == std::string_view::npos ? text.size() + 1 : semicolon + 1;
+    if (rule_text.empty()) {
+      continue;
+    }
+    ReadbackRule rule;
+    rule.text = std::string(rule_text);
+    bool valid = true;
+    bool warned = false;
+    size_t item_position = 0;
+    while (valid && item_position <= rule_text.size()) {
+      const size_t comma = rule_text.find(',', item_position);
+      const std::string_view item = TrimRuleText(rule_text.substr(
+          item_position,
+          comma == std::string_view::npos ? std::string_view::npos : comma - item_position));
+      item_position = comma == std::string_view::npos ? rule_text.size() + 1 : comma + 1;
+      if (item.empty()) {
+        continue;
+      }
+      const size_t equals = item.find('=');
+      if (equals == std::string_view::npos) {
+        valid = false;
+        break;
+      }
+      const std::string_view key = TrimRuleText(item.substr(0, equals));
+      const std::string_view value = TrimRuleText(item.substr(equals + 1));
+      ReadbackRuleRange* range = nullptr;
+      if (key == "addr") {
+        range = &rule.address;
+      } else if (key == "len") {
+        range = &rule.length;
+      } else if (key == "pitch") {
+        range = &rule.pitch;
+      } else if (key == "height") {
+        range = &rule.height;
+      } else if (key == "fmt") {
+        range = &rule.format;
+      } else if (key == "src") {
+        range = &rule.source;
+      } else if (key == "phase") {
+        // phase= keys on the title's render phase markers, which this SDK has no source
+        // for. Say so instead of silently ignoring the key.
+        REXGPU_WARN(
+            "readback_resolve_rules: the rule \"{}\" uses phase=, which isn't supported here "
+            "(there are no guest render markers), so the rule is left out",
+            rule.text);
+        valid = false;
+        warned = true;
+      } else if (key == "mode") {
+        if (value == "full") {
+          rule.mode = ReadbackResolveMode::kFull;
+        } else if (value == "fast") {
+          rule.mode = ReadbackResolveMode::kFast;
+        } else if (value == "some") {
+          rule.mode = ReadbackResolveMode::kSome;
+        } else {
+          valid = false;
+        }
+      } else {
+        valid = false;
+      }
+      if (range && !ParseRuleRange(value, *range)) {
+        valid = false;
+      }
+    }
+    if (valid) {
+      rules.push_back(std::move(rule));
+    } else if (!warned) {
+      REXGPU_WARN("readback_resolve_rules: the rule \"{}\" is not valid and is left out",
+                  rule.text);
+    }
+  }
 }
 
 }  // namespace
@@ -190,6 +344,45 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
   }
   return legacy_readback_resolve_enabled ? ReadbackResolveMode::kFast
                                          : ReadbackResolveMode::kDisabled;
+}
+
+bool CommandProcessor::IsResolveReadbackSelective() {
+  return !REXCVAR_GET(readback_resolve_rules).empty();
+}
+
+ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
+    bool legacy_readback_resolve_enabled, uint32_t written_address, uint32_t written_length) {
+  ReadbackResolveMode mode = GetReadbackResolveMode(legacy_readback_resolve_enabled);
+
+  const std::string& rules_text = REXCVAR_GET(readback_resolve_rules);
+  if (rules_text != readback_rules_text_) {
+    readback_rules_text_ = rules_text;
+    ParseReadbackRules(readback_rules_text_, readback_rules_);
+    REXGPU_INFO("readback_resolve_rules: {} rule(s) from \"{}\"", readback_rules_.size(),
+                readback_rules_text_);
+  }
+  if (readback_rules_.empty()) {
+    return mode;
+  }
+
+  const reg::RB_COPY_CONTROL copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
+  const reg::RB_COPY_DEST_INFO copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+  const reg::RB_COPY_DEST_PITCH copy_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+  const uint64_t first = written_address;
+  const uint64_t last = first + (written_length ? written_length - 1 : 0);
+  for (const ReadbackRule& rule : readback_rules_) {
+    if (rule.address.set && (last < rule.address.lo || first > rule.address.hi)) {
+      continue;
+    }
+    if (rule.length.Contains(written_length) &&
+        rule.pitch.Contains(copy_dest_pitch.copy_dest_pitch) &&
+        rule.height.Contains(copy_dest_pitch.copy_dest_height) &&
+        rule.format.Contains(uint32_t(copy_dest_info.copy_dest_format)) &&
+        rule.source.Contains(copy_control.copy_src_select)) {
+      return rule.mode;
+    }
+  }
+  return mode;
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {

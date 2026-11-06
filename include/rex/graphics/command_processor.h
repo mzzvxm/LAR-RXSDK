@@ -46,6 +46,26 @@ enum class ReadbackResolveMode {
   kFull,
 };
 
+// A range of a readback_resolve_rules key: inclusive; a bound left out is 0 or the maximum.
+struct ReadbackRuleRange {
+  bool set = false;
+  uint64_t lo = 0;
+  uint64_t hi = ~uint64_t(0);
+  bool Contains(uint64_t value) const { return !set || (value >= lo && value <= hi); }
+};
+
+// One rule of readback_resolve_rules.
+struct ReadbackRule {
+  ReadbackRuleRange address;  // the written memory [address, address + length) touches this
+  ReadbackRuleRange length;   // bytes written
+  ReadbackRuleRange pitch;    // the destination's pitch, in pixels
+  ReadbackRuleRange height;   // the destination's height, in pixels
+  ReadbackRuleRange format;   // the destination's xenos::ColorFormat
+  ReadbackRuleRange source;   // RB_COPY_CONTROL::copy_src_select (colour target 0-3, depth 4)
+  ReadbackResolveMode mode = ReadbackResolveMode::kFull;
+  std::string text;
+};
+
 struct SwapState {
   // Lock must be held when changing data in this structure.
   std::mutex mutex;
@@ -238,6 +258,21 @@ class CommandProcessor {
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
   // Shared memexport readback enable state with backend legacy-flag override support.
   bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
+
+  // Selective resolve readback. With readback_resolve off, a resolve that a rule
+  // of readback_resolve_rules matches is still read back (synchronously, unless
+  // the rule says otherwise), and none of the others is. IssueCopy takes the
+  // readback path only when this says rules are there to be applied;
+  // GetReadbackResolveModeFor is the mode of one resolve that has been made (it
+  // wrote [written_address, written_address + written_length)): the global one,
+  // or the matching rule's, or kDisabled. Command processor thread only.
+  bool IsResolveReadbackSelective();
+  ReadbackResolveMode GetReadbackResolveModeFor(bool legacy_readback_resolve_enabled,
+                                                uint32_t written_address,
+                                                uint32_t written_length);
+
+  std::string readback_rules_text_;
+  std::vector<ReadbackRule> readback_rules_;
 
   memory::Memory* memory_ = nullptr;
   system::KernelState* kernel_state_ = nullptr;
