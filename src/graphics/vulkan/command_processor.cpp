@@ -881,6 +881,12 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize shared memory");
     return false;
   }
+  {
+    size_t hoist_page_words =
+        ((size_t(SharedMemory::kBufferSize) >> shared_memory_->page_size_log2()) + 63) / 64;
+    hoist_read_pages_.assign(hoist_page_words, 0);
+    hoist_read_pages_serial_.assign(hoist_page_words, 0);
+  }
 
   primitive_processor_ =
       std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
@@ -3115,10 +3121,19 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
+
+  // Shared memory uploads for the draws in this render pass may be recorded
+  // here, after the barriers before it (CanHoistSharedMemoryUpload).
+  if (!hoist_read_pages_.empty()) {
+    hoist_point_ = deferred_command_buffer_.CmdHoistPoint();
+    ++hoist_render_pass_serial_;
+    hoist_render_pass_ = true;
+  }
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
@@ -3189,6 +3204,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
@@ -3268,6 +3284,96 @@ void VulkanCommandProcessor::EndRenderPass() {
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
   in_render_pass_ = false;
+  hoist_render_pass_ = false;
+}
+
+// Shared memory uploads recorded before the render pass instead of ending it:
+// ported from ForzaHorizon1-ReImagined's patch 0036
+// (https://github.com/Dyotson/ForzaHorizon1-ReImagined, patches/rexglue-sdk),
+// extended to the byte-range uploads hot pages make, under its licence:
+//
+//   MIT License
+//
+//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+
+// CHECK: a draw reads the shared memory only through its vertex fetch constants' ranges, its guest
+// indices and its memory exports, rounded out to pages; and nothing else reads it inside a
+// guest render pass (clear rectangle draws and resolves do not, or end the render pass). Read
+// from this tree's code, not run: if another reader is added, it has to call
+// MarkSharedMemoryReadInRenderPass. The fork checked the same picture on and off at 3x only.
+bool VulkanCommandProcessor::CanHoistSharedMemoryUpload(
+    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const {
+  if (!hoist_render_pass_ || !in_render_pass_) {
+    return false;
+  }
+  for (const std::pair<uint32_t, uint32_t>& range : upload_page_ranges) {
+    if (!range.second) {
+      continue;
+    }
+    uint32_t page_first = range.first;
+    uint32_t page_last = range.first + range.second - 1;
+    if ((page_last >> 6) >= hoist_read_pages_.size()) {
+      return false;
+    }
+    for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
+      if (hoist_read_pages_serial_[word] != hoist_render_pass_serial_) {
+        continue;
+      }
+      uint64_t mask = ~uint64_t(0);
+      if (word == (page_first >> 6)) {
+        mask &= ~uint64_t(0) << (page_first & 63);
+      }
+      if (word == (page_last >> 6)) {
+        mask &= ~uint64_t(0) >> (63 - (page_last & 63));
+      }
+      if (hoist_read_pages_[word] & mask) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void VulkanCommandProcessor::MarkSharedMemoryReadInRenderPass(uint32_t start, uint32_t length) {
+  if (!hoist_render_pass_ || !length || start >= SharedMemory::kBufferSize) {
+    return;
+  }
+  length = std::min(length, SharedMemory::kBufferSize - start);
+  uint32_t page_size_log2 = shared_memory_->page_size_log2();
+  uint32_t page_first = start >> page_size_log2;
+  uint32_t page_last = (start + length - 1) >> page_size_log2;
+  for (uint32_t word = page_first >> 6; word <= (page_last >> 6); ++word) {
+    uint64_t mask = ~uint64_t(0);
+    if (word == (page_first >> 6)) {
+      mask &= ~uint64_t(0) << (page_first & 63);
+    }
+    if (word == (page_last >> 6)) {
+      mask &= ~uint64_t(0) >> (63 - (page_last & 63));
+    }
+    if (hoist_read_pages_serial_[word] != hoist_render_pass_serial_) {
+      hoist_read_pages_serial_[word] = hoist_render_pass_serial_;
+      hoist_read_pages_[word] = 0;
+    }
+    hoist_read_pages_[word] |= mask;
+  }
 }
 
 VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
@@ -4150,6 +4256,35 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+  // What this draw reads from the shared memory: no upload into it can go
+  // before this render pass any more (CanHoistSharedMemoryUpload).
+  if (hoist_render_pass_) {
+    for (const Shader* shader : {static_cast<const Shader*>(vertex_shader),
+                                 static_cast<const Shader*>(pixel_shader)}) {
+      if (!shader) {
+        continue;
+      }
+      const Shader::ConstantRegisterMap& constant_map = shader->constant_register_map();
+      for (uint32_t i = 0; i < rex::countof(constant_map.vertex_fetch_bitmap); ++i) {
+        uint32_t vfetch_bits_remaining = constant_map.vertex_fetch_bitmap[i];
+        uint32_t j;
+        while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+          vfetch_bits_remaining &= ~(uint32_t(1) << j);
+          xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(i * 32 + j);
+          MarkSharedMemoryReadInRenderPass(vfetch_constant.address << 2,
+                                           vfetch_constant.size << 2);
+        }
+      }
+    }
+    std::pair<uint32_t, uint32_t> guest_index_range =
+        primitive_processor_->last_guest_index_range();
+    MarkSharedMemoryReadInRenderPass(guest_index_range.first, guest_index_range.second);
+    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      MarkSharedMemoryReadInRenderPass(memexport_range.base_address_dwords << 2,
+                                       memexport_range.size_bytes);
+    }
+  }
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
@@ -5477,6 +5612,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     current_render_pass_ = VK_NULL_HANDLE;
     current_framebuffer_ = nullptr;
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
     current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
     current_external_compute_pipeline_ = VK_NULL_HANDLE;
