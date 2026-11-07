@@ -14,8 +14,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -37,6 +39,7 @@
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/xenos.h>
 #include <rex/system/kernel_state.h>
+#include <rex/thread.h>
 #include <rex/ui/d3d12/d3d12_descriptor_heap_pool.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_upload_buffer_pool.h>
@@ -76,6 +79,10 @@ class D3D12CommandProcessor : public CommandProcessor {
   void NotifyQueueOperationsDoneDirectly() {
     queue_operations_done_since_submission_signal_ = true;
   }
+  // Must be called before a subsystem does something like UpdateTileMappings,
+  // so it reaches the queue after the submissions already ended, as it does
+  // without threaded submission.
+  void AwaitSubmissionsInQueue() { AwaitSubmissionThread(); }
 
   uint64_t GetCurrentFrame() const { return frame_current_; }
   uint64_t GetCompletedFrame() const { return frame_completed_; }
@@ -218,6 +225,10 @@ class D3D12CommandProcessor : public CommandProcessor {
                  uint32_t frontbuffer_height) override;
 
   void OnPrimaryBufferEnd() override;
+
+  // The command processor is about to idle or wait on a register or memory
+  // condition: the submission thread puts its lists in the queue first.
+  void PrepareForWait() override;
 
   // Guest occlusion queries (CommandProcessor::ExecuteGuestOcclusionEvent).
   bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
@@ -374,6 +385,28 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12PipelineState* msaa_line_guard_pipelines_[2] = {};
   mutable std::atomic<uint64_t> msaa_line_guard_binds_{0};
 
+  // Threaded submission: EndSubmission hands the deferred commands to a thread
+  // that replays them into command_list_ and submits them, while the command
+  // processor goes on with the next packets. Without it, that replay (mostly
+  // driver time) runs on the command processor thread at every submission. The
+  // thread also signals submission_fence_, so awaiting a submission's fence
+  // value covers its replay too.
+  struct SubmissionJob {
+    uint64_t submission;
+    ID3D12CommandAllocator* command_allocator;
+    std::vector<uintmax_t> stream;
+  };
+  // A submission is also ended after this many draws, so that the thread
+  // replays it while the following draws are recorded, and less is left to
+  // replay when a frame is presented.
+  static constexpr uint32_t kSubmissionSplitDraws = 1000;
+  // Starts the thread if needed; returns whether it's running.
+  bool StartSubmissionThread();
+  void SubmissionThread();
+  // Waits until the thread has submitted everything handed to it.
+  void AwaitSubmissionThread();
+  void ShutdownSubmissionThread();
+
   // Request descriptors and automatically rebind the descriptor heap on the
   // draw command list. Refer to D3D12DescriptorHeapPool::Request for partial /
   // full update explanation. Doesn't work when bindless descriptors are used.
@@ -516,6 +549,22 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12GraphicsCommandList* command_list_ = nullptr;
   ID3D12GraphicsCommandList1* command_list_1_ = nullptr;
   DeferredCommandList deferred_command_list_;
+
+  // Threaded submission (SubmissionJob). While the thread is running, only it
+  // uses command_list_; the command processor thread drains it first.
+  std::unique_ptr<rex::thread::Thread> submission_thread_;
+  std::mutex submission_thread_mutex_;
+  std::condition_variable submission_thread_request_cond_;
+  std::condition_variable submission_thread_done_cond_;
+  std::deque<SubmissionJob> submission_thread_jobs_;
+  std::vector<std::vector<uintmax_t>> submission_thread_free_streams_;
+  bool submission_thread_shutdown_ = false;
+  // The last submission handed to the thread (command processor thread only)
+  // and the last one the thread has submitted.
+  uint64_t submission_thread_queued_ = 0;
+  std::atomic<uint64_t> submission_thread_submitted_{0};
+  // Draws in the open submission (kSubmissionSplitDraws).
+  uint32_t submission_draws_ = 0;
 
   bool debug_markers_enabled_ = false;
 
