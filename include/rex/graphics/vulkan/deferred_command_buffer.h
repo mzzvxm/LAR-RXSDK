@@ -31,6 +31,23 @@ class DeferredCommandBuffer {
   void Reset();
   void Execute(VkCommandBuffer command_buffer);
 
+  // Swaps the recorded commands (and the hoisted ones) with `stream` and
+  // `hoisted_stream` (normally empty ones, whose allocations are reused) and
+  // starts recording anew, for another thread to execute them (threaded
+  // submission).
+  void TakeStreams(std::vector<uintmax_t>& stream, std::vector<uintmax_t>& hoisted_stream) {
+    command_stream_.swap(stream);
+    hoisted_stream_.swap(hoisted_stream);
+    Reset();
+  }
+  // Executes commands taken with TakeStreams. Touches nothing else in the
+  // deferred command buffer, so it may run on another thread while new
+  // commands are recorded.
+  void ExecuteStream(VkCommandBuffer command_buffer, const std::vector<uintmax_t>& stream,
+                     const std::vector<uintmax_t>& hoisted_stream) const {
+    ExecuteCommands(command_buffer, stream.data(), stream.size(), hoisted_stream.data());
+  }
+
   // Hoisting: commands recorded later but executed earlier, at a hoist point
   // written into the stream before (the shared memory uploads that
   // VulkanSharedMemory moves before the current render pass instead of ending

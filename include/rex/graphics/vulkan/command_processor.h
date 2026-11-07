@@ -11,12 +11,15 @@
  */
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -40,6 +43,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/hash.h>
 #include <rex/system/kernel_state.h>
+#include <rex/thread.h>
 #include <rex/ui/vulkan/linked_type_descriptor_set_allocator.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
@@ -138,6 +142,12 @@ class VulkanCommandProcessor : public CommandProcessor {
                                bool blocking) override;
 
   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
+    // The provider lives as long as the graphics system, so its device is
+    // looked up once (SetupContext) rather than through a virtual call for
+    // every use on the draw path.
+    if (vulkan_device_) {
+      return vulkan_device_;
+    }
     return static_cast<const ui::vulkan::VulkanProvider*>(graphics_system_->provider())
         ->vulkan_device();
   }
@@ -458,6 +468,39 @@ class VulkanCommandProcessor : public CommandProcessor {
     CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
     return !submission_open_ && submissions_in_flight_fences_.empty();
   }
+
+  // Threaded submission: EndSubmission hands the deferred commands to a thread
+  // that records them into the submission's command buffer and submits it,
+  // while the command processor goes on with the next packets. Without it, that
+  // recording (mostly driver time) runs on the command processor thread at
+  // every submission. The submission's fence is the one passed to
+  // vkQueueSubmit, so it's only awaited once the thread has submitted it
+  // (CheckSubmissionFenceAndDeviceLoss).
+  // CHECK: the Direct3D 12 version needed the command thread to wait for its thread before it
+  // idles (PrepareForWait) on an AMD GPU; Vulkan has no such wait, and was not run on AMD with
+  // this, in the fork or here.
+  struct SubmissionJob {
+    uint64_t submission;
+    CommandBuffer command_buffer;
+    VkFence fence;
+    std::vector<VkSemaphore> wait_semaphores;
+    std::vector<VkPipelineStageFlags> wait_stage_masks;
+    std::vector<uintmax_t> stream;
+    std::vector<uintmax_t> hoisted_stream;
+  };
+  // A submission is also ended after this many draws, so that the thread
+  // records it while the following draws are processed, and less is left to
+  // record when a frame is presented.
+  static constexpr uint32_t kSubmissionSplitDraws = 1000;
+  // Starts the thread if needed; returns whether it's running.
+  bool StartSubmissionThread();
+  void SubmissionThread();
+  // Waits until the thread has submitted everything handed to it, up to and
+  // including `submission` (UINT64_MAX: all of it).
+  void AwaitSubmissionThread(uint64_t submission = UINT64_MAX);
+  // The last submission that is in the queue, not only handed to the thread.
+  uint64_t GetLastQueuedSubmission() const;
+  void ShutdownSubmissionThread();
   // Keep primary-buffer-end submit behavior aligned with D3D12: only submit
   // when immediate submission is safe.
   bool CanEndSubmissionImmediately() const;
@@ -572,6 +615,9 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   bool cache_clear_requested_ = false;
 
+  // Cached by SetupContext (GetVulkanDevice).
+  ui::vulkan::VulkanDevice* vulkan_device_ = nullptr;
+
   // Host shader types that guest shaders can be translated into - they can
   // access the shared memory (via vertex fetch, memory export, or manual index
   // buffer reading) and textures.
@@ -618,6 +664,28 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::vector<CommandBuffer> command_buffers_writable_;
   std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
   DeferredCommandBuffer deferred_command_buffer_;
+
+  // Threaded submission (SubmissionJob). A job's command pool and fence are
+  // used only by the thread until the fence is signaled.
+  std::unique_ptr<rex::thread::Thread> submission_thread_;
+  std::mutex submission_thread_mutex_;
+  std::condition_variable submission_thread_request_cond_;
+  std::condition_variable submission_thread_done_cond_;
+  std::deque<SubmissionJob> submission_thread_jobs_;
+  std::vector<std::vector<uintmax_t>> submission_thread_free_streams_;
+  bool submission_thread_shutdown_ = false;
+  // The last submission handed to the thread (command processor thread only)
+  // and the last one the thread is done with (submitted, or failed to).
+  uint64_t submission_thread_queued_ = 0;
+  std::atomic<uint64_t> submission_thread_submitted_{0};
+  // The last submission submitted without the thread (only if it could not be
+  // created), which comes after everything the thread had been given before it.
+  uint64_t submission_direct_last_ = 0;
+  // Set by the thread when a submission has failed: its fence will never be
+  // signaled, so it's handled as a lost device.
+  std::atomic<bool> submission_thread_failed_{false};
+  // Draws in the open submission (kSubmissionSplitDraws).
+  uint32_t submission_draws_ = 0;
 
   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
   std::vector<SparseBufferBind> sparse_buffer_binds_;
