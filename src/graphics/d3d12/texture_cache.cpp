@@ -596,8 +596,10 @@ bool D3D12TextureCache::Initialize() {
   }
 
   // Direct load pipelines. Without one, its textures are loaded through a
-  // buffer.
-  if (IsDrawResolutionScaled()) {
+  // buffer. At native resolution (texture_load_direct_unscaled) the same shaders
+  // are used, with a resolution scale of 1 and the shared memory as the source:
+  // their addressing is then the unscaled load shaders'.
+  if (IsDrawResolutionScaled() || IsDirectLoadUnscaledWanted()) {
     const D3D12_SHADER_BYTECODE load_shader_code_direct[] = {
         {shaders::texture_load_32bpb_direct_scaled_cs,
          sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
@@ -1592,9 +1594,11 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
   desc.SampleDesc.Quality = 0;
   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
   // Untiling through a buffer instead of using unordered access because copying
-  // is not done that often, except for resolved data with resolution scaling
-  // (direct loads), which is often reloaded every frame.
+  // is not done that often, except for resolved data (with resolution scaling, and
+  // with texture_load_direct_unscaled without), which is often reloaded every
+  // frame.
   desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  const DXGI_FORMAT plain_resource_format = desc.Format;
   DXGI_FORMAT direct_load_uav_format = GetDirectLoadUAVFormat(key, desc.Format);
   if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN) {
     // CHECK: such a texture is a typeless, unordered access resource placed in the shared texture
@@ -1611,7 +1615,7 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
   uint32_t heap_index = UINT32_MAX;
   uint64_t heap_offset = 0, heap_size = 0;
-  {
+  while (true) {
     D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device->GetResourceAllocationInfo(0, 1, &desc);
     if (allocation_info.SizeInBytes != UINT64_MAX &&
         AllocateTextureHeapRange(allocation_info.SizeInBytes, allocation_info.Alignment,
@@ -1625,18 +1629,41 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
         heap_index = UINT32_MAX;
       }
     }
-  }
-  if (!resource &&
-      FAILED(device->CreateCommittedResource(&ui::d3d12::util::kHeapPropertiesDefault,
-                                             provider.GetHeapFlagCreateNotZeroed(), &desc,
-                                             resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
-    return nullptr;
+    if (resource ||
+        SUCCEEDED(device->CreateCommittedResource(
+            &ui::d3d12::util::kHeapPropertiesDefault, provider.GetHeapFlagCreateNotZeroed(), &desc,
+            resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+      break;
+    }
+    if (direct_load_uav_format == DXGI_FORMAT_UNKNOWN) {
+      return nullptr;
+    }
+    // A host that does not accept unordered access for the format: the texture
+    // is loaded through a buffer, as without direct loads.
+    direct_load_uav_format = DXGI_FORMAT_UNKNOWN;
+    desc.Format = plain_resource_format;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    resource.Reset();
+    heap_index = UINT32_MAX;
+    heap_offset = 0;
+    heap_size = 0;
   }
   auto texture = new D3D12Texture(*this, key, resource.Get(), resource_state);
   if (heap_index != UINT32_MAX) {
     texture->SetPlacement(heap_index, heap_offset, heap_size);
   }
   texture->SetDirectLoadUAVFormat(direct_load_uav_format);
+  if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN && !key.scaled_resolve) {
+    // The first few, to see that texture_load_direct_unscaled applies to anything.
+    static uint32_t direct_unscaled_logged = 0;
+    if (direct_unscaled_logged < 24) {
+      ++direct_unscaled_logged;
+      REXGPU_INFO(
+          "D3D12TextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
+          "straight in",
+          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
+    }
+  }
   return std::unique_ptr<Texture>(texture);
 }
 
@@ -1862,7 +1889,13 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, 
   // Direct load: decode straight into the texture through an unsigned integer
   // UAV, without the buffer and the copy.
   bool direct_load = false;
-  if (d3d12_texture.direct_load_uav_format() != DXGI_FORMAT_UNKNOWN && texture_resolution_scaled &&
+  // Unscaled (texture_load_direct_unscaled): the scaled shaders with a scale of
+  // 1, reading the shared memory; tiled textures only (the scaled shaders
+  // assume tiling), which the key's resolved_unscaled implies.
+  if (d3d12_texture.direct_load_uav_format() != DXGI_FORMAT_UNKNOWN &&
+      (texture_resolution_scaled ||
+       (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
+        texture_key.tiled && !is_3d_tiling)) &&
       level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d) {
     DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
     if (direct_load_shader != kDirectLoadShaderUnknown &&

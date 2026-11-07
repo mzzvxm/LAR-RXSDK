@@ -164,8 +164,14 @@ class TextureCache {
 
     // Whether this texture is a resolution-scaled resolve target.
     uint32_t scaled_resolve : 1;  // 97
+    // texture_load_direct_unscaled: whether this texture, at native resolution,
+    // is over memory that a resolve has written. Such a texture is loaded
+    // straight into the host texture rather than through a buffer. Part of the
+    // key so that a texture created before the memory was first resolved is not
+    // reused: it has no unordered access to load through.
+    uint32_t resolved_unscaled : 1;  // 98
     // Least important in ==, so placed last.
-    uint32_t is_valid : 1;  // 98
+    uint32_t is_valid : 1;  // 99
 
     TextureKey() { MakeInvalid(); }
     TextureKey(const TextureKey& key) { std::memcpy(this, &key, sizeof(*this)); }
@@ -447,10 +453,16 @@ class TextureCache {
   };
   // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
   static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
-  // Whether a texture with the key may be loaded directly: scaled, one level,
-  // 2D, one layer, not in the packed mip tail. The host format and the
-  // shader are checked separately.
+  // Whether a texture with the key may be loaded directly: one level, 2D, one
+  // layer, not in the packed mip tail, and either scaled or, at native resolution
+  // (texture_load_direct_unscaled), tiled and over memory a resolve has written
+  // (resolved_unscaled). The host format and the shader are checked separately.
+  // At native resolution the scaled shaders are used with a scale of 1: their
+  // addressing is then the unscaled one.
   static bool IsDirectLoadPossible(const TextureKey& key);
+  // Whether the texture_load_direct_unscaled pipelines are wanted: native
+  // resolution and the setting on at startup.
+  bool IsDirectLoadUnscaledWanted() const;
 
   struct LoadShaderInfo {
     // Log2 of the sizes, in bytes, of the elements in the source (guest) and
@@ -595,6 +607,9 @@ class TextureCache {
   // Checks if there are any pages that contain scaled resolve data within the
   // range.
   bool IsRangeScaledResolved(uint32_t start_unscaled, uint32_t length_unscaled);
+  // texture_load_direct_unscaled: whether a resolve has written any page of the
+  // range at native resolution.
+  bool IsRangeResolvedUnscaled(uint32_t start_unscaled, uint32_t length_unscaled);
   // Global shared memory invalidation callback for invalidating scaled resolved
   // texture data.
   static void ScaledResolveGlobalWatchCallbackThunk(
@@ -623,6 +638,12 @@ class TextureCache {
 
   // Global watch for scaled resolve data invalidation.
   SharedMemory::GlobalWatchHandle scaled_resolve_global_watch_handle_ = nullptr;
+
+  // texture_load_direct_unscaled, native resolution only: bit vector storing
+  // whether a resolve has ever written each 4 KB physical memory page. Never
+  // cleared before the cache is: it only chooses which textures are created for
+  // loading straight into (a wrong guess costs speed, not correctness).
+  std::unique_ptr<uint32_t[]> resolved_pages_;
 
   uint64_t current_submission_index_ = 0;
   uint64_t current_submission_time_ = 0;

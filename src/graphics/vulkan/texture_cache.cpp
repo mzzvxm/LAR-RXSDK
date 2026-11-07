@@ -1264,8 +1264,14 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
                                                   uint32_t view_format_count) {
   // Only single-level 2D (and stacked and cube) textures: the copy is of one
   // level, and 3D images would need another shader.
-  if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE || key.mip_max_level != 0 ||
-      key.dimension == xenos::DataDimension::k3D) {
+  // texture_load_direct_unscaled: a resolved texture at native resolution is
+  // loaded straight into the image, which needs the storage view, whether or not
+  // the storage copy (vulkan_texture_load_storage_copy) is on.
+  bool direct_load_unscaled = !key.scaled_resolve &&
+                              load_direct_pipeline_layout_ != VK_NULL_HANDLE &&
+                              IsDirectLoadPossible(key);
+  if ((storage_copy_pipeline_layout_ == VK_NULL_HANDLE && !direct_load_unscaled) ||
+      key.mip_max_level != 0 || key.dimension == xenos::DataDimension::k3D) {
     return VK_FORMAT_UNDEFINED;
   }
   // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
@@ -1280,6 +1286,18 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
       host_format_is_signed ? host_format_pair.format_signed : host_format_pair.format_unsigned;
   if (host_format.load_shader == kLoadShaderIndexUnknown || host_format.block_compressed) {
     return VK_FORMAT_UNDEFINED;
+  }
+  if (direct_load_unscaled) {
+    // Only for the load shaders that have a direct one (32bpb, 64bpb and the two
+    // depth ones, not the conversions) with a pipeline.
+    DirectLoadShader direct_load_shader = GetDirectLoadShader(host_format.load_shader);
+    if (direct_load_shader == kDirectLoadShaderUnknown ||
+        load_direct_pipelines_[direct_load_shader] == VK_NULL_HANDLE) {
+      direct_load_unscaled = false;
+      if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE) {
+        return VK_FORMAT_UNDEFINED;
+      }
+    }
   }
   // The unsigned integer view must be in the same compatibility class as the
   // view formats: only plain 32, 64 and 128 bit color formats.
@@ -1325,7 +1343,7 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
   if (key.scaled_resolve) {
     size_bytes *= uint64_t(draw_resolution_scale_x()) * draw_resolution_scale_y();
   }
-  if (size_bytes < kStorageCopyMinSizeBytes) {
+  if (!direct_load_unscaled && size_bytes < kStorageCopyMinSizeBytes) {
     return VK_FORMAT_UNDEFINED;
   }
   VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
@@ -1338,6 +1356,17 @@ VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat
   for (uint32_t i = 0; i < view_format_count; ++i) {
     if (!IsStorageImageFormat(view_formats[i])) {
       return VK_FORMAT_UNDEFINED;
+    }
+  }
+  if (direct_load_unscaled) {
+    // The first few, to see that texture_load_direct_unscaled applies to anything.
+    static uint32_t direct_unscaled_logged = 0;
+    if (direct_unscaled_logged < 24) {
+      ++direct_unscaled_logged;
+      REXGPU_INFO(
+          "VulkanTextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
+          "straight in",
+          key.GetWidth(), key.GetHeight(), FormatInfo::Get(key.format)->name, key.base_page << 12);
     }
   }
   return storage_copy_format;
@@ -1509,8 +1538,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // without the scratch buffer and the copy.
   VkPipeline pipeline_direct = VK_NULL_HANDLE;
   VkImageView direct_load_view = VK_NULL_HANDLE;
-  if (texture_key.scaled_resolve && vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED &&
-      level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
+  // Unscaled (texture_load_direct_unscaled): the scaled shaders with a scale of
+  // 1, reading the shared memory; tiled textures only (the scaled shaders
+  // assume tiling), which the key's resolved_unscaled implies.
+  if ((texture_key.scaled_resolve ||
+       (REXCVAR_GET(texture_load_direct_unscaled) && texture_key.resolved_unscaled &&
+        texture_key.tiled && !is_3d_tiling)) &&
+      vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
+      level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d &&
       pipeline_float_convert == VK_NULL_HANDLE) {
     DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
     uint32_t direct_load_texel_size =
@@ -3333,54 +3368,58 @@ bool VulkanTextureCache::Initialize() {
         }
       }
     }
+  }
 
-    // Direct load pipelines, for textures with a storage copy view. Without one,
-    // its textures are loaded through the scratch buffer.
-    if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE && IsDrawResolutionScaled()) {
-      VkDescriptorSetLayout load_direct_descriptor_set_layouts[] = {
-          command_processor_.GetSingleTransientDescriptorLayout(
-              VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute),
-          load_descriptor_set_layout_storage_buffer,
+  // Direct load pipelines, for textures with a storage copy view (with resolution
+  // scaling: those of vulkan_texture_load_storage_copy; at native resolution:
+  // those of resolved textures, texture_load_direct_unscaled, which get the view
+  // whatever that setting is, and use the scaled shaders with a scale of 1).
+  // Without one, its textures are loaded through the scratch buffer.
+  if ((storage_copy_pipeline_layout_ != VK_NULL_HANDLE && IsDrawResolutionScaled()) ||
+      IsDirectLoadUnscaledWanted()) {
+    VkDescriptorSetLayout load_direct_descriptor_set_layouts[] = {
+        command_processor_.GetSingleTransientDescriptorLayout(
+            VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute),
+        load_descriptor_set_layout_storage_buffer,
+    };
+    VkPushConstantRange load_direct_push_constant_range;
+    load_direct_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    load_direct_push_constant_range.offset = 0;
+    load_direct_push_constant_range.size = sizeof(LoadConstants);
+    VkPipelineLayoutCreateInfo load_direct_pipeline_layout_create_info;
+    load_direct_pipeline_layout_create_info.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    load_direct_pipeline_layout_create_info.pNext = nullptr;
+    load_direct_pipeline_layout_create_info.flags = 0;
+    load_direct_pipeline_layout_create_info.setLayoutCount =
+        uint32_t(rex::countof(load_direct_descriptor_set_layouts));
+    load_direct_pipeline_layout_create_info.pSetLayouts = load_direct_descriptor_set_layouts;
+    load_direct_pipeline_layout_create_info.pushConstantRangeCount = 1;
+    load_direct_pipeline_layout_create_info.pPushConstantRanges =
+        &load_direct_push_constant_range;
+    if (dfn.vkCreatePipelineLayout(device, &load_direct_pipeline_layout_create_info, nullptr,
+                                   &load_direct_pipeline_layout_) != VK_SUCCESS) {
+      REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline layout");
+      load_direct_pipeline_layout_ = VK_NULL_HANDLE;
+    } else {
+      const std::pair<const uint32_t*, size_t> load_direct_shader_code[] = {
+          {shaders::texture_load_32bpb_direct_scaled_cs,
+           sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
+          {shaders::texture_load_64bpb_direct_scaled_cs,
+           sizeof(shaders::texture_load_64bpb_direct_scaled_cs)},
+          {shaders::texture_load_depth_float_direct_scaled_cs,
+           sizeof(shaders::texture_load_depth_float_direct_scaled_cs)},
+          {shaders::texture_load_depth_unorm_direct_scaled_cs,
+           sizeof(shaders::texture_load_depth_unorm_direct_scaled_cs)},
       };
-      VkPushConstantRange load_direct_push_constant_range;
-      load_direct_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-      load_direct_push_constant_range.offset = 0;
-      load_direct_push_constant_range.size = sizeof(LoadConstants);
-      VkPipelineLayoutCreateInfo load_direct_pipeline_layout_create_info;
-      load_direct_pipeline_layout_create_info.sType =
-          VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-      load_direct_pipeline_layout_create_info.pNext = nullptr;
-      load_direct_pipeline_layout_create_info.flags = 0;
-      load_direct_pipeline_layout_create_info.setLayoutCount =
-          uint32_t(rex::countof(load_direct_descriptor_set_layouts));
-      load_direct_pipeline_layout_create_info.pSetLayouts = load_direct_descriptor_set_layouts;
-      load_direct_pipeline_layout_create_info.pushConstantRangeCount = 1;
-      load_direct_pipeline_layout_create_info.pPushConstantRanges =
-          &load_direct_push_constant_range;
-      if (dfn.vkCreatePipelineLayout(device, &load_direct_pipeline_layout_create_info, nullptr,
-                                     &load_direct_pipeline_layout_) != VK_SUCCESS) {
-        REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline layout");
-        load_direct_pipeline_layout_ = VK_NULL_HANDLE;
-      } else {
-        const std::pair<const uint32_t*, size_t> load_direct_shader_code[] = {
-            {shaders::texture_load_32bpb_direct_scaled_cs,
-             sizeof(shaders::texture_load_32bpb_direct_scaled_cs)},
-            {shaders::texture_load_64bpb_direct_scaled_cs,
-             sizeof(shaders::texture_load_64bpb_direct_scaled_cs)},
-            {shaders::texture_load_depth_float_direct_scaled_cs,
-             sizeof(shaders::texture_load_depth_float_direct_scaled_cs)},
-            {shaders::texture_load_depth_unorm_direct_scaled_cs,
-             sizeof(shaders::texture_load_depth_unorm_direct_scaled_cs)},
-        };
-        static_assert(rex::countof(load_direct_shader_code) == kDirectLoadShaderCount);
-        for (uint32_t i = 0; i < kDirectLoadShaderCount; ++i) {
-          load_direct_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
-              vulkan_device, load_direct_pipeline_layout_, load_direct_shader_code[i].first,
-              load_direct_shader_code[i].second);
-          if (load_direct_pipelines_[i] == VK_NULL_HANDLE) {
-            REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline {}",
-                         i);
-          }
+      static_assert(rex::countof(load_direct_shader_code) == kDirectLoadShaderCount);
+      for (uint32_t i = 0; i < kDirectLoadShaderCount; ++i) {
+        load_direct_pipelines_[i] = ui::vulkan::util::CreateComputePipeline(
+            vulkan_device, load_direct_pipeline_layout_, load_direct_shader_code[i].first,
+            load_direct_shader_code[i].second);
+        if (load_direct_pipelines_[i] == VK_NULL_HANDLE) {
+          REXGPU_ERROR("VulkanTextureCache: Failed to create the direct texture loading pipeline {}",
+                       i);
         }
       }
     }
