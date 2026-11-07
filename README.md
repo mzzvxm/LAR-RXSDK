@@ -57,4 +57,5 @@ The list above is not exhaustive. Thanks to everyone in the ReXGlue community wh
 - [Project Xenia](https://github.com/xenia-project/xenia/tree/master/src/xenia) - Their invaluable work on Xbox 360 emulation laid the groundwork for ReXGlue's development. This project (and numerous others) would not exist without their hard work and dedication.
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) - For pioneering the modern static recompilation approach for Xbox 360. A lot of the codegen analysis logic and instruction translations are based on their work. Thank you!
 - [rexdex's recompiler](https://github.com/rexdex/recompiler) - The OG static recompiler for Xbox 360. 
+- [Forza Horizon 1: ReImagined](https://github.com/Dyotson/ForzaHorizon1-ReImagined) (Dyotson) - The designs of the shared memory upload hoisting and the Vulkan threaded submission in the GPU backend. MIT License, see [LICENSE](LICENSE).
 - Many others in the Xbox 360 homebrew and modding communities whose work and research have contributed to the collective knowledge that makes projects like this possible.
