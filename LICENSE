@@ -30,3 +30,57 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+--------------------------------------------------------------------------------
+
+Third-party code that is under another licence
+
+Everything above applies to this repository except the code listed here, which
+is under the licence given with it.
+
+Forza Horizon 1: ReImagined (Dyotson), MIT License
+https://github.com/Dyotson/ForzaHorizon1-ReImagined (patches/rexglue-sdk)
+
+  - Shared memory uploads recorded ahead of the render pass (Vulkan) or the run
+    of draws (Direct3D 12) that needs them, instead of in between the draws:
+    the scheme follows patch 0036 (vulkan-hoist-shared-memory-uploads-before-
+    render-pass), and the page bit code is its code. In
+    src/graphics/vulkan/ (command_processor, shared_memory,
+    deferred_command_buffer) and src/graphics/d3d12/ (command_processor,
+    shared_memory, deferred_command_list), .cpp and .h.
+  - Vulkan command buffers recorded and submitted on a thread of their own:
+    the design follows patch 0038 (vulkan-threaded-submission). In
+    src/graphics/vulkan/command_processor.cpp and .h and
+    src/graphics/vulkan/deferred_command_buffer.cpp and .h.
+
+The same notice is kept in the source, above the code it covers (in
+src/graphics/d3d12/shared_memory.cpp and
+src/graphics/vulkan/command_processor.cpp).
+
+The two patches were taken as published on 2026-10-12 (commit afda798f), when
+that repository was under the MIT License. That repository has been under the GNU General Public License, version 3 or
+later, since 2026-10-28 (commit cbd5855a); its NOTICE.md says that the versions
+published before that stay available under the MIT License, which is the
+licence of the code used here:
+
+  MIT License
+
+  Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
