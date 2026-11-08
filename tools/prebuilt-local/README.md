@@ -1,8 +1,10 @@
 # Prebuilt SDKs, built by hand
 
-`.github/workflows/prebuilt-sdk.yaml` builds the SDK for the LARecomp launcher on GitHub's runners and publishes it as the
-release `sdk-<first 12 digits of the commit>`. When Actions cannot run (a locked account, say), these scripts do the same
-jobs on a PC and upload the same files by hand, so the launcher finds the release exactly as if the workflow had made it.
+These scripts build the SDK for the LARecomp launcher on a PC and upload it as the release `sdk-<first 12 digits of
+the commit>`, which the launcher's setup downloads. They are the only way it is built: the branch has no GitHub Actions
+workflow (the `prebuilt-sdk.yaml` they were first written to copy was removed on 2026-11-08, so nothing runs on the
+account's Actions). Where a comment in them says "the workflow", it means the job that step stands for; the pins in the
+scripts are the source of truth.
 
 **The workflow is the source of truth.** The scripts repeat its steps (same pins, same edits, same configure line, same
 checks, same file names, same json). If you change one, change the other. Each build script compares its pins and the

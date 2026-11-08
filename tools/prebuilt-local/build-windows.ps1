@@ -1,3 +1,5 @@
+# NOTE (2026-11-08): the GitHub workflow this was first written to copy (.github/workflows/prebuilt-sdk.yaml) was removed; nothing runs on
+# Actions. Where a comment says "the workflow", read: the job this step stands for. The pins here are the source of truth.
 <#
 .SYNOPSIS
     Builds the prebuilt Windows SDK of one commit on this PC: the "windows" job of
@@ -215,26 +217,9 @@ function New-SdkZip([string]$Folder, [string]$ZipPath) {
     } finally { $stream.Dispose() }
 }
 
-# The pins and strings above must be the ones in the workflow file of the same repository folder.
+# The pins above are the source of truth: the branch has no workflow (removed 2026-11-08, no GitHub Actions).
 function Assert-WorkflowAgrees {
-    $workflowPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\.github\workflows\prebuilt-sdk.yaml'))
-    if (-not (Test-Path -LiteralPath $workflowPath)) {
-        Write-Warning "The workflow file is not at ${workflowPath}: the pins were not compared with it."
-        return
-    }
-    $workflowText = [IO.File]::ReadAllText($workflowPath)
-    $problems = @()
-    foreach ($key in $Pins.Keys) {
-        $pattern = '(?m)^\s+' + [regex]::Escape($key) + ':\s*"?' + [regex]::Escape($Pins[$key]) + '"?\s*$'
-        if (-not [regex]::IsMatch($workflowText, $pattern)) { $problems += ('{0}: the workflow has no line "{0}: {1}"' -f $key, $Pins[$key]) }
-    }
-    foreach ($text in @($BundleWhat, $BundleOptions, $AssetTemplate)) {
-        if (-not $workflowText.Contains($text)) { $problems += "the workflow does not contain the text: $text" }
-    }
-    if ($problems.Count -gt 0) {
-        throw ("This script is out of step with $workflowPath (change them together, or pass -SkipPinCheck):`n  " + ($problems -join "`n  "))
-    }
-    Write-Host 'The pins and the bundle texts agree with the workflow file.'
+    Write-Host 'Pins: the ones in this script.'
 }
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# NOTE (2026-11-08): the GitHub workflow this was first written to copy (.github/workflows/prebuilt-sdk.yaml) was removed; nothing runs on
+# Actions. Where a comment says "the workflow", read: the job this step stands for. The pins here are the source of truth.
 # build-linux.sh <commit> <outdir>
 #
 # Builds the prebuilt Linux SDK of one commit on this PC (in WSL), as the "linux" job of
@@ -108,32 +110,9 @@ phase() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-phase "1/8 pins agree with the workflow"
-workflow="${SCRIPT_DIR}/../../.github/workflows/prebuilt-sdk.yaml"
-if [ -f "${workflow}" ]; then
-  trimmed=$(mktemp)
-  sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "${workflow}" > "${trimmed}"
-  bad=0
-  for key in TRIPLE CMAKE_URL CMAKE_SHA256 NINJA_URL NINJA_SHA256 KIT_VERSION KIT_LLVM_URL KIT_LLVM_SHA256 KIT_LLVM_SIZE \
-             KIT_SYSROOT_URL KIT_SYSROOT_SHA256 KIT_SYSROOT_SIZE; do
-    value=${!key}
-    if ! grep -Fxq -e "${key}: ${value}" "${trimmed}" && ! grep -Fxq -e "${key}: \"${value}\"" "${trimmed}"; then
-      err "the workflow has no line '${key}: ${value}'"
-      bad=1
-    fi
-  done
-  rm -f "${trimmed}"
-  for text in "${BUNDLE_WHAT}" "${BUNDLE_OPTIONS}" "${CFG_COMMENT}" "${ASSET_TEMPLATE}" "--unwindlib=libgcc" "-stdlib=libc++"; do
-    if ! grep -Fq -e "${text}" "${workflow}"; then
-      err "the workflow does not contain the text: ${text}"
-      bad=1
-    fi
-  done
-  [ "${bad}" = 0 ] || die "this script is out of step with ${workflow}: change them together."
-  echo "The pins and the bundle texts agree with the workflow file."
-else
-  echo "warning: ${workflow} not found: the pins were not compared with it." >&2
-fi
+phase "1/8 pins"
+# The pins above are the source of truth: the branch has no workflow (removed 2026-11-08, no GitHub Actions).
+echo "Pins: kit ${KIT_VERSION}, CMake and Ninja as above."
 
 # ---------------------------------------------------------------------------------------------------------------
 # A clean environment: the runner's PATH has no Windows folders in it and none of the build variables below.

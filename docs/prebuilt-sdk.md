@@ -1,30 +1,25 @@
 # Prebuilt SDKs for the LARecomp launcher
 
-`.github/workflows/prebuilt-sdk.yaml` builds the SDK on GitHub's runners every time the `LARecomp` branch gets a new
-commit, and publishes it as release assets. The LARecomp launcher's setup downloads that file instead of compiling the
-SDK on the player's PC (the SDK is about half of the build time on a 16-thread PC, and much more on a weaker one).
+The SDK of each new head of the `LARecomp` branch is built on a PC with the scripts in `tools/prebuilt-local` (Windows,
+and Linux in WSL or on a Linux PC) and published as release assets. The LARecomp launcher's setup downloads that file
+instead of compiling the SDK on the player's PC (the SDK is about half of the build time on a 16-thread PC, and much
+more on a weaker one). `tools/prebuilt-local/README.md` says how to run them.
 
-The workflow is self-contained: it uses no script from the repository, only the source it builds. It adds nothing to the
-SDK's own code and changes none of the existing workflows.
+Nothing runs on GitHub Actions: this branch has no workflow (the ones it had were removed on 2026-11-08, the SDK's own
+lint, build and nightly workflows with them; they stay on `main`). The scripts add nothing to the SDK's own code.
 
-## When it runs
+## When it is built
 
-- **Every push to the `LARecomp` branch.** Each new head gets its prebuilt SDKs. There is no `paths` filter on purpose:
-  the launcher looks for the release of the head commit, so a head that the workflow skipped (a change to the docs only,
-  say) would have no release, and the launcher would build the SDK on the PC for it. (A commit whose message says
-  `[skip ci]` is skipped by GitHub itself, with the same result.) Runs for different commits are independent and each
-  has its own release; a second run for the same commit waits for the first and then replaces its files.
-- **By hand**, as a bonus: Actions, Prebuilt SDK, Run workflow, with a `ref` (branch, tag or commit; empty means the
-  branch the run was started on) and the switches `build_windows` and `build_linux`. GitHub offers the Run workflow
-  button for workflows on the default branch only, and the default branch of this repository is `main`, so the button
-  appears only if this file is also on `main`. The push trigger needs nothing of the kind: GitHub runs the file of the
-  commit that was pushed.
+By hand, after each push to the `LARecomp` branch: the launcher looks for the release of the head commit, so a head
+without one (a change to the docs only, say) has the SDK built on the player's PC until its release is there. Builds
+for different commits are independent and each has its own release; a second upload for the same commit replaces its
+files.
 
 ## What it builds
 
 | | Windows | Linux x86-64 |
 |---|---|---|
-| Runner | `windows-latest` | `ubuntu-22.04` |
+| Built on | a Windows PC | Linux (WSL is fine): the kit's sysroot sets the glibc floor, not the machine |
 | Toolchain | llvm-mingw 20250709 (UCRT, x86-64): Clang 20, lld, libc++, mingw-w64 | the launcher's Linux build kit, revision 5: LLVM 20.1.8 + libc++, an Ubuntu 22.04 sysroot (glibc 2.35) |
 | Tools | CMake 4.4.4, Ninja 1.13.2 | the same |
 | Configure | `cmake --preset win-amd64`, Vulkan on, Tracy off, FidelityFX off (its default), Release | `cmake --preset linux-amd64`, the same options, `CMAKE_SYSROOT` and the LLVM `ar` family |
@@ -36,7 +31,7 @@ SDK is the one the player's PC would have built. For Windows that is `Setup/Buil
 `Setup/Resources/tools.json` in the launcher; for Linux `Setup/Linux/LinuxBuild.cs` (`SdkConfigureArguments`,
 `ToolchainArguments`), `LinuxToolchain.cs` (`ClangConfig`, the environment) and `Setup/Resources/tools-linux.json`.
 
-The Linux kit is pinned in the workflow itself (nothing to set up in the repository): the two pieces of the pre-release
+The Linux kit is pinned in `tools/prebuilt-local/build-linux.sh` (nothing to set up in the repository): the two pieces of the pre-release
 `linux-kit-5` of `mzzvxm/LARecomp`, checked by SHA-256 and size after the download.
 
 | Piece | File | Size | SHA-256 |
@@ -44,21 +39,21 @@ The Linux kit is pinned in the workflow itself (nothing to set up in the reposit
 | LLVM | `llvm-20.1.8-k5-linux-x86_64.tar.br` | 99,417,064 | `633e3eb608a163ce28e0f81175a8ff21ca8ced5db1aed4f1a0413e68168d35df` |
 | Sysroot | `sysroot-jammy-k5-linux-x86_64.tar.br` | 44,213,084 | `d174b23dce1887cdc9f85d91523851791910ad016277dd9e440335afeb418a39` |
 
-Like the launcher, the Windows job makes the two edits that belong to submodules of other projects (FFmpeg's `config.h`
+Like the launcher, the Windows build makes the two edits that belong to submodules of other projects (FFmpeg's `config.h`
 is MSVC's configuration, and git on Windows checks libmspack's symlinks out as small text files), turns the install's
 `reg add` (the CMake package registry) into an echo, and copies `libc++.dll` and `libunwind.dll` beside the binaries. The
-Linux job copies `libc++.so.1`, `libc++abi.so.1` and `libatomic.so.1` (which libc++ needs) into `lib/` as real files; there is
+Linux build copies `libc++.so.1`, `libc++abi.so.1` and `libatomic.so.1` (which libc++ needs) into `lib/` as real files; there is
 no libunwind on Linux, libc++ and libc++abi use the system's `libgcc_s.so.1` (kit revision 5).
 
-The commit built must contain the llvm-mingw build support (LAR-RXSDK PR #2) for the Windows job, and whatever LARecomp
+The commit built must contain the llvm-mingw build support (LAR-RXSDK PR #2) for the Windows build, and whatever LARecomp
 needs from the public SDK (PR #1: the `graphics_backend` cvar, the RenderDoc capture calls); both are in `LARecomp`. The
-Windows job fails in its "Prepare the sources" step if FFmpeg's `config.h` is not the text it expects.
+Windows build fails when preparing the sources if FFmpeg's `config.h` is not the text it expects.
 
 ## The release and its files
 
 Each commit gets one release, tagged `sdk-<the first 12 digits of the commit>` (for example `sdk-5934a85bc89f`), marked
 as a pre-release, titled "Prebuilt SDK <12 digits>". Its text says what it is and that the launcher downloads it. The
-workflow makes the release (and the tag, on the built commit) if it is not there.
+upload makes the release (and the tag, on the built commit) if it is not there.
 
 | File | What |
 |---|---|
@@ -141,48 +136,20 @@ It refuses the SDK, and the setup builds nothing from it, when
 
 ## What to set up (Mz)
 
-- **Actions enabled** on `mzzvxm/LAR-RXSDK`.
-- **The workflow on the `LARecomp` branch.** That is all a push run needs.
-- **Nothing else.** The kit is pinned in the file, there are no repository variables and no secrets, and the file asks
-  for `contents: write` only (to make the release and upload its files, with the run's own `GITHUB_TOKEN`).
+- **Nothing.** No Actions, no repository variables, no secrets. The uploads use the uploader's own `gh` sign-in (push
+  rights on `mzzvxm/LAR-RXSDK`).
 - **The Linux kit release must stay public** (`linux-kit-5` on `mzzvxm/LARecomp`), with the two files above under the
-  same names; the runner downloads them without signing in.
-- Optional: the same file on `main`, for the Run workflow button.
-
-To try the workflow without touching `mzzvxm/LAR-RXSDK`, push the branch to a fork (a fork has Actions off until the
-Actions tab is opened once and workflows are enabled); the kit is downloaded from `mzzvxm/LARecomp` all the same.
+  same names; the Linux script downloads them without signing in.
 
 ## Keeping it in step with the launcher
 
-The workflow repeats these launcher facts; change them together:
+The scripts in `tools/prebuilt-local` repeat these launcher facts; change them together:
 
 - the tool pins (llvm-mingw, CMake, Ninja: `tools.json` and `tools-linux.json`) and the Linux kit's pieces (`kit.version`,
-  the `llvm` and `sysroot` URL, SHA-256 and size), in the `env:` of the two build jobs; a new kit revision means new pins
+  the `llvm` and `sysroot` URL, SHA-256 and size), in the pins at the top of the two build scripts; a new kit revision means new pins
   here and a new build of every SDK the launcher should find;
 - the configure arguments and options (the launcher's `SdkStep` `Options` text and recipe `sdk-recipe-1`), the clang
   configuration files (`clang-config-2`: `--unwindlib=libgcc`) and the build environment of the kit;
 - the files the launcher requires (`SdkStep.WindowsFiles`, `LinuxBuild.SdkRequiredFiles`) and the bundle file name
   (`lar-sdk-bundle.json`);
 - the release tag (`sdk-<12 digits>`) and the json name (`sdk-prebuilt-<12 digits>.json`), which the launcher looks for.
-
-## Not verified
-
-The workflow was written without running it: the checks that were possible without a runner were the YAML (parsed, and
-every job, step and output reference checked), the shell, PowerShell and Python syntax, and the shared helpers (the
-unpacking, the checksum-checked download, the FFmpeg and libmspack edits on copies of the real files). The first run on a
-runner is the real test. Things to look at in it:
-
-- that the two kit files are reachable at the pinned addresses (the release `linux-kit-5` was not visible to the GitHub API
-  when this was written);
-- that `gh release create --target <commit>` makes the tag `sdk-<12 digits>` and that `gh release delete-asset` and
-  `gh release upload --clobber` do what the re-run path expects;
-- the folder names inside the llvm-mingw and CMake zips (`llvm-mingw-<version>-ucrt-x86_64`, `cmake-<version>-windows-x86_64`);
-- that `rexglue.exe --version` starts with only the system's folders on the search path (it may want a DLL such as the
-  Vulkan loader that a runner does not have; the check is in the "Check that rexglue starts" step, easy to relax);
-- on Linux, that the kit's archives unpack as the launcher unpacks them (one folder or `./`-rooted), that the kit's
-  `llvm-ranlib`, `llvm-nm`, `llvm-strip` and `llvm-objcopy` exist, and that `rexglue --version` finds the copied libc++
-  through the SDK's rpath;
-- the SDK's install rpath can carry the runner's kit folder (`CMAKE_INSTALL_RPATH_USE_LINK_PATH`); the entries `$ORIGIN`
-  and `$ORIGIN/../lib` come first, so a missing extra folder on the player's PC is harmless;
-- build times on the runners (not measured), and that the artifacts stay under the 2 GB release asset limit (they are
-  far below it).
