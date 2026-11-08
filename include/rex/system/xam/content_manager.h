@@ -11,7 +11,9 @@
 
 #pragma once
 
+#include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -162,6 +164,18 @@ class ContentManager {
   X_RESULT SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
                                std::vector<uint8_t> buffer);
   X_RESULT DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
+
+  // For a saved game that is about to be rewritten from nothing (CREATE_ALWAYS and
+  // TRUNCATE_EXISTING delete the package first): moves the package to
+  // Backups/<content type>/<name> beside it, with an empty <name>.inprogress file next to it, and
+  // keeps it until the title closes the new package, which is when the save is complete. A save
+  // that never gets there (a crash, the process killed) is put back when the next ContentManager
+  // is made. Best effort: when the package cannot be kept aside it is left where it is, for the
+  // caller to delete as before.
+  void KeepContentBackup(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
+  // True while a rewritten saved game has not been closed by the title yet.
+  bool HasUnclosedBackups();
+
   X_RESULT UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
   X_RESULT UnmountAndDeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
 
@@ -190,6 +204,11 @@ class ContentManager {
                                                  uint32_t title_id,
                                                  XContentType content_type) const;
 
+  // Closes a package; the contents KeepContentBackup kept for it are not needed any more.
+  void ReleasePackage(ContentPackage* package);
+  void DropKeptBackup(const std::filesystem::path& package_path);
+  void RestoreInterruptedSaves();
+
   std::unordered_map<string::string_key_case, ContentPackage*,
                      string::string_key_case::Hash>::iterator
   FindOpenPackageByData(const XCONTENT_AGGREGATE_DATA& data);
@@ -203,6 +222,8 @@ class ContentManager {
   rex::thread::global_critical_region global_critical_region_;
   std::unordered_map<string::string_key_case, ContentPackage*, string::string_key_case::Hash>
       open_packages_;
+  // Package paths whose previous contents are kept in Backups (KeepContentBackup).
+  std::set<std::filesystem::path> kept_backups_;
 };
 
 }  // namespace xam

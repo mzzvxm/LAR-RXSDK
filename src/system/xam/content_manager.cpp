@@ -9,16 +9,21 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <queue>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #include <fmt/format.h>
 
 #include <rex/filesystem.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/devices/stfs_container_device.h>
+#include <rex/logging.h>
 #include <rex/string.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/content_device.h>
@@ -35,6 +40,48 @@ static const char* kThumbnailFileName = "__thumbnail.png";
 static const char* kGameUserContentDirName = "profile";
 
 static const char* kGameContentHeaderDirName = "Headers";
+
+static const char* kGameContentBackupDirName = "Backups";
+
+static const char* kBackupMarkerSuffix = ".inprogress";
+
+// Package path:  content_root/xuid/title_id/content_type/name
+// Backup path:   content_root/xuid/title_id/Backups/content_type/name
+static std::filesystem::path BackupPathFor(const std::filesystem::path& package_path) {
+  const auto type_dir = package_path.parent_path();
+  if (package_path.filename().empty() || type_dir.filename().empty()) {
+    return {};
+  }
+  return type_dir.parent_path() / kGameContentBackupDirName / type_dir.filename() /
+         package_path.filename();
+}
+
+// An empty file beside a kept package: while it is there, the package is of a save that is not
+// complete.
+static std::filesystem::path BackupMarkerFor(std::filesystem::path backup_path) {
+  backup_path += kBackupMarkerSuffix;
+  return backup_path;
+}
+
+// The marker goes first: without it nothing is put back.
+static void RemoveBackup(const std::filesystem::path& backup_path) {
+  std::error_code marker_ec;
+  std::filesystem::remove(BackupMarkerFor(backup_path), marker_ec);
+  std::error_code ec;
+  std::filesystem::remove_all(backup_path, ec);
+  if (marker_ec || ec) {
+    REXSYS_WARN("content: could not remove the kept copy '{}': {}", rex::path_to_utf8(backup_path),
+                (marker_ec ? marker_ec : ec).message());
+  }
+}
+
+// The folders above a package are named with hex digits: 16 for the XUID, 8 for the title.
+static bool IsHexName(const std::filesystem::path& name, size_t digits) {
+  const auto& text = name.native();
+  return text.size() == digits && std::all_of(text.begin(), text.end(), [](auto c) {
+           return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+         });
+}
 
 static int content_device_id_ = 0;
 
@@ -81,7 +128,10 @@ void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_p
 }
 
 ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path)
-    : kernel_state_(kernel_state), root_path_(root_path) {}
+    : kernel_state_(kernel_state), root_path_(root_path) {
+  // Nothing has reached the content yet: put back the saves the last run left half-written.
+  RestoreInterruptedSaves();
+}
 
 ContentManager::~ContentManager() = default;
 
@@ -325,7 +375,7 @@ X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
     }
     package = DetachPackage(it);
   }
-  delete package;
+  ReleasePackage(package);
   return X_ERROR_SUCCESS;
 }
 
@@ -402,7 +452,7 @@ X_RESULT ContentManager::UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_
     }
     package = DetachPackage(it);
   }
-  delete package;
+  ReleasePackage(package);
   return X_ERROR_SUCCESS;
 }
 
@@ -417,7 +467,7 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
       package = DetachPackage(it);
     }
   }
-  delete package;
+  ReleasePackage(package);
 
   // Delete phase: remove package directory and .header file
   auto package_path = ResolvePackagePath(xuid, data);
@@ -440,6 +490,142 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
     return X_ERROR_SUCCESS;
   }
   return X_ERROR_FILE_NOT_FOUND;
+}
+
+void ContentManager::KeepContentBackup(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) {
+  // CHECK: that a save reaches XamContentClose for the package it created, after writing it. If it
+  // never closes, the copy stays and the previous save comes back at the next start (the log's
+  // "is being rewritten" line without a "closed" line after it shows that).
+  if (data.content_type != XContentType::kSavedGame) {
+    return;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  if (IsContentOpen(data)) {
+    return;  // DeleteContent refuses it as well
+  }
+  const auto package_path = ResolvePackagePath(xuid, data);
+  const auto backup_path = BackupPathFor(package_path);
+  std::error_code ec;
+  if (backup_path.empty() || !std::filesystem::exists(package_path, ec)) {
+    return;
+  }
+  const auto marker = BackupMarkerFor(backup_path);
+  const auto name = rex::path_to_utf8(package_path.filename());
+
+  // A copy kept earlier is of a save the title never closed before asking for this one.
+  RemoveBackup(backup_path);
+  std::filesystem::create_directories(backup_path.parent_path(), ec);
+  if (!ec && !rex::filesystem::CreateEmptyFile(marker)) {
+    ec = std::make_error_code(std::errc::io_error);
+  }
+  if (!ec) {
+    std::filesystem::rename(package_path, backup_path, ec);
+  }
+  if (ec) {
+    // The package cannot be moved (a file of it held open by a scanner or a sync client, say): copy
+    // it, and the caller deletes the original as it always did. The marker comes after the copy
+    // here, so that a copy cut short is never put back over the package, which is still whole.
+    RemoveBackup(backup_path);
+    std::filesystem::copy(package_path, backup_path, std::filesystem::copy_options::recursive, ec);
+    if (!ec && !rex::filesystem::CreateEmptyFile(marker)) {
+      ec = std::make_error_code(std::errc::io_error);
+    }
+  }
+  if (ec) {
+    REXSYS_WARN("content: no copy of the saved game '{}' kept before it is rewritten: {}", name,
+                ec.message());
+    RemoveBackup(backup_path);
+    return;
+  }
+  kept_backups_.insert(package_path);
+  REXSYS_INFO(
+      "content: saved game '{}' is being rewritten; its previous contents are kept until it is "
+      "closed",
+      name);
+}
+
+bool ContentManager::HasUnclosedBackups() {
+  auto global_lock = global_critical_region_.Acquire();
+  return !kept_backups_.empty();
+}
+
+void ContentManager::ReleasePackage(ContentPackage* package) {
+  if (!package) {
+    return;
+  }
+  const auto package_path = package->package_path();
+  delete package;
+  DropKeptBackup(package_path);
+}
+
+void ContentManager::DropKeptBackup(const std::filesystem::path& package_path) {
+  auto global_lock = global_critical_region_.Acquire();
+  if (kept_backups_.erase(package_path) == 0) {
+    return;
+  }
+  RemoveBackup(BackupPathFor(package_path));
+  REXSYS_INFO("content: saved game '{}' closed; its previous contents are no longer kept",
+              rex::path_to_utf8(package_path.filename()));
+}
+
+// A kept package with its marker is of a save that never reached its close: the process ended (a
+// crash, a kill) while the title was writing it, so the package is whatever that left, and the kept
+// one goes back in its place. One without a marker is the leftover of a save that did finish (its
+// removal failed): it is not the latest, and is deleted.
+static void RestoreInterruptedSave(const std::filesystem::path& backup_path,
+                                   const std::filesystem::path& package_path) {
+  const auto name = rex::path_to_utf8(package_path.filename());
+  std::error_code ec;
+  if (!std::filesystem::exists(BackupMarkerFor(backup_path), ec)) {
+    std::filesystem::remove_all(backup_path, ec);
+    return;
+  }
+  std::filesystem::remove_all(package_path, ec);
+  if (!ec) {
+    std::filesystem::create_directories(package_path.parent_path(), ec);
+  }
+  if (!ec) {
+    std::filesystem::rename(backup_path, package_path, ec);
+  }
+  if (ec) {
+    REXSYS_ERROR("content: could not put back saved game '{}' from '{}': {}", name,
+                 rex::path_to_utf8(backup_path), ec.message());
+    return;
+  }
+  std::filesystem::remove(BackupMarkerFor(backup_path), ec);
+  REXSYS_WARN(
+      "content: saved game '{}' was being rewritten when the game ended; its previous contents are "
+      "back",
+      name);
+}
+
+void ContentManager::RestoreInterruptedSaves() {
+  // content_root/xuid/title_id/Backups/content_type/name
+  const auto subdirectories = [](const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> result;
+    for (const auto& info : rex::filesystem::ListFiles(directory)) {
+      if (info.type == rex::filesystem::FileInfo::Type::kDirectory) {
+        result.push_back(directory / info.name);
+      }
+    }
+    return result;
+  };
+  for (const auto& xuid_dir : subdirectories(root_path_)) {
+    if (!IsHexName(xuid_dir.filename(), 16)) {
+      continue;
+    }
+    for (const auto& title_dir : subdirectories(xuid_dir)) {
+      if (!IsHexName(title_dir.filename(), 8)) {
+        continue;
+      }
+      for (const auto& type_dir : subdirectories(title_dir / kGameContentBackupDirName)) {
+        for (const auto& backup_path : subdirectories(type_dir)) {
+          RestoreInterruptedSave(backup_path,
+                                 title_dir / type_dir.filename() / backup_path.filename());
+        }
+      }
+    }
+  }
 }
 
 std::filesystem::path ContentManager::ResolveGameUserContentPath() {
