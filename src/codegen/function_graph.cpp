@@ -344,6 +344,164 @@ void emit_print(std::string& out, fmt::format_string<Args...> fmt, Args&&... arg
   fmt::vformat_to(std::back_inserter(out), fmt.get(), fmt::make_format_args(args...));
 }
 
+//-----------------------------------------------------------------------------
+// Interrupt-disabled regions that are atomic read-modify-writes
+//-----------------------------------------------------------------------------
+// The console's Interlocked helpers compile to
+//
+//   mfmsr rN ; mtmsrd r13,1 ; lwarx ... stwcx. ... ; mtmsrd rN,1
+//
+// and the global critical region lock stands in for "interrupts off": the mtmsrd r13 takes it
+// and the next mtmsrd releases it. When everything in between is register arithmetic, compares,
+// forward branches and at most one lwarx/stwcx. pair on each path, the stwcx. (a compare-and-swap
+// against the value lwarx loaded) is already the whole atomic operation: the value it stores is a
+// function of the value it read, so it succeeds exactly when that value is unchanged, and a change
+// and change back in between (ABA) ends the same as an atomic exchange would have. The lock only
+// makes every other user of the region (other guest threads, the kernel, the GPU thread) wait
+// behind it, and with the fences around it costs more than the operation. Interrupts off never
+// excluded other cores on the console either; the reservation did. A region that touches any
+// other memory is not covered by this argument (a load in the middle needs the reservation to
+// see an ABA) and keeps the lock.
+
+constexpr uint32_t kMtmsrdMask = 0xFC0007FE;  // opcode and extended opcode
+constexpr uint32_t kMtmsrd = 0x7C000164;
+constexpr uint32_t kMfmsrMask = 0xFC1FFFFF;  // everything but RT
+constexpr uint32_t kMfmsr = 0x7C0000A6;
+
+/// Instructions that compute on registers only.
+bool isRegisterOnly(int id) {
+  switch (id) {
+    case PPC_INST_ADD:
+    case PPC_INST_ADDI:
+    case PPC_INST_ADDIS:
+    case PPC_INST_SUBF:
+    case PPC_INST_NEG:
+    case PPC_INST_AND:
+    case PPC_INST_ANDC:
+    case PPC_INST_ANDI:
+    case PPC_INST_OR:
+    case PPC_INST_ORI:
+    case PPC_INST_ORIS:
+    case PPC_INST_XOR:
+    case PPC_INST_XORI:
+    case PPC_INST_LI:
+    case PPC_INST_LIS:
+    case PPC_INST_MR:
+    case PPC_INST_NOP:
+    case PPC_INST_CMPW:
+    case PPC_INST_CMPWI:
+    case PPC_INST_CMPLW:
+    case PPC_INST_CMPLWI:
+    case PPC_INST_CMPD:
+    case PPC_INST_CMPDI:
+    case PPC_INST_CMPLD:
+    case PPC_INST_CMPLDI:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Follows every path from the instruction after the mtmsrd r13 at `enter` to the mtmsrd that
+/// ends it. Returns false if any path does more than register arithmetic, forward branches and
+/// one lwarx/stwcx. pair; otherwise adds the address of each ending mtmsrd to `leaves`.
+bool followAtomicRegion(const FunctionNode& fn, const EmitContext& ctx, uint32_t enter,
+                        std::unordered_set<uint32_t>& leaves) {
+  struct Step {
+    uint32_t addr;
+    uint32_t stores;  // stwcx./stdcx. seen on this path
+  };
+  std::vector<Step> work{{enter + 4, 0}};
+  std::set<std::pair<uint32_t, uint32_t>> seen;
+  ppc_insn insn;
+
+  while (!work.empty()) {
+    Step step = work.back();
+    work.pop_back();
+    for (;;) {
+      if (!seen.emplace(step.addr, step.stores).second)
+        break;  // explored from here already
+      const void* code = fn.containsAddress(step.addr) ? ctx.binary.translate(step.addr) : nullptr;
+      if (!code || seen.size() > 64)
+        return false;
+      Disassemble(code, 4, step.addr, insn);
+      if (!insn.opcode)
+        return false;
+
+      const int id = insn.opcode->id;
+      if (id == PPC_INST_MTMSRD) {
+        if (insn.operands[0] == 13)
+          return false;  // regions do not nest
+        leaves.insert(step.addr);
+        break;
+      }
+      if (id == PPC_INST_B || id == PPC_INST_BEQ || id == PPC_INST_BNE || id == PPC_INST_BLT ||
+          id == PPC_INST_BGE || id == PPC_INST_BGT || id == PPC_INST_BLE) {
+        const uint32_t target = id == PPC_INST_B ? insn.operands[0] : insn.operands[1];
+        if (target <= step.addr)
+          return false;  // forward only, so every path ends
+        if (id == PPC_INST_B) {
+          step.addr = target;
+          continue;
+        }
+        work.push_back({target, step.stores});
+      } else if (id == PPC_INST_STWCX || id == PPC_INST_STDCX) {
+        if (++step.stores > 1)
+          return false;
+      } else if (id != PPC_INST_LWARX && id != PPC_INST_LDARX && !isRegisterOnly(id)) {
+        return false;
+      }
+      step.addr += 4;
+    }
+  }
+  return true;
+}
+
+/// True when the function has interrupt-disabled regions and every one of them is an atomic
+/// read-modify-write as described above, so its mfmsr and mtmsrd instructions can leave the global
+/// lock alone. Decided for the whole function, so the enter and the leave of a region are always
+/// treated alike; a function that mixes in any other kind of region keeps the lock throughout.
+/// Each mfmsr must be the one that starts a region (the next instruction is the mtmsrd r13), which
+/// is the only place the saved value is produced; it feeds nothing but the mtmsrd that ends the
+/// region, so the lock-free mfmsr just reports "interrupts enabled".
+/// CHECK: not compiled or run when written. After a codegen run the generated code of the game
+/// this was written for (45 regions in 33 functions) should contain no REX_ENTER_GLOBAL_LOCK.
+bool hasOnlyAtomicRegions(const FunctionNode& fn, const EmitContext& ctx) {
+  std::vector<uint32_t> enters;
+  std::unordered_set<uint32_t> leaves;
+
+  for (const auto& block : fn.blocks()) {
+    const uint8_t* code = ctx.binary.translate(block.base);
+    if (!code)
+      return false;
+    for (uint32_t addr = block.base; addr < block.end(); addr += 4) {
+      const uint32_t word = load_and_swap<uint32_t>(code + (addr - block.base));
+      if ((word & kMtmsrdMask) == kMtmsrd) {
+        if (((word >> 21) & 31) == 13)
+          enters.push_back(addr);
+        else
+          leaves.insert(addr);
+      } else if ((word & kMfmsrMask) == kMfmsr) {
+        const uint8_t* nextCode = ctx.binary.translate(addr + 4);
+        if (!nextCode)
+          return false;
+        const uint32_t next = load_and_swap<uint32_t>(nextCode);
+        if ((next & kMtmsrdMask) != kMtmsrd || ((next >> 21) & 31) != 13)
+          return false;
+      }
+    }
+  }
+  if (enters.empty())
+    return false;
+
+  std::unordered_set<uint32_t> reached;
+  for (uint32_t enter : enters) {
+    if (!followAtomicRegion(fn, ctx, enter, reached))
+      return false;
+  }
+  return reached.size() == leaves.size();  // no leave belongs to a region begun elsewhere
+}
+
 }  // namespace
 
 std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
@@ -487,6 +645,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   bool allRecompiled = true;
   CSRState csrState = CSRState::Unknown;
   RecompilerLocalVariables localVariables;
+  const bool atomicRegionsOnly = hasOnlyAtomicRegions(*this, ctx);
 
   // Local map for late-detected jump tables (can't mutate const config)
   std::unordered_map<uint32_t, JumpTable> lateJumpTables;
@@ -581,7 +740,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
         // Dispatch instruction to builder
         int id = insn.opcode->id;
         BuilderContext builderCtx{body,           ctx,      *this,   insn, blockBase, data,
-                                  localVariables, csrState, activeJt};
+                                  localVariables, csrState, activeJt, atomicRegionsOnly};
 
         if (hasHookBefore) {
           builderCtx.emit_mid_asm_hook();

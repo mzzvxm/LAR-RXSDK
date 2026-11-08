@@ -98,6 +98,11 @@ struct BuilderContext {
   /// Pointer to active jump table for bctr dispatch, or nullptr
   const JumpTable* activeJumpTable = nullptr;
 
+  /// True when every interrupt-disabled region (mtmsrd r13 ... mtmsrd) of the current function is
+  /// an atomic read-modify-write on its own, so its mfmsr and mtmsrd leave the global critical
+  /// region lock and the fences alone (see hasOnlyAtomicRegions in function_graph.cpp).
+  bool atomicRegionsOnly = false;
+
   /// Get the recompiler configuration
   const RecompilerConfig& config() const;
 

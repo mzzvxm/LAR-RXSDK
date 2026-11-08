@@ -249,6 +249,12 @@ bool build_mflr(BuilderContext& ctx) {
 
 bool build_mfmsr(BuilderContext& ctx) {
   if (!ctx.config().skipMsr) {
+    if (ctx.atomicRegionsOnly) {
+      // This function's regions take no lock; the value only feeds the mtmsrd that ends the
+      // region, so report "interrupts enabled".
+      ctx.println("\t{}.u64 = 0x8000;", ctx.r(ctx.insn.operands[0]));
+      return true;
+    }
     // Memory barrier for MSR read
     ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
     // Check global lock and return appropriate value
@@ -317,6 +323,13 @@ bool build_mtlr(BuilderContext& ctx) {
 
 bool build_mtmsrd(BuilderContext& ctx) {
   if (!ctx.config().skipMsr) {
+    if (ctx.atomicRegionsOnly) {
+      // Neither the lock nor the fences: the region's compare-and-swap is the whole operation
+      // and a full barrier.
+      ctx.println("\tctx.msr = ({}.u32 & 0x8020) | (ctx.msr & ~0x8020);",
+                  ctx.r(ctx.insn.operands[0]));
+      return true;
+    }
     // Memory barrier for MSR write
     ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
     // Update MSR bits
