@@ -13,9 +13,12 @@
 #include "helpers.h"
 
 #include <algorithm>
+#include <charconv>
+#include <optional>
 
 #include <rex/codegen/binary_view.h>
 #include <rex/logging.h>
+#include <rex/memory/utils.h>
 
 #include "../codegen_logging.h"
 #include <rex/system/export_resolver.h>
@@ -172,6 +175,74 @@ const CallTarget* BuilderContext::findCallTarget(uint32_t site) const {
   return nullptr;
 }
 
+namespace {
+
+/// A call target that is one of the compiler's GPR/LR save or restore stubs.
+struct GprlrHelper {
+  const char* function;  ///< pch.h function that does the same work inline
+  unsigned first;        ///< first register it covers (14..31)
+};
+
+/// Recognizes __savegprlr_N / __restgprlr_N: the name the register phase gave a HELPER function,
+/// and the whole body, which must be exactly
+///   save:    std r<n>,-8*(33-n)(r1) for n = N..31;  stw r12,-8(r1);  blr
+///   restore: ld  r<n>,-8*(33-n)(r1) for n = N..31;  lwz r12,-8(r1);  mtlr r12;  blr
+/// Anything else keeps the plain call.
+std::optional<GprlrHelper> matchGprlrHelper(const EmitContext& emitCtx, const FunctionNode& target) {
+  if (!target.isHelper())
+    return std::nullopt;
+
+  constexpr std::string_view kSave = "__savegprlr_";
+  constexpr std::string_view kRest = "__restgprlr_";
+  std::string_view name = target.name();
+  const bool save = name.starts_with(kSave);
+  if (!save && !name.starts_with(kRest))
+    return std::nullopt;
+
+  const std::string_view digits = name.substr(kSave.size());
+  unsigned first = 0;
+  const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), first);
+  if (ec != std::errc{} || end != digits.data() + digits.size() || first < 14 || first > 31)
+    return std::nullopt;
+
+  // 32 - first register accesses, the r12 access, [mtlr,] blr.
+  // CHECK: assumes the size the register phase gave the helper is not changed later; if codegen
+  // still emits plain __savegprlr_N calls, look here first.
+  const uint32_t count = (32 - first) + (save ? 2 : 3);
+  const auto* section = emitCtx.binary.findSection(target.base());
+  if (target.size() != 4 * count || !section || target.end() > section->end())
+    return std::nullopt;
+
+  const uint8_t* code = section->translate(target.base());
+  constexpr uint32_t kStd = 0xF8000000, kLd = 0xE8000000;  // DS-form, rt/ra/ds below
+  constexpr uint32_t kStwR12 = 0x9181FFF8;                 // stw r12,-8(r1)
+  constexpr uint32_t kLwzR12 = 0x8181FFF8;                 // lwz r12,-8(r1)
+  constexpr uint32_t kMtlrR12 = 0x7D8803A6;
+  constexpr uint32_t kBlr = 0x4E800020;
+
+  uint32_t i = 0;
+  for (uint32_t reg = first; reg < 32; ++reg, ++i) {
+    const uint32_t slot = (save ? kStd : kLd) | (reg << 21) | (1u << 16) |
+                          (static_cast<uint32_t>(-8 * static_cast<int>(33 - reg)) & 0xFFFC);
+    if (memory::load_and_swap<uint32_t>(code + 4 * i) != slot)
+      return std::nullopt;
+  }
+  if (save) {
+    if (memory::load_and_swap<uint32_t>(code + 4 * i++) != kStwR12)
+      return std::nullopt;
+  } else {
+    if (memory::load_and_swap<uint32_t>(code + 4 * i++) != kLwzR12 ||
+        memory::load_and_swap<uint32_t>(code + 4 * i++) != kMtlrR12)
+      return std::nullopt;
+  }
+  if (memory::load_and_swap<uint32_t>(code + 4 * i) != kBlr)
+    return std::nullopt;
+
+  return GprlrHelper{save ? "rex_savegprlr" : "rex_restgprlr", first};
+}
+
+}  // namespace
+
 void BuilderContext::emit_function_call(uint32_t address) {
   const auto& cfg = config();
 
@@ -206,6 +277,18 @@ void BuilderContext::emit_function_call(uint32_t address) {
           (name.find("__rest") == 0 || name.find("__save") == 0)) {
         // print nothing - these are handled by local variable tracking
         return;
+      }
+
+      // The standard GPR/LR save and restore stubs are expanded in place (rex_savegprlr and
+      // rex_restgprlr in pch.h). The stub itself stays the fallback for an unusual stack
+      // pointer, and the target of indirect calls. With non-argument registers kept in locals,
+      // r12 is not in ctx for either of them, so that mode keeps the call.
+      if (!cfg.nonArgumentRegistersAsLocalVariables) {
+        if (auto helper = matchGprlrHelper(emitCtx, *targetFn)) {
+          emitCtx.reference(name);
+          println("\t{}<{}>(ctx, base, {});", helper->function, helper->first, name);
+          return;
+        }
       }
 
       // An SEH funclet runs on its owner's frame and reads whatever non-volatiles
