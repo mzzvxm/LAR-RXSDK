@@ -173,8 +173,11 @@ class ContentManager {
   // is made. Best effort: when the package cannot be kept aside it is left where it is, for the
   // caller to delete as before.
   void KeepContentBackup(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
-  // True while a rewritten saved game has not been closed by the title yet.
+  // True while a rewritten saved game has not been closed by the title yet. A title that waits for
+  // saves before it ends checks REX_CONTENT_MANAGER_HAS_UNCLOSED_BACKUPS (defined below) first, so it
+  // still builds against an SDK without this.
   bool HasUnclosedBackups();
+#define REX_CONTENT_MANAGER_HAS_UNCLOSED_BACKUPS 1
 
   X_RESULT UnmountContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
   X_RESULT UnmountAndDeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
