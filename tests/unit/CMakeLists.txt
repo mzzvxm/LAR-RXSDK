@@ -15,6 +15,7 @@ add_executable(unit_tests
     ppc/stack_test.cpp
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp
+    system/content_manager_test.cpp
     system/function_dispatcher_test.cpp
     input/input_assignment_test.cpp
     codegen/codegen_writer_test.cpp

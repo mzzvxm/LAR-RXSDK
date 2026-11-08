@@ -160,6 +160,9 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
         // Close any existing mount under this root name first.
         // Games may reuse the same root without explicitly closing.
         content_manager->CloseContent(root_name);
+        // A saved game's files are kept aside until the title closes the new package, so that a
+        // crash while it is being written does not take the old save with it.
+        content_manager->KeepContentBackup(xuid, content_data);
         if (content_manager->ContentExists(xuid, content_data) &&
             content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
           result = X_ERROR_ACCESS_DENIED;
@@ -189,7 +192,9 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
           result = X_ERROR_PATH_NOT_FOUND;
         } else {
           content_manager->CloseContent(root_name);
-          if (content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
+          content_manager->KeepContentBackup(xuid, content_data);
+          if (content_manager->ContentExists(xuid, content_data) &&
+              content_manager->DeleteContent(xuid, content_data) != X_ERROR_SUCCESS) {
             result = X_ERROR_ACCESS_DENIED;
           } else {
             disposition = kDispositionState::Create;
