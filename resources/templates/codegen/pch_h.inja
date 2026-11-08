@@ -44,6 +44,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 //=============================================================================
 // Image Info
@@ -237,6 +238,88 @@ extern PPCFuncMapping PPCFuncMappings[];
            (static_cast<u64>(_hi) << 32) | _lo;                                      \
          })                                                                          \
        : __builtin_bswap64(*(volatile u64*)(base + (addr) + REX_PHYS_HOST_OFFSET(addr))))
+
+//=============================================================================
+// Register Save/Restore Helpers
+//=============================================================================
+// The compiler's prologue and epilogue stubs, __savegprlr_N and __restgprlr_N, store and load
+// r<N>..r31 and the link register (through r12) in the 8 * (33 - N) bytes below the caller's
+// stack pointer:
+//
+//   __savegprlr_N:  std r<n>, -8 * (33 - n)(r1) for n = N..31;  stw r12, -8(r1)
+//   __restgprlr_N:  ld  r<n>, -8 * (33 - n)(r1) for n = N..31;  lwz r12, -8(r1);  mtlr r12
+//
+// The code generator emits a direct call to one of them as a call to the matching function below,
+// so a prologue or epilogue no longer pays a call into another translation unit (the stubs are
+// weak aliases there and can never be inlined). The save area is one flat host range when it does
+// not wrap past address 0 and every access starts below the 0xE0000000 window that
+// REX_PHYS_HOST_OFFSET remaps, which is true of every guest stack: a single bounds check and plain
+// offsets from one pointer then replace the remap test of each access. For any other stack
+// pointer the original stub runs, so the result is the same either way.
+// CHECK: written without a build. After the first codegen run, a prologue should compile to one
+// compare and straight-line stores (look at the disassembly of one generated function).
+
+using rex_gpr_member_ = PPCRegister PPCContext::*;
+inline constexpr rex_gpr_member_ rex_gpr_members_[18] = {
+    &PPCContext::r14, &PPCContext::r15, &PPCContext::r16, &PPCContext::r17,
+    &PPCContext::r18, &PPCContext::r19, &PPCContext::r20, &PPCContext::r21,
+    &PPCContext::r22, &PPCContext::r23, &PPCContext::r24, &PPCContext::r25,
+    &PPCContext::r26, &PPCContext::r27, &PPCContext::r28, &PPCContext::r29,
+    &PPCContext::r30, &PPCContext::r31};
+
+template <unsigned First>
+__attribute__((always_inline)) inline bool rex_gprlr_area_is_flat(u32 sp) {
+  // r<First> lives at r1 - kBytes and the last access starts at r1 - 8.
+  constexpr u32 kBytes = 8u * (33u - First);
+  return u32(sp - kBytes) < 0xE0000000u - (kBytes - 8u);
+}
+
+template <unsigned First, size_t... I>
+__attribute__((always_inline)) inline void rex_store_gprs_(PPCContext& __restrict ctx,
+                                                            volatile uint8_t* frame,
+                                                            std::index_sequence<I...>) {
+  ((*(volatile u64*)(frame - 8u * (33u - (First + I))) =
+        __builtin_bswap64((ctx.*rex_gpr_members_[First + I - 14]).u64)),
+   ...);
+}
+
+template <unsigned First, size_t... I>
+__attribute__((always_inline)) inline void rex_load_gprs_(PPCContext& __restrict ctx,
+                                                           volatile uint8_t* frame,
+                                                           std::index_sequence<I...>) {
+  (((ctx.*rex_gpr_members_[First + I - 14]).u64 =
+        __builtin_bswap64(*(volatile u64*)(frame - 8u * (33u - (First + I))))),
+   ...);
+}
+
+template <unsigned First>
+__attribute__((always_inline)) inline void rex_savegprlr(PPCContext& __restrict ctx, uint8_t* base,
+                                                          PPCFunc* fallback) {
+  const u32 sp = ctx.r1.u32;
+  if (!rex_gprlr_area_is_flat<First>(sp)) [[unlikely]] {
+    fallback(ctx, base);
+    return;
+  }
+  volatile uint8_t* frame = base + sp;
+  rex_store_gprs_<First>(ctx, frame, std::make_index_sequence<32 - First>{});
+  *(volatile u32*)(frame - 8) = __builtin_bswap32(ctx.r12.u32);
+}
+
+template <unsigned First>
+__attribute__((always_inline)) inline void rex_restgprlr(PPCContext& __restrict ctx, uint8_t* base,
+                                                          PPCFunc* fallback) {
+  const u32 sp = ctx.r1.u32;
+  if (!rex_gprlr_area_is_flat<First>(sp)) [[unlikely]] {
+    fallback(ctx, base);
+    return;
+  }
+  volatile uint8_t* frame = base + sp;
+  rex_load_gprs_<First>(ctx, frame, std::make_index_sequence<32 - First>{});
+  ctx.r12.u64 = __builtin_bswap32(*(volatile u32*)(frame - 8));
+#ifndef REX_CONFIG_SKIP_LR
+  ctx.lr = ctx.r12.u64;
+#endif
+}
 
 //=============================================================================
 // Function Dispatch
