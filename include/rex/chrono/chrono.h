@@ -116,7 +116,10 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
 
 namespace std::chrono {
 
-#ifdef __APPLE__
+// LLVM's libc++ (llvm-mingw on Windows) has none either, until it reports the
+// complete C++20 <chrono> (__cpp_lib_chrono 201907L, which 20.1 does not: 201611L).
+#if defined(__APPLE__) || \
+    (defined(_LIBCPP_VERSION) && (!defined(__cpp_lib_chrono) || __cpp_lib_chrono < 201907L))
 // Apple libc++ does not expose clock_time_conversion or clock_cast.
 template <class, class>
 struct clock_time_conversion {};

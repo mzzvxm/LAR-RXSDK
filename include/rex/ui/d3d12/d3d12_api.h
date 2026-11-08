@@ -21,7 +21,23 @@
 #include <windows.h>
 #include <ObjBase.h>
 
+#if __has_include(<DXProgrammableCapture.h>)
 #include <DXProgrammableCapture.h>
+#else
+// mingw-w64 has no DXProgrammableCapture.h (Windows SDK): declare the one
+// interface used, PIX's programmatic capture.
+#include <unknwn.h>
+MIDL_INTERFACE("9f251514-9d4d-4902-9d60-18988ab7d4b5")
+IDXGraphicsAnalysis : public IUnknown {
+ public:
+  virtual void STDMETHODCALLTYPE BeginCapture() = 0;
+  virtual void STDMETHODCALLTYPE EndCapture() = 0;
+};
+#ifdef __CRT_UUID_DECL
+__CRT_UUID_DECL(IDXGraphicsAnalysis, 0x9f251514, 0x9d4d, 0x4902, 0x9d, 0x60, 0x18, 0x98, 0x8a,
+                0xb7, 0xd4, 0xb5)
+#endif
+#endif
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
@@ -31,5 +47,15 @@
 #include <wrl/client.h>
 #include <dxcapi.h>
 #include "DxbcConverter.h"
+#if defined(__MINGW32__) && defined(__CRT_UUID_DECL)
+// mingw-w64's __uuidof needs a declaration per interface; the DXC headers
+// only carry MSVC's __declspec(uuid).
+__CRT_UUID_DECL(IDxbcConverter, 0x5f956ed5, 0x78d1, 0x4b15, 0x82, 0x47, 0xf7, 0x18, 0x76, 0x14,
+                0xa0, 0x41)
+__CRT_UUID_DECL(IDxcUtils, 0x4605c4cb, 0x2019, 0x492a, 0xad, 0xa4, 0x65, 0xf2, 0x0b, 0xb7, 0xd6,
+                0x7f)
+__CRT_UUID_DECL(IDxcCompiler, 0x8c210bf3, 0x011f, 0x4422, 0x8d, 0x70, 0x6f, 0x9a, 0xcb, 0x8d,
+                0xb6, 0x17)
+#endif
 
 // clang-format on
