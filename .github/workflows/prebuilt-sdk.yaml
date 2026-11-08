@@ -1,0 +1,769 @@
+name: Prebuilt SDK (LARecomp launcher)
+
+# Builds the SDK once, on a GitHub runner, and publishes it as release assets, so that the LARecomp
+# launcher's setup downloads it instead of compiling it on the player's PC. The two builds use the same
+# toolchain, the same pins and the same configure arguments as the launcher's own SDK build, so the result
+# is the SDK the player's PC would have made:
+#
+#   Windows  llvm-mingw (Clang, lld, libc++, mingw-w64 on the UCRT), CMake and Ninja, pinned by URL and
+#            SHA-256 as the launcher's Setup/Resources/tools.json pins them. Packed as a .zip.
+#   Linux    the launcher's Linux build kit, revision 5 (LLVM + Ubuntu 22.04 sysroot, pinned below by URL,
+#            SHA-256 and size as the launcher's tools-linux.json pins it) with its clang.cfg / clang++.cfg,
+#            CMake and Ninja. Packed as a .tar.br, which the launcher reads.
+#
+# Each archive holds the SDK's install folder plus lar-sdk-bundle.json (what it was built from and with; the
+# launcher refuses an SDK whose toolchain or commit is not the one it expects). The release is named
+# sdk-<first 12 digits of the commit>; the last job adds sdk-prebuilt-<12 digits>.json, the launcher's
+# manifest entries (sdkPrebuilt, sdkPrebuiltLinux), which is how the launcher knows the release is complete.
+#
+# Runs on every push to the LARecomp branch, so every new head of that branch gets its prebuilt SDKs. There is
+# no paths filter on purpose: the launcher looks for the release of the head commit, and a head that this
+# workflow skipped (a documentation change, say) would have none. A commit whose message says [skip ci] is
+# skipped by GitHub itself. Run workflow by hand works only once this file is on the default branch (main),
+# because GitHub offers workflow_dispatch for the default branch only; it is here as a bonus. docs/prebuilt-sdk.md
+# says how the launcher uses the result.
+
+on:
+  push:
+    branches:
+      - LARecomp
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build. Empty: the ref this run was started on."
+        required: false
+        type: string
+        default: ""
+      build_windows:
+        description: "Build the Windows SDK (llvm-mingw)"
+        required: false
+        type: boolean
+        default: true
+      build_linux:
+        description: "Build the Linux SDK (the launcher's Linux kit)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# One run per commit at a time: a second run for the same commit (a push and a hand-started run, say) waits for
+# the first instead of cancelling it, and then replaces its files. Runs for different commits are independent:
+# each has its own release.
+concurrency:
+  group: prebuilt-sdk-${{ inputs.ref || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # Settles what is built: the commit (both builds use the same one) and the release that receives the files, and
+  # makes the release when it is not there yet.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      build_windows: ${{ steps.resolve.outputs.build_windows }}
+      build_linux: ${{ steps.resolve.outputs.build_linux }}
+    steps:
+      # The pushed commit itself, not the branch (the branch may have moved on by the time this job starts).
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 1
+
+      - name: Resolve the commit and the release
+        id: resolve
+        env:
+          BUILD_WINDOWS: ${{ inputs.build_windows }}
+          BUILD_LINUX: ${{ inputs.build_linux }}
+        run: |
+          set -euo pipefail
+
+          sha=$(git rev-parse HEAD)
+          short=${sha:0:12}
+
+          # Unset (a push) means yes.
+          windows=true
+          [ "${BUILD_WINDOWS}" = "false" ] && windows=false
+          linux=true
+          [ "${BUILD_LINUX}" = "false" ] && linux=false
+          if [ "${windows}" = "false" ] && [ "${linux}" = "false" ]; then
+            echo "::error::Nothing to build."
+            exit 1
+          fi
+
+          {
+            echo "sha=${sha}"
+            echo "short=${short}"
+            echo "release_tag=sdk-${short}"
+            echo "build_windows=${windows}"
+            echo "build_linux=${linux}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Building ${sha} (windows=${windows}, linux=${linux}) into the release sdk-${short}."
+
+      - name: Make the release if it is not there
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.resolve.outputs.release_tag }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          SHORT: ${{ steps.resolve.outputs.short }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "The release ${TAG} exists; this run replaces its files."
+            # sdk-prebuilt-<short>.json is what tells the launcher that the release is complete, and it is written
+            # last: take the old one away now, so that nobody reads it while the files it describes are replaced.
+            names=$(gh release view "${TAG}" --json assets --jq '.assets[].name')
+            if grep -qx "sdk-prebuilt-${SHORT}.json" <<< "${names}"; then
+              gh release delete-asset "${TAG}" "sdk-prebuilt-${SHORT}.json" --yes
+            fi
+            exit 0
+          fi
+          notes=$(printf '%s\n' \
+            "Prebuilt LAR-RXSDK, built from commit ${SHA}." \
+            "" \
+            "The LARecomp launcher downloads this SDK instead of building it on the player's PC. It is not meant to be downloaded by hand." \
+            "" \
+            "Windows: built with llvm-mingw (a .zip). Linux: built with the launcher's Linux build kit (a .tar.br). Each file has a .sha256 beside it." \
+            "" \
+            "sdk-prebuilt-${SHORT}.json lists the files with their SHA-256 and size. It is added when the builds are done: a release without it is not finished yet.")
+          # --target makes the new tag sdk-<short> point at the commit. If another run made the release a moment ago, the
+          # create fails and the release is there anyway.
+          gh release create "${TAG}" --target "${SHA}" --title "Prebuilt SDK ${SHORT}" --notes "${notes}" --prerelease --latest=false \
+            || gh release view "${TAG}" >/dev/null
+
+  windows:
+    name: Windows SDK (llvm-mingw)
+    needs: prepare
+    if: needs.prepare.outputs.build_windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 240
+    env:
+      # Pinned exactly as the launcher's Setup/Resources/tools.json pins them (same files, same SHA-256); change
+      # them together with that file. The toolchain label in the bundle is "llvm-mingw-" + the version below.
+      LLVM_MINGW_VERSION: "20250709"
+      LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20250709/llvm-mingw-20250709-ucrt-x86_64.zip
+      LLVM_MINGW_SHA256: 82babcd6aae4dc3606e8e0471d816989c384b4bf86a139f184a8b4a1b2c2758d
+      CMAKE_VERSION: "4.4.4"
+      CMAKE_URL: https://github.com/Kitware/CMake/releases/download/v4.4.4/cmake-4.4.4-windows-x86_64.zip
+      CMAKE_SHA256: bace36e94b31c68ab6fa295f26dfa11219e0701cf7c94b0284a7d1cb13dac536
+      NINJA_URL: https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip
+      NINJA_SHA256: 07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65
+      SDK_COMMIT: ${{ needs.prepare.outputs.sha }}
+    steps:
+      # FFmpeg's tree has paths that pass 260 characters on Windows.
+      - name: Allow long paths
+        shell: bash
+        run: git config --global core.longpaths true
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check out the commit that was asked for
+        shell: pwsh
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:SDK_COMMIT) { throw "HEAD is $head, expected $env:SDK_COMMIT." }
+          git log -1 --format='%H %s'
+
+      - name: Get the toolchain (llvm-mingw, CMake, Ninja)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $tools = Join-Path $env:RUNNER_TEMP 'tools'
+          $downloads = Join-Path $tools 'downloads'
+          New-Item -ItemType Directory -Force $downloads | Out-Null
+
+          function Get-Verified([string]$Url, [string]$Sha256) {
+            $file = Join-Path $downloads ([IO.Path]::GetFileName(([Uri]$Url).AbsolutePath))
+            curl.exe --fail --silent --show-error --location --retry 5 --retry-delay 5 --output $file $Url
+            if ($LASTEXITCODE -ne 0) { throw "Downloading $Url failed ($LASTEXITCODE)." }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            if ($actual -ne $Sha256.ToLowerInvariant()) { throw "$file has the SHA-256 $actual, expected $Sha256." }
+            return $file
+          }
+          function Expand-Zip([string]$Zip, [string]$Destination) {
+            7z x -y "-o$Destination" $Zip | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Unpacking $Zip failed ($LASTEXITCODE)." }
+          }
+
+          Expand-Zip (Get-Verified $env:LLVM_MINGW_URL $env:LLVM_MINGW_SHA256) $tools
+          Expand-Zip (Get-Verified $env:CMAKE_URL $env:CMAKE_SHA256) $tools
+          Expand-Zip (Get-Verified $env:NINJA_URL $env:NINJA_SHA256) (Join-Path $tools 'ninja')
+
+          # CHECK: the archives' top folders (llvm-mingw-<version>-ucrt-x86_64, cmake-<version>-windows-x86_64) as the launcher's tools.json folders suggest.
+          $mingw = Join-Path $tools "llvm-mingw-$env:LLVM_MINGW_VERSION-ucrt-x86_64"
+          $cmakeRoot = Join-Path $tools "cmake-$env:CMAKE_VERSION-windows-x86_64"
+          $ninjaRoot = Join-Path $tools 'ninja'
+          foreach ($needed in @(
+              "$mingw\bin\clang.exe", "$mingw\bin\clang++.exe", "$mingw\bin\x86_64-w64-mingw32-windres.exe", "$mingw\bin\llvm-objdump.exe",
+              "$mingw\x86_64-w64-mingw32\bin\libc++.dll", "$mingw\x86_64-w64-mingw32\bin\libunwind.dll",
+              "$cmakeRoot\bin\cmake.exe", "$ninjaRoot\ninja.exe")) {
+            if (-not (Test-Path -LiteralPath $needed)) { throw "The toolchain is not as expected: $needed is missing." }
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$mingw"
+          Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_ROOT=$cmakeRoot"
+          Add-Content -Path $env:GITHUB_ENV -Value "NINJA_ROOT=$ninjaRoot"
+          & "$mingw\bin\clang++.exe" --version
+          & "$cmakeRoot\bin\cmake.exe" --version
+          & "$ninjaRoot\ninja.exe" --version
+
+      # The two edits the launcher's SDK step makes to submodules of other projects (SdkStep.Prepare): FFmpeg's
+      # config.h is MSVC's configuration for Windows, and git on Windows checks libmspack's symlinks out as
+      # small text files.
+      - name: Prepare the sources for llvm-mingw
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import shutil
+
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+
+          config = root / 'thirdparty' / 'FFmpeg' / 'config.h'
+          data = config.read_bytes()
+          nl = b'\r\n' if b'\r\n' in data else b'\n'
+          old = nl.join([
+              b'#include "config_windows_x86_64.h"',
+              b'#endif',
+              b'#elif defined(__APPLE__) && defined(__MACH__)',
+          ])
+          new = nl.join([
+              b'#include "config_windows_x86_64.h"',
+              b'#endif',
+              b'#if defined(__MINGW32__)',
+              b"/* The Windows configuration is MSVC's (--toolchain=msvc). mingw-w64 with the UCRT has no crtversion.h and takes the C99 printf specifiers. */",
+              b'#undef HAVE_LIBC_MSVCRT',
+              b'#define HAVE_LIBC_MSVCRT 0',
+              b'#endif',
+              b'#elif defined(__APPLE__) && defined(__MACH__)',
+          ])
+          if new in data:
+              print('FFmpeg config.h: already edited')
+          elif data.count(old) == 1:
+              config.write_bytes(data.replace(old, new))
+              print('FFmpeg config.h: edited')
+          else:
+              raise SystemExit('FFmpeg config.h is not as expected: the text to change is there %d times.' % data.count(old))
+
+          libmspack = (root / 'thirdparty' / 'libmspack').resolve()
+          mspack = libmspack / 'cabextract' / 'mspack'
+          for stub in sorted(mspack.iterdir()):
+              if not stub.is_file() or stub.is_symlink() or stub.stat().st_size >= 200:
+                  continue
+              text = stub.read_text(encoding='utf-8', errors='replace').strip()
+              if not text or '\n' in text or any(c in text for c in '<>"|?*'):
+                  continue
+              target = (mspack / text).resolve()
+              if libmspack not in target.parents or not target.is_file():
+                  continue
+              shutil.copyfile(target, stub)
+              print('symlink stand-in replaced:', stub.name)
+
+      # The launcher's configure line (SdkStep.BuildAsync), step for step. No Visual Studio or Windows SDK
+      # variable may leak in; the CMake package registry is neither read nor written.
+      - name: Configure, build and install the SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Fwd([string]$Path) { return $Path.Replace('\', '/') }
+
+          $env:PATH = (@("$env:MINGW_ROOT\bin", "$env:MINGW_ROOT\x86_64-w64-mingw32\bin", "$env:CMAKE_ROOT\bin", $env:NINJA_ROOT) -join ';') + ';' + $env:PATH
+          foreach ($name in 'VCToolsInstallDir', 'INCLUDE', 'LIB') { Remove-Item "Env:\$name" -ErrorAction SilentlyContinue }
+
+          $cmake = "$env:CMAKE_ROOT\bin\cmake.exe"
+          $build = Join-Path $env:RUNNER_TEMP 'sdk-build'
+          $sdk = Join-Path $env:RUNNER_TEMP 'sdk-install'
+          $cc = Fwd "$env:MINGW_ROOT\bin\clang.exe"
+          $cxx = Fwd "$env:MINGW_ROOT\bin\clang++.exe"
+          $rc = Fwd "$env:MINGW_ROOT\bin\x86_64-w64-mingw32-windres.exe"
+          $prefix = Fwd $sdk
+
+          Write-Host '::group::Configure'
+          $configure = @(
+            '--preset', 'win-amd64',
+            '-B', $build,
+            "-DCMAKE_INSTALL_PREFIX=$prefix",
+            '-DREXGLUE_USE_VULKAN=ON',
+            '-DREXGLUE_ENABLE_TRACY=OFF',
+            "-DCMAKE_C_COMPILER=$cc",
+            "-DCMAKE_CXX_COMPILER=$cxx",
+            "-DCMAKE_RC_COMPILER=$rc",
+            '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF',
+            '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF',
+            '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON'
+          )
+          & $cmake @configure
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)." }
+          Write-Host '::endgroup::'
+
+          Write-Host '::group::Build'
+          & $cmake --build $build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed ($LASTEXITCODE)." }
+          Write-Host '::endgroup::'
+
+          # The install writes a value into the CMake package registry with `reg add` (cmake/rexglue_install.cmake).
+          # The launcher turns that command into an echo, and so does this: the same install, nothing outside it.
+          Write-Host '::group::Install'
+          $installScript = Join-Path $build 'cmake_install.cmake'
+          $text = [IO.File]::ReadAllText($installScript)
+          if ($text.Contains('COMMAND reg add')) {
+            $text = $text.Replace('COMMAND reg add', 'COMMAND ${CMAKE_COMMAND} -E echo registry-write-skipped reg add')
+            [IO.File]::WriteAllText($installScript, $text, (New-Object Text.UTF8Encoding($false)))
+          }
+          if ([IO.File]::ReadAllText($installScript).Contains('COMMAND reg add')) { throw 'The install would write into the registry, and that could not be turned off.' }
+          & $cmake --install $build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "cmake install failed ($LASTEXITCODE)." }
+
+          # The runtime of a program built with llvm-mingw, beside rexglue.exe and the DLLs.
+          foreach ($dll in 'libc++.dll', 'libunwind.dll') {
+            Copy-Item -LiteralPath "$env:MINGW_ROOT\x86_64-w64-mingw32\bin\$dll" -Destination "$sdk\bin\$dll" -Force
+          }
+          Write-Host '::endgroup::'
+
+      # What the launcher reads (SdkBundleInfo): the toolchain label and the commit must be the ones its setup uses.
+      - name: Write the bundle info and check the install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path $env:RUNNER_TEMP 'sdk-install'
+
+          $info = [ordered]@{
+            what = 'LAR-RXSDK install built with llvm-mingw'
+            sdkCommit = $env:SDK_COMMIT
+            toolchain = "llvm-mingw-$env:LLVM_MINGW_VERSION"
+            builtAt = [DateTime]::UtcNow.ToString('o')
+            options = 'REXGLUE_USE_VULKAN=ON REXGLUE_ENABLE_TRACY=OFF (FidelityFX off, its default), Release'
+          }
+          [IO.File]::WriteAllText("$sdk\lar-sdk-bundle.json", ($info | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+
+          # The files the launcher's SDK step requires (SdkStep.WindowsFiles).
+          foreach ($needed in @(
+              'bin\rexglue.exe', 'bin\rexruntime.dll', 'bin\rexgpu-xenos.dll', 'bin\libc++.dll', 'bin\libunwind.dll',
+              'lib\rexruntime.dll.a', 'lib\cmake\rexglue\rexglueConfig.cmake', 'lar-sdk-bundle.json')) {
+            if (-not (Test-Path -LiteralPath "$sdk\$needed")) { throw "The install has no $needed." }
+          }
+
+          # A DLL of the gcc runtime would be missing on the player's PC (the launcher ships libc++ and libunwind only).
+          $objdump = "$env:MINGW_ROOT\bin\llvm-objdump.exe"
+          $bad = @()
+          foreach ($file in Get-ChildItem -LiteralPath "$sdk\bin" -File | Where-Object { $_.Extension -in '.dll', '.exe' }) {
+            foreach ($line in (& $objdump -p $file.FullName | Select-String 'DLL Name:')) {
+              $dll = ($line.Line -split ':', 2)[1].Trim()
+              if ($dll -match '^(libwinpthread|libgcc_s|libstdc\+\+|libssp)') { $bad += "$($file.Name) imports $dll" }
+            }
+          }
+          if ($bad.Count -gt 0) { throw "The binaries need a DLL that is not shipped: $($bad -join '; ')" }
+
+          $count = (Get-ChildItem -LiteralPath $sdk -Recurse -File | Measure-Object).Count
+          $bytes = (Get-ChildItem -LiteralPath $sdk -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("install: {0} files, {1:N1} MB" -f $count, ($bytes / 1MB))
+
+      # CHECK: rexglue.exe --version exits 0 with only Windows' own folders on PATH (so the DLLs beside it are what is found).
+      - name: Check that rexglue starts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path $env:RUNNER_TEMP 'sdk-install'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & "$sdk\bin\rexglue.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "rexglue.exe --version ended with $LASTEXITCODE." }
+
+      - name: Pack and upload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          SHORT: ${{ needs.prepare.outputs.short }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path $env:RUNNER_TEMP 'sdk-install'
+          $out = Join-Path $env:RUNNER_TEMP 'out'
+          New-Item -ItemType Directory -Force $out | Out-Null
+
+          $toolchain = "llvm-mingw-$env:LLVM_MINGW_VERSION"
+          $asset = "lar-rxsdk-prebuilt-$env:SHORT-windows-x86_64-$toolchain.zip"
+          $zip = Join-Path $out $asset
+
+          # The install folder's content at the root of the zip (the launcher unpacks it into sdk\), Deflate at its best.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory($sdk, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $zip).Length
+          Set-Content -LiteralPath "$zip.sha256" -Value "$sha  $asset"
+          Write-Host ("{0}: {1:N1} MB, sha256 {2}" -f $asset, ($size / 1MB), $sha)
+
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:TAG/$asset"
+          $fragment = [ordered]@{
+            sdkPrebuilt = [ordered]@{
+              asset = $asset
+              url = $url
+              sha256 = $sha
+              size = $size
+              sdkCommit = $env:SDK_COMMIT
+              toolchain = $toolchain
+            }
+          }
+          [IO.File]::WriteAllText((Join-Path $out 'fragment-windows.json'), ($fragment | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
+
+          gh release upload $env:TAG $zip "$zip.sha256" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Uploading to the release $env:TAG failed ($LASTEXITCODE)." }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: fragment-windows
+          path: ${{ runner.temp }}/out/fragment-windows.json
+          retention-days: 14
+          overwrite: true
+
+  linux:
+    name: Linux SDK (the launcher's kit)
+    needs: prepare
+    if: needs.prepare.outputs.build_linux == 'true'
+    # The kit brings its own compiler, C++ library and sysroot (glibc 2.35), so the runner's own tools do not
+    # matter; 22.04 is the base the SDK's CI builds on.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      KIT: /opt/larecomp-kit
+      TRIPLE: x86_64-unknown-linux-gnu
+      # CMake and Ninja as the launcher's tools-linux.json pins them; change them together with that file.
+      CMAKE_URL: https://github.com/Kitware/CMake/releases/download/v4.4.4/cmake-4.4.4-linux-x86_64.tar.gz
+      CMAKE_SHA256: e5bb807f7728cb60cd8b27ebc97a2edb469b68655f21e844a600c3575b76f5bb
+      NINJA_URL: https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
+      NINJA_SHA256: 5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
+      # The Linux kit, revision 5: the pieces the LARecomp project made and published (the pre-release linux-kit-5 of
+      # mzzvxm/LARecomp), the same files with the same SHA-256 and size as the "llvm" and "sysroot" entries of the
+      # launcher's tools-linux.json. The SDK's toolchain label is "linux-kit-" + KIT_VERSION, and the launcher refuses
+      # an SDK whose label is not its own kit's: change all of this together with that file (a new kit revision means
+      # new pins here and new SDK builds).
+      KIT_VERSION: "5"
+      KIT_LLVM_URL: https://github.com/mzzvxm/LARecomp/releases/download/linux-kit-5/llvm-20.1.8-k5-linux-x86_64.tar.br
+      KIT_LLVM_SHA256: 633e3eb608a163ce28e0f81175a8ff21ca8ced5db1aed4f1a0413e68168d35df
+      KIT_LLVM_SIZE: "99417064"
+      KIT_SYSROOT_URL: https://github.com/mzzvxm/LARecomp/releases/download/linux-kit-5/sysroot-jammy-k5-linux-x86_64.tar.br
+      KIT_SYSROOT_SHA256: d174b23dce1887cdc9f85d91523851791910ad016277dd9e440335afeb418a39
+      KIT_SYSROOT_SIZE: "44213084"
+      SDK_COMMIT: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check out the commit that was asked for
+        run: |
+          head=$(git rev-parse HEAD)
+          [ "${head}" = "${SDK_COMMIT}" ] || { echo "::error::HEAD is ${head}, expected ${SDK_COMMIT}."; exit 1; }
+          git log -1 --format='%H %s'
+
+      # brotli unpacks the kit's .tar.br archives here and packs the SDK; the launcher itself reads them with .NET.
+      - name: Install brotli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends brotli
+
+      # What the launcher's Tools step does (LinuxToolsStep): the pieces are downloaded, checked against their
+      # SHA-256, unpacked (an archive with one top folder loses it), and clang.cfg / clang++.cfg are written
+      # beside the compiler (ClangConfig, recipe clang-config-2: --unwindlib=libgcc, GCC's libgcc_s.so.1 is the one unwinder;
+      # the kit (revision 5 and later) carries no libunwind).
+      - name: Get the kit (LLVM, sysroot, CMake, Ninja)
+        run: |
+          set -euo pipefail
+          shopt -s dotglob nullglob
+          sudo mkdir -p "${KIT}"
+          sudo chown "$(id -u):$(id -g)" "${KIT}"
+          dl="${KIT}/downloads"
+          mkdir -p "${dl}"
+
+          # fetch <url> <sha256> [size]: the downloaded file's path on stdout. Inside $(...) bash drops "set -e",
+          # so every failure here ends the function by hand.
+          fetch() {
+            local file="${dl}/$(basename "${1%%\?*}")"
+            if ! curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --output "${file}" "$1"; then
+              echo "::error::Downloading $1 failed." >&2
+              exit 1
+            fi
+            if [ -n "${3:-}" ] && [ "$(stat -c %s "${file}")" != "$3" ]; then
+              echo "::error::$1 is $(stat -c %s "${file}") bytes, expected $3." >&2
+              exit 1
+            fi
+            if ! echo "${2,,}  ${file}" | sha256sum --check - >&2; then
+              echo "::error::$1 does not have the SHA-256 ${2,,}." >&2
+              exit 1
+            fi
+            echo "${file}"
+          }
+          # unpack <archive> <folder>
+          unpack() {
+            local part="$2.part"
+            rm -rf "${part}" "$2"
+            mkdir -p "${part}"
+            case "$1" in
+              *.tar.br) brotli --decompress --stdout "$1" | tar -x -C "${part}" ;;
+              *.tar.gz) tar -xzf "$1" -C "${part}" ;;
+              *.zip) unzip -q "$1" -d "${part}" ;;
+              *) echo "::error::Unknown archive type: $1"; exit 1 ;;
+            esac
+            local entries=("${part}"/*)
+            if [ ${#entries[@]} -eq 1 ] && [ -d "${entries[0]}" ] && [ ! -L "${entries[0]}" ]; then
+              mv "${entries[0]}" "$2"
+              rmdir "${part}"
+            else
+              mv "${part}" "$2"
+            fi
+          }
+
+          # (assigned first so that a failed download stops the step)
+          archive=$(fetch "${KIT_LLVM_URL}" "${KIT_LLVM_SHA256}" "${KIT_LLVM_SIZE}"); unpack "${archive}" "${KIT}/llvm"
+          archive=$(fetch "${KIT_SYSROOT_URL}" "${KIT_SYSROOT_SHA256}" "${KIT_SYSROOT_SIZE}"); unpack "${archive}" "${KIT}/sysroot"
+          archive=$(fetch "${CMAKE_URL}" "${CMAKE_SHA256}"); unpack "${archive}" "${KIT}/cmake"
+          archive=$(fetch "${NINJA_URL}" "${NINJA_SHA256}"); unpack "${archive}" "${KIT}/ninja"
+          chmod +x "${KIT}/ninja/ninja"
+          rm -rf "${dl}"
+
+          # CHECK: the files the launcher's tools-linux.json checks for, and the ones it marks executable.
+          for needed in llvm/bin/clang llvm/bin/clang++ llvm/bin/ld.lld llvm/bin/llvm-ar llvm/bin/llvm-ranlib llvm/bin/llvm-nm llvm/bin/llvm-strip llvm/bin/llvm-objcopy \
+                        sysroot/hostbin/pkg-config sysroot/hostbin/wayland-scanner cmake/bin/cmake ninja/ninja; do
+            [ -x "${KIT}/${needed}" ] || { echo "::error::The kit is not as expected: ${needed} is missing or not executable."; exit 1; }
+          done
+          for lib in libc++.so.1 libc++abi.so.1 libatomic.so.1; do
+            [ -e "${KIT}/llvm/lib/${TRIPLE}/${lib}" ] || { echo "::error::The kit has no ${lib}."; exit 1; }
+          done
+          # One unwinder per process, GCC's (libgcc_s.so.1 from the system): a kit that still carries LLVM's libunwind is an
+          # older revision (k4 and before), whose libc++abi unwinds with it and hangs a thread that ends in pthread_exit.
+          if compgen -G "${KIT}/llvm/lib/${TRIPLE}/libunwind*" > /dev/null; then
+            echo "::error::The kit still has libunwind: it is a kit older than revision 5 (one unwinder, libgcc_s.so.1). Pin revision 5 or later in this file's env."
+            exit 1
+          fi
+
+          cfg() {
+            cat <<EOF
+          # Written by the prebuilt-sdk workflow as the LARecomp launcher writes it (clang-config-2). Do not edit.
+          --sysroot=${KIT}/sysroot
+          -fuse-ld=lld
+          --rtlib=compiler-rt
+          --unwindlib=libgcc
+          -Wno-unused-command-line-argument
+          EOF
+          }
+          cfg > "${KIT}/llvm/bin/clang.cfg"
+          { cfg; echo "-stdlib=libc++"; } > "${KIT}/llvm/bin/clang++.cfg"
+
+          # What the launcher puts in the environment of a build with the kit (LinuxToolPaths.BuildPath / BuildVariables).
+          cat > "${KIT}/env.sh" <<EOF
+          export PATH="${KIT}/sysroot/hostbin:${KIT}/llvm/bin:${KIT}/cmake/bin:${KIT}/ninja:\${PATH}"
+          export LD_LIBRARY_PATH="${KIT}/llvm/lib/${TRIPLE}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
+          export PKG_CONFIG_SYSROOT_DIR="${KIT}/sysroot"
+          export PKG_CONFIG_LIBDIR="${KIT}/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig:${KIT}/sysroot/usr/lib/pkgconfig:${KIT}/sysroot/usr/share/pkgconfig"
+          unset PKG_CONFIG_PATH
+          export TMPDIR="${RUNNER_TEMP}"
+          EOF
+
+      # The launcher's own try-out of the kit (LinuxKitProbe): a C++23 program with <format> builds and runs, and
+      # pkg-config finds GTK 3 in the sysroot.
+      - name: Try the kit
+        run: |
+          set -euo pipefail
+          source "${KIT}/env.sh"
+          printf '#include <cstdio>\n#include <format>\nint main() { std::puts(std::format("kit-ok {}", 42).c_str()); return 0; }\n' > "${RUNNER_TEMP}/probe.cpp"
+          clang++ -std=c++23 "${RUNNER_TEMP}/probe.cpp" -o "${RUNNER_TEMP}/probe"
+          "${RUNNER_TEMP}/probe"
+          pkg-config --exists gtk+-3.0
+          clang++ --version
+          cmake --version
+          ninja --version
+
+      # The launcher's configure line (LinuxBuild.SdkConfigureArguments + ToolchainArguments with the kit).
+      - name: Configure, build and install the SDK
+        run: |
+          set -euo pipefail
+          source "${KIT}/env.sh"
+          build="${RUNNER_TEMP}/sdk-build"
+          sdk="${RUNNER_TEMP}/sdk-install"
+
+          echo "::group::Configure"
+          cmake --preset linux-amd64 \
+            -B "${build}" \
+            -DCMAKE_INSTALL_PREFIX="${sdk}" \
+            -DREXGLUE_USE_VULKAN=ON \
+            -DREXGLUE_ENABLE_TRACY=OFF \
+            -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON \
+            -DCMAKE_C_COMPILER="${KIT}/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${KIT}/llvm/bin/clang++" \
+            -DCMAKE_MAKE_PROGRAM="${KIT}/ninja/ninja" \
+            -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF \
+            -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_SYSROOT="${KIT}/sysroot" \
+            -DCMAKE_AR="${KIT}/llvm/bin/llvm-ar" \
+            -DCMAKE_RANLIB="${KIT}/llvm/bin/llvm-ranlib" \
+            -DCMAKE_NM="${KIT}/llvm/bin/llvm-nm" \
+            -DCMAKE_STRIP="${KIT}/llvm/bin/llvm-strip" \
+            -DCMAKE_OBJCOPY="${KIT}/llvm/bin/llvm-objcopy"
+          echo "::endgroup::"
+
+          echo "::group::Build"
+          cmake --build "${build}" --config Release
+          echo "::endgroup::"
+
+          # The install registers itself in $HOME/.cmake/packages/rexglue; HOME points at a throwaway folder for it
+          # (the launcher does the same), so nothing is left in the runner's home.
+          echo "::group::Install"
+          mkdir -p "${RUNNER_TEMP}/cmake-home"
+          HOME="${RUNNER_TEMP}/cmake-home" cmake --install "${build}" --config Release
+
+          # libc++, libc++abi and libatomic next to the SDK's libraries (LinuxBuild.CxxRuntimeFiles, CopyCxxRuntime): real
+          # files, the launcher's unpacker refuses links that leave the folder. libatomic.so.1 is there because libc++ needs it
+          # and not every PC has it. No libunwind: libc++ and libc++abi use the PC's libgcc_s.so.1, the one unwinder.
+          for lib in libc++.so.1 libc++abi.so.1 libatomic.so.1; do
+            cp -L "${KIT}/llvm/lib/${TRIPLE}/${lib}" "${sdk}/lib/${lib}"
+          done
+          echo "::endgroup::"
+
+      # What the launcher reads (SdkBundleInfo): the toolchain label (linux-kit-<kit version>) and the commit must be
+      # the ones its setup uses.
+      - name: Write the bundle info and check the install
+        run: |
+          set -euo pipefail
+          sdk="${RUNNER_TEMP}/sdk-install"
+
+          jq -n \
+            --arg what "LAR-RXSDK install built with the Linux kit" \
+            --arg sdkCommit "${SDK_COMMIT}" \
+            --arg toolchain "linux-kit-${KIT_VERSION}" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%S.0000000Z)" \
+            --arg options "REXGLUE_USE_VULKAN=ON REXGLUE_ENABLE_TRACY=OFF (FidelityFX off, its default), Release" \
+            '{what: $what, sdkCommit: $sdkCommit, toolchain: $toolchain, builtAt: $builtAt, options: $options}' > "${sdk}/lar-sdk-bundle.json"
+          cat "${sdk}/lar-sdk-bundle.json"
+
+          # The files the launcher's SDK step requires with the kit (LinuxBuild.SdkRequiredFiles).
+          for needed in bin/rexglue lib/librexruntime.so lib/librexgpu-xenos.so lib/cmake/rexglue/rexglueConfig.cmake lar-sdk-bundle.json \
+                        lib/libc++.so.1 lib/libc++abi.so.1 lib/libatomic.so.1; do
+            [ -e "${sdk}/${needed}" ] || { echo "::error::The install has no ${needed}."; exit 1; }
+          done
+          # and none of libunwind (a program with LLVM's unwinder next to glibc's hangs at exit in pthread_exit)
+          if compgen -G "${sdk}/lib/libunwind*" > /dev/null; then
+            echo "::error::The install has a libunwind: the kit's one unwinder is libgcc_s.so.1."
+            exit 1
+          fi
+
+          # The launcher's unpacker refuses a link that points outside the SDK folder (or is absolute): none may be there.
+          root=$(realpath "${sdk}")
+          bad=0
+          while IFS= read -r -d '' link; do
+            target=$(readlink "${link}")
+            resolved=$(realpath -m "$(dirname "${link}")/${target}")
+            case "${target}" in
+              /*) echo "::error::${link} is a link to the absolute path ${target}."; bad=1 ;;
+              *) case "${resolved}" in "${root}"/*) ;; *) echo "::error::${link} points outside the SDK (${target})."; bad=1 ;; esac ;;
+            esac
+          done < <(find "${sdk}" -type l -print0)
+          [ "${bad}" = 0 ]
+
+          echo "install: $(find "${sdk}" -type f | wc -l) files, $(du -sh "${sdk}" | cut -f1)"
+
+      # CHECK: rexglue --version exits 0 without LD_LIBRARY_PATH (the SDK's rpath $ORIGIN/../lib finds the copied libc++).
+      - name: Check that rexglue starts
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH "${RUNNER_TEMP}/sdk-install/bin/rexglue" --version
+
+      # The same packing the kit's own pieces use (make-kit.sh: tar | brotli -q 11 -w 24, names under ./, owner root),
+      # which is what the launcher reads with BrotliStream and TarReader.
+      - name: Pack and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          SHORT: ${{ needs.prepare.outputs.short }}
+        run: |
+          set -euo pipefail
+          sdk="${RUNNER_TEMP}/sdk-install"
+          out="${RUNNER_TEMP}/out"
+          mkdir -p "${out}"
+
+          toolchain="linux-kit-${KIT_VERSION}"
+          asset="lar-rxsdk-prebuilt-${SHORT}-linux-x86_64-${toolchain}.tar.br"
+          tar -C "${sdk}" --numeric-owner --owner=0 --group=0 -cf - . | brotli -q 11 -w 24 -c > "${out}/${asset}"
+          brotli --test "${out}/${asset}"
+
+          sha=$(sha256sum "${out}/${asset}" | cut -d' ' -f1)
+          size=$(stat -c %s "${out}/${asset}")
+          echo "${sha}  ${asset}" > "${out}/${asset}.sha256"
+          echo "${asset}: ${size} bytes, sha256 ${sha}"
+
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/${asset}"
+          jq -n \
+            --arg asset "${asset}" --arg url "${url}" --arg sha256 "${sha}" --argjson size "${size}" \
+            --arg sdkCommit "${SDK_COMMIT}" --arg toolchain "${toolchain}" \
+            '{sdkPrebuiltLinux: {asset: $asset, url: $url, sha256: $sha256, size: $size, sdkCommit: $sdkCommit, toolchain: $toolchain}}' \
+            > "${out}/fragment-linux.json"
+
+          gh release upload "${TAG}" "${out}/${asset}" "${out}/${asset}.sha256" --clobber
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: fragment-linux
+          path: ${{ runner.temp }}/out/fragment-linux.json
+          retention-days: 14
+          overwrite: true
+
+  # The entries for the launcher's release manifest, from whatever was built, as one file on the release. It comes last
+  # and its presence is what tells the launcher that the release is complete. One platform that failed does not hold
+  # the other back (the run is red then; the launcher builds the missing SDK on the PC as before).
+  manifest:
+    needs: [prepare, windows, linux]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.windows.result == 'success' || needs.linux.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the fragments
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fragment-*
+          path: fragments
+          merge-multiple: true
+
+      - name: Write the manifest entries and upload them
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          SHORT: ${{ needs.prepare.outputs.short }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(fragments/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::Nothing was built, so there is nothing to write."
+            exit 1
+          fi
+          name="sdk-prebuilt-${SHORT}.json"
+          jq -s 'add | {sdkPrebuilt, sdkPrebuiltLinux} | with_entries(select(.value != null))' "${files[@]}" > "${name}"
+          cat "${name}"
+          {
+            echo "### Release ${TAG}"
+            echo
+            echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            echo
+            echo "Windows: ${WINDOWS_RESULT}. Linux: ${LINUX_RESULT}. The launcher reads these entries (sdkPrebuilt, sdkPrebuiltLinux) from ${name} on the release; a platform without an entry is built on the player's PC."
+            echo
+            echo '```json'
+            cat "${name}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          gh release upload "${TAG}" "${name}" --clobber
