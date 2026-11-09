@@ -65,10 +65,10 @@ CMAKE_SHA256=e5bb807f7728cb60cd8b27ebc97a2edb469b68655f21e844a600c3575b76f5bb
 NINJA_URL=https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip
 NINJA_SHA256=5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
 KIT_VERSION=5
-KIT_LLVM_URL=https://github.com/mzzvxm/LARecomp/releases/download/linux-kit-5/llvm-20.1.8-k5-linux-x86_64.tar.br
+KIT_LLVM_URL=https://github.com/mzzvxm/LAR-RXSDK/releases/download/linux-kit-5/llvm-20.1.8-k5-linux-x86_64.tar.br
 KIT_LLVM_SHA256=633e3eb608a163ce28e0f81175a8ff21ca8ced5db1aed4f1a0413e68168d35df
 KIT_LLVM_SIZE=99417064
-KIT_SYSROOT_URL=https://github.com/mzzvxm/LARecomp/releases/download/linux-kit-5/sysroot-jammy-k5-linux-x86_64.tar.br
+KIT_SYSROOT_URL=https://github.com/mzzvxm/LAR-RXSDK/releases/download/linux-kit-5/sysroot-jammy-k5-linux-x86_64.tar.br
 KIT_SYSROOT_SHA256=d174b23dce1887cdc9f85d91523851791910ad016277dd9e440335afeb418a39
 KIT_SYSROOT_SIZE=44213084
 

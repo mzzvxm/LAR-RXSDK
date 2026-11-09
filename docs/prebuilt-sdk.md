@@ -32,7 +32,7 @@ SDK is the one the player's PC would have built. For Windows that is `Setup/Buil
 `ToolchainArguments`), `LinuxToolchain.cs` (`ClangConfig`, the environment) and `Setup/Resources/tools-linux.json`.
 
 The Linux kit is pinned in `tools/prebuilt-local/build-linux.sh` (nothing to set up in the repository): the two pieces of the pre-release
-`linux-kit-5` of `mzzvxm/LARecomp`, checked by SHA-256 and size after the download.
+`linux-kit-5` of this repository (`mzzvxm/LAR-RXSDK`; it was on `mzzvxm/LARecomp` until 2026-11-09), checked by SHA-256 and size after the download.
 
 | Piece | File | Size | SHA-256 |
 |---|---|---|---|
@@ -138,7 +138,7 @@ It refuses the SDK, and the setup builds nothing from it, when
 
 - **Nothing.** No Actions, no repository variables, no secrets. The uploads use the uploader's own `gh` sign-in (push
   rights on `mzzvxm/LAR-RXSDK`).
-- **The Linux kit release must stay public** (`linux-kit-5` on `mzzvxm/LARecomp`), with the two files above under the
+- **The Linux kit release must stay public** (`linux-kit-5` on `mzzvxm/LAR-RXSDK`), with the two files above under the
   same names; the Linux script downloads them without signing in.
 
 ## Keeping it in step with the launcher
