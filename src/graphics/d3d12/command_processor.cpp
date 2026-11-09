@@ -56,6 +56,15 @@ REXCVAR_DEFINE_BOOL(d3d12_hoist_shared_memory_uploads, false, "GPU/D3D12",
                     "pages, instead of copying between the draws")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_UINT32(d3d12_async_skip_incomplete_frames_max_ms, 100, "GPU/D3D12",
+                      "With async_shader_compilation, frames with draws left out because their "
+                      "pipelines were still being created are not presented (the previous picture "
+                      "stays), as on Vulkan. Once presents have been skipped for this long, such "
+                      "frames are presented anyway, so a slow pipeline creation shows as objects "
+                      "missing for a moment rather than a picture held still. 0 skips for as long "
+                      "as it takes.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics::d3d12 {
 
 // Generated with `xb buildshaders`.
@@ -2068,6 +2077,37 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
     FlushUnscaledResolveCopies();
   }
 
+  // A frame with draws left out for pipelines that weren't ready is not
+  // presented, the previous picture stays - presenting it would show the
+  // objects of those draws missing for a frame, as flashing squares and
+  // triangles. The time presents have been skipped for runs from the first
+  // incomplete frame to the next complete one.
+  bool skip_present_due_async_pipelines =
+      REXCVAR_GET(async_shader_compilation) && frame_left_out_async_pipeline_draw_;
+  if (skip_present_due_async_pipelines) {
+    auto now = std::chrono::steady_clock::now();
+    if (!incomplete_frames_skipped_since_) {
+      incomplete_frames_skipped_since_ = now;
+    } else if (uint32_t skip_max_ms = REXCVAR_GET(d3d12_async_skip_incomplete_frames_max_ms)) {
+      // Skipped for long enough: show what there is until a frame is complete.
+      skip_present_due_async_pipelines =
+          now - *incomplete_frames_skipped_since_ < std::chrono::milliseconds(skip_max_ms);
+    }
+  } else {
+    incomplete_frames_skipped_since_.reset();
+  }
+  if (skip_present_due_async_pipelines) {
+    static bool skipped_incomplete_frame_logged = false;
+    if (!skipped_incomplete_frame_logged) {
+      skipped_incomplete_frame_logged = true;
+      REXGPU_WARN(
+          "Skipping Direct3D 12 frame presentation due to draws left out for pipelines that "
+          "weren't ready");
+    }
+    EndSubmission(true);
+    return;
+  }
+
   // Obtain the actual swap source texture size (resolution-scaled if it's a
   // resolve destination, or not otherwise).
   D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
@@ -2619,6 +2659,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
         (!AwaitAsyncPipeline(pipeline_handle) ||
          pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr)) {
+      // A pipeline that failed to be created stays left out, but the frame
+      // isn't incomplete for it - it would never be complete again.
+      if (!pipeline_cache_->HasAsyncPipelineCreationFailed(pipeline_handle)) {
+        frame_left_out_async_pipeline_draw_ = true;
+      }
       return true;
     }
     // A pipeline created asynchronously gets its root signature on the
@@ -3847,6 +3892,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
     frame_async_pipeline_wait_us_ = 0;
+    frame_left_out_async_pipeline_draw_ = false;
 
     // Reset bindings that depend on the data stored in the pools.
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
