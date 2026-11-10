@@ -12,6 +12,7 @@
 #include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -535,13 +536,53 @@ std::vector<std::string> ListModifiedFlags() {
   return result;
 }
 
+namespace {
+
+// A TOML basic string treats a backslash as an escape, so a raw Windows path
+// ("C:\Users\...") writes a file that cannot be parsed back: \U starts a
+// unicode escape and the next character is not a hex digit. That made every
+// launch fall back to defaults and rewrite the config, losing all settings.
+std::string QuoteTomlString(std::string_view value) {
+  std::string result;
+  result.reserve(value.size() + 2);
+  result += '"';
+  for (char c : value) {
+    switch (c) {
+      case '"': result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\b': result += "\\b"; break;
+      case '\t': result += "\\t"; break;
+      case '\n': result += "\\n"; break;
+      case '\f': result += "\\f"; break;
+      case '\r': result += "\\r"; break;
+      default:
+        // Other control characters are not allowed literally either. Anything
+        // above 0x7F is passed through: the file is UTF-8 and TOML accepts it.
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) {
+          static constexpr char kHex[] = "0123456789ABCDEF";
+          const auto byte = static_cast<unsigned char>(c);
+          result += "\\u00";
+          result += kHex[(byte >> 4) & 0xF];
+          result += kHex[byte & 0xF];
+        } else {
+          result += c;
+        }
+        break;
+    }
+  }
+  result += '"';
+  return result;
+}
+
+}  // namespace
+
 std::string SerializeToTOML() {
   std::lock_guard lock(GetRegistryMutex());
   std::string result;
   for (const auto& entry : GetRegistryStorage()) {
     if (entry.getter() != entry.default_value) {
       if (entry.type == FlagType::String) {
-        result += entry.name + " = \"" + entry.getter() + "\"\n";
+        result += entry.name + " = " + QuoteTomlString(entry.getter()) + "\n";
       } else {
         result += entry.name + " = " + entry.getter() + "\n";
       }
@@ -556,7 +597,7 @@ std::string SerializeToTOML(std::string_view category) {
   for (const auto& entry : GetRegistryStorage()) {
     if (entry.category == category && entry.getter() != entry.default_value) {
       if (entry.type == FlagType::String) {
-        result += entry.name + " = \"" + entry.getter() + "\"\n";
+        result += entry.name + " = " + QuoteTomlString(entry.getter()) + "\n";
       } else {
         result += entry.name + " = " + entry.getter() + "\n";
       }
@@ -636,15 +677,48 @@ std::vector<std::string> Init(int argc, char** argv) {
   return positional;
 }
 
+namespace {
+
+// Set when a config file exists but could not be read or parsed. SaveConfig
+// then knows it is about to overwrite settings it never loaded.
+std::filesystem::path g_unread_config_path;
+
+}  // namespace
+
 void LoadConfig(const std::filesystem::path& config_path) {
   if (!std::filesystem::exists(config_path)) {
     REXLOG_DEBUG("Config file not found: {}", config_path.string());
     return;
   }
 
+  g_unread_config_path = config_path;
+  // Cleared once the file has been read and applied; anything that returns
+  // early below leaves it set.
+
+  // Read through the path object rather than handing the file name to
+  // toml::parse_file: that takes the name as UTF-8, while path::string()
+  // produces the ANSI code page on Windows, so any non-ASCII character in the
+  // path (a user folder like "Área de Trabalho") makes the open fail and every
+  // setting silently falls back to its default. std::ifstream(path) opens the
+  // native wide path, which is also what SaveConfig writes through.
+  std::string content;
+  {
+    std::ifstream file(config_path, std::ios::binary);
+    if (!file) {
+      REXLOG_ERROR("Failed to open config {} for reading", config_path.string());
+      return;
+    }
+    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (file.bad()) {
+      REXLOG_ERROR("Failed to read config {}", config_path.string());
+      return;
+    }
+  }
+
   try {
-    auto config = toml::parse_file(config_path.string());
+    auto config = toml::parse(content, config_path.string());
     ApplyTomlTable(config, "");
+    g_unread_config_path.clear();
     REXLOG_DEBUG("Loaded config from {}", config_path.string());
   } catch (const toml::parse_error& err) {
     REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
@@ -695,6 +769,27 @@ void SaveConfig(const std::filesystem::path& config_path) {
   if (content.empty()) {
     REXLOG_DEBUG("SaveConfig: no modified flags to save");
     return;
+  }
+
+  // Writing over a config that failed to load destroys settings that were
+  // never read back into the registry - the file comes back holding only
+  // whatever this session happened to change. Keep a copy so nothing is lost
+  // while the read problem is diagnosed.
+  if (!g_unread_config_path.empty() && g_unread_config_path == config_path &&
+      std::filesystem::exists(config_path)) {
+    std::error_code ec;
+    auto backup_path = config_path;
+    backup_path += ".unreadable.bak";
+    std::filesystem::copy_file(config_path, backup_path,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+      REXLOG_ERROR("SaveConfig: {} could not be read earlier and backing it up failed ({}); "
+                   "overwriting it anyway",
+                   config_path.string(), ec.message());
+    } else {
+      REXLOG_WARN("SaveConfig: {} could not be read earlier; previous contents saved to {}",
+                  config_path.string(), backup_path.string());
+    }
   }
 
   try {
