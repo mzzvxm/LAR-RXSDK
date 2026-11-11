@@ -188,6 +188,13 @@ class ContentManager {
                                  XContentType content_type, XCONTENT_AGGREGATE_DATA& data) const;
 
   std::filesystem::path ResolveGameUserContentPath();
+
+  // Directory name a XUID gets under the content root. The signed-in profile
+  // (and UserProfile::kLegacyXuid, which old content headers still carry) maps
+  // to its (sanitized) name so saves are human-identifiable; shared content
+  // (xuid 0, e.g. DLC) and any other XUID keep the 16-hex form.
+  std::string ProfileDirName(uint64_t xuid) const;
+
   bool IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const;
   void CloseOpenedFilesFromContent(const std::string_view root_name);
 
@@ -218,8 +225,25 @@ class ContentManager {
   ContentPackage* DetachPackage(std::unordered_map<string::string_key_case, ContentPackage*,
                                                    string::string_key_case::Hash>::iterator it);
 
+  // Renames the content directory written under a previous profile name (or
+  // under the legacy hex-XUID name) to the current profile name, so a rename
+  // never orphans existing saves. Runs once at construction.
+  void MigrateProfileDirectory();
+
+  // Reads the profile's XUID from its content directory, creating and saving
+  // a fresh one the first time, and hands it to the UserProfile. Runs once at
+  // construction, after MigrateProfileDirectory so the file moved with it.
+  void LoadProfileXuid();
+
+  // Same idea for the per-title profile settings directory, which is only
+  // resolvable once a title id is known.
+  void MigrateGameUserContentPath(const std::filesystem::path& current_path);
+
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
+  // Directory name the content root was last used under, read from the
+  // .profile marker file at construction. Empty when unknown.
+  std::string previous_dir_name_;
 
   // TODO(benvanik): remove use of global lock, it's bad here!
   rex::thread::global_critical_region global_critical_region_;

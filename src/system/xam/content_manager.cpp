@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <queue>
@@ -28,6 +29,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/content_device.h>
 #include <rex/system/xam/content_manager.h>
+#include <rex/system/xam/user_profile.h>
 #include <rex/system/xfile.h>
 #include <rex/system/xobject.h>
 
@@ -127,10 +129,135 @@ void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_p
   fclose(file);
 }
 
+// Records the directory name the content root is currently keyed under, so a
+// later profile rename knows what to move.
+static const char* kProfileDirMarkerName = ".profile";
+
+// The profile's XUID, as 16 hex digits, inside the profile's content directory.
+static const char* kProfileXuidFileName = "profile.xuid";
+
 ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path)
     : kernel_state_(kernel_state), root_path_(root_path) {
   // Nothing has reached the content yet: put back the saves the last run left half-written.
   RestoreInterruptedSaves();
+  MigrateProfileDirectory();
+  LoadProfileXuid();
+}
+
+std::string ContentManager::ProfileDirName(uint64_t xuid) const {
+  // Shared content (DLC and anything explicitly filed under xuid 0) keeps the
+  // canonical all-zero directory; other XUIDs are not the local profile. The
+  // legacy shared XUID still means the local profile: content headers written
+  // before per-profile XUIDs carry it, and the guest hands it back on open.
+  const auto* profile = kernel_state_->user_profile();
+  if (xuid != 0 && profile && (xuid == profile->xuid() || xuid == UserProfile::kLegacyXuid)) {
+    auto name = UserProfile::SanitizeName(profile->name());
+    if (!name.empty()) {
+      return name;
+    }
+  }
+  return fmt::format("{:016X}", xuid);
+}
+
+void ContentManager::LoadProfileXuid() {
+  auto* profile = kernel_state_->user_profile();
+  if (!profile || root_path_.empty()) {
+    // Nowhere to keep it; stay on the legacy XUID rather than mint a new one
+    // every launch.
+    return;
+  }
+
+  const auto profile_dir = root_path_ / rex::to_path(ProfileDirName(profile->xuid()));
+  const auto xuid_path = profile_dir / kProfileXuidFileName;
+
+  if (auto file = rex::filesystem::OpenFile(xuid_path, "rb")) {
+    char buffer[32] = {};
+    size_t read = fread(buffer, 1, sizeof(buffer) - 1, file);
+    fclose(file);
+    buffer[read] = '\0';
+    char* end = nullptr;
+    const uint64_t xuid = std::strtoull(buffer, &end, 16);
+    if (end != buffer && UserProfile::IsValidXuid(xuid)) {
+      profile->set_xuid(xuid);
+      REXLOG_INFO("Profile XUID {:016X}", xuid);
+      return;
+    }
+    REXLOG_WARN("Ignoring unreadable profile XUID file '{}'; creating a new XUID",
+                rex::path_to_utf8(xuid_path));
+  }
+
+  const uint64_t xuid = UserProfile::GenerateXuid();
+  profile->set_xuid(xuid);
+
+  std::error_code ec;
+  std::filesystem::create_directories(profile_dir, ec);
+  auto file = rex::filesystem::OpenFile(xuid_path, "wb");
+  if (file) {
+    const auto text = fmt::format("{:016X}\n", xuid);
+    fwrite(text.data(), 1, text.size(), file);
+    fclose(file);
+    REXLOG_INFO("Created profile XUID {:016X}", xuid);
+  } else {
+    REXLOG_ERROR("Failed to save profile XUID to '{}'; it will change next launch",
+                 rex::path_to_utf8(xuid_path));
+  }
+}
+
+void ContentManager::MigrateProfileDirectory() {
+  if (!kernel_state_->user_profile()) {
+    return;
+  }
+  const uint64_t xuid = kernel_state_->user_profile()->xuid();
+  const std::string current = ProfileDirName(xuid);
+  // The pre-rename layout keyed the directory by the XUID every profile then
+  // shared, not by whatever XUID this profile will load.
+  const std::string legacy = fmt::format("{:016X}", UserProfile::kLegacyXuid);
+
+  std::error_code ec;
+  auto marker_path = root_path_ / kProfileDirMarkerName;
+  auto marker_file = rex::filesystem::OpenFile(marker_path, "rb");
+  if (marker_file) {
+    char buffer[256] = {};
+    size_t read = fread(buffer, 1, sizeof(buffer) - 1, marker_file);
+    fclose(marker_file);
+    previous_dir_name_.assign(buffer, read);
+    while (!previous_dir_name_.empty() &&
+           (previous_dir_name_.back() == '\n' || previous_dir_name_.back() == '\r')) {
+      previous_dir_name_.pop_back();
+    }
+  }
+
+  // Without a marker the only thing that can be on disk is the pre-rename
+  // layout, which used the hex XUID.
+  std::string source = previous_dir_name_.empty() ? legacy : previous_dir_name_;
+
+  if (source != current && std::filesystem::exists(root_path_ / source, ec)) {
+    if (std::filesystem::exists(root_path_ / current, ec)) {
+      REXLOG_WARN(
+          "Profile content directory '{}' already exists; leaving old directory '{}' in place. "
+          "Merge it manually to keep those saves.",
+          current, source);
+    } else {
+      std::filesystem::rename(root_path_ / source, root_path_ / current, ec);
+      if (ec) {
+        REXLOG_ERROR("Failed to migrate profile content '{}' -> '{}': {}", source, current,
+                     ec.message());
+      } else {
+        REXLOG_INFO("Migrated profile content directory '{}' -> '{}'", source, current);
+      }
+    }
+  }
+
+  // Record the current name even when nothing moved, so the next rename knows
+  // where to look.
+  if (previous_dir_name_ != current) {
+    std::filesystem::create_directories(root_path_, ec);
+    auto file = rex::filesystem::OpenFile(marker_path, "wb");
+    if (file) {
+      fwrite(current.data(), 1, current.size(), file);
+      fclose(file);
+    }
+  }
 }
 
 ContentManager::~ContentManager() = default;
@@ -140,7 +267,7 @@ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContent
   if (title_id == kCurrentlyRunningTitleId) {
     title_id = kernel_state_->title_id();
   }
-  auto xuid_str = fmt::format("{:016X}", xuid);
+  auto xuid_str = ProfileDirName(xuid);
   auto title_id_str = fmt::format("{:08X}", title_id);
   auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
 
@@ -175,7 +302,7 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
     xuid = 0;
   }
 
-  auto xuid_str = fmt::format("{:016X}", xuid);
+  auto xuid_str = ProfileDirName(xuid);
   auto title_id_str = fmt::format("{:08X}", title_id);
   auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
   std::string final_name = std::string(file_name) + ".header";
@@ -302,6 +429,16 @@ X_RESULT ContentManager::ReadContentHeaderFile(const std::string_view file_name,
   }
 
   std::memcpy(&data, buffer.data(), buffer.size());
+  // A header found under the local profile's directory belongs to this
+  // profile, whatever owner it names: the legacy shared XUID (written before
+  // per-profile XUIDs) or an XUID the profile had on another PC (a front-end
+  // may derive the XUID from a key kept outside the save folder). Report the
+  // current one, or opening it would look under that XUID's hex directory.
+  const auto* profile = kernel_state_->user_profile();
+  if (profile && data.xuid != 0 && data.xuid != uint64_t(-1) &&
+      (xuid == profile->xuid() || xuid == UserProfile::kLegacyXuid)) {
+    data.xuid = profile->xuid();
+  }
   return X_ERROR_SUCCESS;
 }
 
@@ -630,11 +767,44 @@ void ContentManager::RestoreInterruptedSaves() {
 
 std::filesystem::path ContentManager::ResolveGameUserContentPath() {
   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
-  auto user_name = rex::to_path(kernel_state_->user_profile()->name());
+  auto user_name = rex::to_path(UserProfile::SanitizeName(kernel_state_->user_profile()->name()));
 
   // Per-game per-profile data location:
   // content_root/title_id/profile/user_name
-  return root_path_ / title_id / kGameUserContentDirName / user_name;
+  auto path = root_path_ / title_id / kGameUserContentDirName / user_name;
+  MigrateGameUserContentPath(path);
+  return path;
+}
+
+void ContentManager::MigrateGameUserContentPath(const std::filesystem::path& current_path) {
+  std::error_code ec;
+  if (std::filesystem::exists(current_path, ec)) {
+    return;
+  }
+
+  // Candidates, in order: the name recorded in the marker file, then the
+  // default name used before profile names were selectable.
+  auto profile_root = current_path.parent_path();
+  for (const auto& candidate :
+       {previous_dir_name_, std::string(UserProfile::kDefaultName)}) {
+    if (candidate.empty()) {
+      continue;
+    }
+    auto source = profile_root / rex::to_path(candidate);
+    if (source == current_path || !std::filesystem::exists(source, ec)) {
+      continue;
+    }
+    std::filesystem::create_directories(profile_root, ec);
+    std::filesystem::rename(source, current_path, ec);
+    if (ec) {
+      REXLOG_ERROR("Failed to migrate profile settings '{}' -> '{}': {}", source.string(),
+                   current_path.string(), ec.message());
+    } else {
+      REXLOG_INFO("Migrated profile settings directory '{}' -> '{}'", source.string(),
+                  current_path.string());
+      return;
+    }
+  }
 }
 
 std::unordered_map<string::string_key_case, ContentPackage*,

@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -218,7 +219,35 @@ class UserProfile {
 
   UserProfile();
 
+  // Xbox 360 gamertags are at most 15 characters.
+  static constexpr size_t kMaxNameLength = 15;
+  static constexpr std::string_view kDefaultName = "User";
+
+  // XUID every profile shared before XUIDs became per-profile. Content headers
+  // written back then still carry it, so it stays an alias for the local
+  // profile (see ContentManager::ProfileDirName).
+  static constexpr uint64_t kLegacyXuid = 0xB13EBABEBABEBABEull;
+
+  // A fresh per-profile XUID: the high 16 bits of kLegacyXuid (so any check
+  // the guest makes on the XUID kind sees what it always saw) over 48 random
+  // bits. Never equal to kLegacyXuid.
+  static uint64_t GenerateXuid();
+
+  // Usable as a profile XUID: nonzero, not the "no user" sentinel, and clear of
+  // the 0x00C0000000000000 bits some titles treat as "no permission".
+  static bool IsValidXuid(uint64_t xuid);
+
+  // Strips path-hostile characters and clamps to kMaxNameLength. May return an
+  // empty string if nothing usable is left.
+  static std::string SanitizeName(std::string_view raw);
+
+  // Sanitized value of the user_name cvar, or kDefaultName when unset.
+  static std::string ConfiguredName();
+
   uint64_t xuid() const { return xuid_; }
+  // Set once by ContentManager at construction, from the profile's persisted
+  // XUID, before the guest can ask for it.
+  void set_xuid(uint64_t xuid) { xuid_ = xuid; }
   std::string name() const { return name_; }
   uint32_t signin_state() const { return 1; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }

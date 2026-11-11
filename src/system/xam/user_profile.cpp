@@ -9,24 +9,102 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <random>
 #include <sstream>
 
 #include <fmt/format.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
+
+// Gamertag shown to the guest and used to name the on-disk save folders.
+// Empty means "not chosen yet" - the front-end prompts on first launch.
+REXCVAR_DEFINE_STRING(user_name, "", "General",
+                      "Profile name (gamertag). Empty prompts for one on first launch.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex {
 namespace system {
 namespace xam {
 
+std::string UserProfile::SanitizeName(const std::string_view raw) {
+  std::string name;
+  name.reserve(kMaxNameLength);
+  for (char c : raw) {
+    if (name.size() >= kMaxNameLength) {
+      break;
+    }
+    const auto uc = static_cast<unsigned char>(c);
+    // Strip anything that cannot live in a path component on any host, plus
+    // control characters the guest would render as garbage.
+    if (uc < 0x20 || uc == 0x7F) {
+      continue;
+    }
+    if (std::strchr("<>:\"/\\|?*", c) != nullptr) {
+      continue;
+    }
+    name.push_back(c);
+  }
+
+  // Trailing dots/spaces are not addressable on Windows.
+  while (!name.empty() && (name.back() == '.' || name.back() == ' ')) {
+    name.pop_back();
+  }
+  while (!name.empty() && name.front() == ' ') {
+    name.erase(name.begin());
+  }
+
+  // Reserved DOS device names cannot be directory names on Windows.
+  static const char* kReserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "COM1", "COM2", "COM3",
+                                    "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
+                                    "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+                                    "LPT9"};
+  std::string upper = name;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  for (const char* reserved : kReserved) {
+    if (upper == reserved) {
+      name.push_back('_');
+      break;
+    }
+  }
+
+  return name;
+}
+
+uint64_t UserProfile::GenerateXuid() {
+  std::random_device rd;
+  uint64_t xuid;
+  do {
+    const uint64_t bits = (uint64_t(rd()) << 32) | rd();
+    xuid = (kLegacyXuid & 0xFFFF000000000000ull) | (bits & 0x0000FFFFFFFFFFFFull);
+  } while (xuid == kLegacyXuid || !IsValidXuid(xuid));
+  return xuid;
+}
+
+bool UserProfile::IsValidXuid(uint64_t xuid) {
+  return xuid != 0 && xuid != ~0ull && (xuid & 0x00C0000000000000ull) == 0;
+}
+
+std::string UserProfile::ConfiguredName() {
+  auto name = SanitizeName(REXCVAR_GET(user_name));
+  return name.empty() ? std::string(kDefaultName) : name;
+}
+
 UserProfile::UserProfile() {
   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
-  xuid_ = 0xB13EBABEBABEBABE;
-  name_ = "User";
+  //
+  // Placeholder until ContentManager loads (or creates) the profile's own XUID,
+  // which lives in the profile's content directory and so follows renames.
+  xuid_ = kLegacyXuid;
+  name_ = ConfiguredName();
 
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
   // https://github.com/arkem/py360/blob/master/py360/constants.py
