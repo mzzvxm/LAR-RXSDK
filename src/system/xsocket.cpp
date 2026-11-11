@@ -14,6 +14,7 @@
 #include <rex/kernel/xam/module.h>
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xevent.h>
 #include <rex/system/xsocket.h>
 // #include <rex/system/xnet.h>
 
@@ -29,6 +30,8 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
+
+#include <rex/net/posix_compat.h>
 #endif
 
 namespace rex::system {
@@ -121,7 +124,17 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   }
 
   bound_ = true;
-  bound_port_ = name->sin_port;
+  if (name->sin_port == 0) {
+    sockaddr_in nname = {};
+    socklen_t nnamelen = sizeof(nname);
+    if (::getsockname(static_cast<SOCKET>(native_handle_), (sockaddr*)&nname, &nnamelen) == 0) {
+      bound_port_ = ntohs(nname.sin_port);
+    } else {
+      bound_port_ = 0;
+    }
+  } else {
+    bound_port_ = name->sin_port;
+  }
 
   return X_STATUS_SUCCESS;
 }
@@ -170,7 +183,6 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
                       uint32_t* from_len) {
   // Pop from secure packets first
   // TODO(DrChat): Enable when I commit XNet
-  /*
   {
     std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
     if (incoming_packets_.size()) {
@@ -178,9 +190,15 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
       int data_len = pkt->data_len;
       std::memcpy(buf, pkt->data, std::min((uint32_t)pkt->data_len, buf_len));
 
-      from->sin_family = 2;
-      from->sin_addr = pkt->src_ip;
-      from->sin_port = pkt->src_port;
+      if (from) {
+        from->sin_family = 2;
+        from->sin_addr = pkt->src_ip;
+        from->sin_port = pkt->src_port;
+        std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+      }
+      if (from_len) {
+        *from_len = sizeof(N_XSOCKADDR_IN);
+      }
 
       incoming_packets_.pop();
       uint8_t* pkt_ui8 = (uint8_t*)pkt;
@@ -189,7 +207,6 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
       return data_len;
     }
   }
-  */
 
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
@@ -245,11 +262,23 @@ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf
   pkt->data_len = (uint16_t)len;
   std::memcpy(pkt->data, buf, len);
 
-  std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
-  incoming_packets_.push((uint8_t*)pkt);
+  {
+    std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+    incoming_packets_.push((uint8_t*)pkt);
+  }
 
-  // TODO: Limit on number of incoming packets?
+  if (event_handle_) {
+    auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle_);
+    if (ev) {
+      ev->Set(0, false);
+    }
+  }
+
   return true;
+}
+bool XSocket::HasQueuedPackets() {
+  std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+  return !incoming_packets_.empty();
 }
 
 }  // namespace rex::system

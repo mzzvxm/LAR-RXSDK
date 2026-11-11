@@ -24,6 +24,12 @@ class XLiveBaseApp : public system::xam::App {
 
   X_HRESULT DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                 uint32_t buffer_length) override;
+
+ private:
+  // Handles the 0x0005xxxx "XOnline task" message family (see .cpp for the
+  // wire format). Completes the task as a successful no-op / empty result.
+  X_HRESULT HandleOnlineTask(uint32_t message, uint32_t buffer_ptr,
+                             uint32_t buffer_length);
 };
 
 }  // namespace apps

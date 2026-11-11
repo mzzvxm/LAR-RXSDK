@@ -95,6 +95,8 @@ class XSocket : public XObject {
 
   uint64_t native_handle() const { return native_handle_; }
   uint16_t bound_port() const { return bound_port_; }
+  uint32_t event_handle() const { return event_handle_; }
+  void set_event_handle(uint32_t handle) { event_handle_ = handle; }
 
   X_STATUS Initialize(AddressFamily af, Type type, Protocol proto);
   X_STATUS Close();
@@ -127,6 +129,9 @@ class XSocket : public XObject {
   // Queue a packet into our internal buffer.
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
 
+  // Check if there are queued packets waiting to be read.
+  bool HasQueuedPackets();
+
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
   uint64_t native_handle_ = -1;
@@ -140,6 +145,7 @@ class XSocket : public XObject {
   uint16_t bound_port_ = 0;
 
   bool broadcast_socket_ = false;
+  uint32_t event_handle_ = 0;
 
   std::unique_ptr<rex::thread::Event> event_;
   std::mutex incoming_packet_mutex_;
