@@ -497,6 +497,24 @@ bool OnlineClient::server_online() {
   return server_online_;
 }
 
+bool OnlineClient::advertise_as_host() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return advertise_as_host_;
+}
+
+void OnlineClient::set_advertise_as_host(bool advertise) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  advertise_as_host_ = advertise;
+  if (!advertise && hosting_) {
+    // We hosted earlier in this process and have now joined someone else's
+    // session. Skipping RegisterHost is not enough: the heartbeat keeps
+    // resending is_host from hosting_, so the server would go on advertising a
+    // session we already left. Clear it and tell the server right away.
+    hosting_ = false;
+    SendRegister(false);
+  }
+}
+
 uint32_t OnlineClient::startup_time_ms() {
   std::lock_guard<std::mutex> lock(mutex_);
   return startup_time_ms_;

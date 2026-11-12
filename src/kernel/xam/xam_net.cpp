@@ -13,6 +13,8 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -551,6 +553,16 @@ struct XnAddrStatus {
 };
 
 u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+  // The whole 36-byte XNADDR is an out-parameter and titles compare XNADDRs
+  // byte-exact over all 36 bytes (MCLA: sub_82501A88, which is how the RAGE
+  // session decides which peer is the broadcast-group host). Only the first 16
+  // bytes are filled below, so abOnline[20] would otherwise keep whatever the
+  // caller's buffer happened to hold. Every other XNADDR producer here
+  // (XNetInAddrToXnAddr, XSESSION_INFO in xgi_app) already zeroes abOnline;
+  // match them so the comparisons are well-defined for callers that do not
+  // pre-clear the struct.
+  addr_ptr.Zero();
+
   uint32_t my_ip = INADDR_LOOPBACK;
   uint16_t game_port = 1000;
   if (OnlineClient::Enabled()) {
@@ -637,12 +649,38 @@ void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string stri
   rex::string::copy_truncating(string_out, "666.666.666.666", string_size);
 }
 
+// Remembers the real wPortOnline seen for each remote virtual ip. XNADDRs
+// arrive here fully populated (from a search result or the session info), and
+// XNetInAddrToXnAddr later has to rebuild the same 36 bytes from just the ip.
+// The game compares those 36 bytes for equality (sub_82501A88, used by
+// sub_82297B68 to record the group owner at sessionRec+0x2E04), so filling in
+// our own local port there produced an XNADDR that never matched and left a
+// guest unable to resolve the owner - and therefore unable to start its network
+// clock, which silently kills every race challenge.
+static std::mutex g_peer_port_mutex;
+static std::map<uint32_t, uint16_t> g_peer_ports;
+
+static void RememberPeerPort(uint32_t vip_host, uint16_t port) {
+  if (vip_host == 0 || port == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_peer_port_mutex);
+  g_peer_ports[vip_host] = port;
+}
+
+static uint16_t RecallPeerPort(uint32_t vip_host) {
+  std::lock_guard<std::mutex> lock(g_peer_port_mutex);
+  auto it = g_peer_ports.find(vip_host);
+  return it == g_peer_ports.end() ? 0 : it->second;
+}
+
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
 // subsequent socket calls (like a handle to a XNet address)
 u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
                                     mapped_void in_addr) {
   if (OnlineClient::Enabled() && xn_addr && in_addr) {
     uint32_t vip_host = ntohl(xn_addr->ina.s_addr);  // ina is network order
+    RememberPeerPort(vip_host, xn_addr->wPortOnline);
     auto ptr = REX_KERNEL_MEMORY()->TranslateVirtual<uint32_t*>(in_addr.guest_address());
     if (ptr) {
       *ptr = rex::byte_swap(vip_host); // big-endian
@@ -665,7 +703,12 @@ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 in_addr, ppc_ptr_t<XNADDR> x
     xn_addr->ina.s_addr = htonl(vip_host);
     xn_addr->inaOnline.s_addr = htonl(vip_host);
     {
-      uint16_t game_port = OnlineClient::Get().game_port();
+      // Prefer the port this peer was actually seen on. Falling back to our own
+      // game_port only makes sense when the ip is us.
+      uint16_t game_port = RecallPeerPort(vip_host);
+      if (game_port == 0) {
+        game_port = OnlineClient::Get().game_port();
+      }
       if (game_port == 0) game_port = 1000;
       xn_addr->wPortOnline = game_port;
     }
@@ -803,6 +846,13 @@ u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32
                                u32 flags) {
   if (OnlineClient::Enabled()) {
     auto& oc = OnlineClient::Get();
+    if (!oc.advertise_as_host()) {
+      // We joined someone else's session (XSessionCreate without
+      // XSESSION_CREATE_HOST). Advertising here would put a second, phantom
+      // host in the lobby list for the same cruise.
+      REXKRNL_INFO("[online-diag] XNetQosListen ignored: joined as guest");
+      return 0;
+    }
     PushGamertag(oc);
     // Session properties (the event definition) are captured as the game sets
     // them via XGIUserSetPropertyEx/SetContextEx (see xgi_app.cpp). A store read

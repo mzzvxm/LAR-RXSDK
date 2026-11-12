@@ -70,6 +70,14 @@ class OnlineClient {
 
   bool connection_checked();
   bool server_online();
+
+  // False once the game has created a session as a *guest* (XSessionCreate
+  // without XSESSION_CREATE_HOST). A guest must not advertise a session of its
+  // own to the relay, or the lobby list shows a phantom host and peers can pick
+  // the wrong machine to point their netSession at. Defaults to true so the
+  // ordinary host path is unchanged.
+  bool advertise_as_host();
+  void set_advertise_as_host(bool advertise);
   uint32_t startup_time_ms();
   void set_connection_checked(bool checked);
 
@@ -108,6 +116,7 @@ class OnlineClient {
   uint16_t game_port_ = 0;
 
   bool hosting_ = false;
+  bool advertise_as_host_ = true;
   uint32_t host_gamemode_ = 0;
   uint32_t host_map_ = 0;
   uint8_t host_max_ = 4;

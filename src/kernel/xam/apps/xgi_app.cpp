@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 #if REX_PLATFORM_WIN32
 #include <windows.h>
@@ -133,6 +134,46 @@ ResultData EmitResultData(rex::memory::Memory* memory, const mclaonline::Session
   return out;
 }
 
+// XSESSION_CREATE flags. Only the host bit matters here: on real XAM,
+// XSessionCreate *fills in* XSESSION_INFO when the caller is hosting, and
+// *consumes* the caller's XSESSION_INFO (taken from a search result or an
+// invite) when the caller is joining. Overwriting it on a joiner points the
+// guest's rage netSession at its own address, so it elects itself session owner
+// (netSession+0x1190 == its own peerId, sub_82481688 true), which in turn makes
+// mcNetworkClock start in SERVER mode instead of syncing to the host. Race
+// challenges carry an absolute deadline on the sender's clock, so with two
+// server clocks the receiver's deadline test (sub_82293EB0, 0x82282F74) can
+// never pass and no invite popup is ever raised.
+constexpr uint32_t kSessionCreateHost = 0x00000001;
+
+// XSESSION_INFO is 60 bytes: sessionID(8) + XNADDR hostAddress(36) +
+// keyExchangeKey(16).
+constexpr uint32_t kSessionInfoSize = 60;
+
+// The XSESSION_INFO of the session we are currently in, so XSessionGetDetails
+// reports the real host rather than always describing ourselves.
+std::mutex g_session_info_mutex;
+uint8_t g_session_info[kSessionInfoSize] = {};
+bool g_session_info_valid = false;
+bool g_session_is_host = false;
+
+void RememberSessionInfo(const uint8_t* raw, bool is_host) {
+  std::lock_guard<std::mutex> lock(g_session_info_mutex);
+  std::memcpy(g_session_info, raw, kSessionInfoSize);
+  g_session_info_valid = true;
+  g_session_is_host = is_host;
+}
+
+bool RecallSessionInfo(uint8_t* out, bool* is_host) {
+  std::lock_guard<std::mutex> lock(g_session_info_mutex);
+  if (!g_session_info_valid) {
+    return false;
+  }
+  std::memcpy(out, g_session_info, kSessionInfoSize);
+  *is_host = g_session_is_host;
+  return true;
+}
+
 }  // namespace
 
 // http://mb.mirage.org/bugzilla/xliveless/main.c
@@ -242,7 +283,39 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(session_ptr), 0xDEADF00D);
       }
 
-      if (session_info_ptr) {
+      const bool creating_as_host = (flags & kSessionCreateHost) != 0;
+
+      // Unconditional so a run where the guest never calls this at all is
+      // distinguishable from one where it calls it with no session info.
+      REXKRNL_INFO("[online-diag] XSessionCreate flags={:08X} host_bit={} info_ptr={:08X}", flags,
+                   creating_as_host ? 1 : 0, session_info_ptr);
+
+      // A joiner passes in the XSESSION_INFO it got from XSessionSearchEx (or
+      // from an invite); that buffer already holds the *host's* address and
+      // session id, and XAM leaves it alone. Only a host has its session info
+      // filled in here. Synthesising it unconditionally was making both
+      // machines describe themselves as the host - see kSessionCreateHost.
+      if (session_info_ptr && !creating_as_host) {
+        auto session_info = memory_->TranslateVirtual(session_info_ptr);
+        uint32_t host_ip = memory::load_and_swap<uint32_t>(session_info + 8);
+        // Only treat this as a real join if the caller actually handed us
+        // someone else's host address. The game also creates flagless sessions
+        // that carry no host info (offline/local types), and those must not
+        // silence our own lobby advertisement.
+        uint32_t my_vip = OnlineClient::Get().virtual_ip();
+        bool joining_remote = host_ip != 0 && host_ip != my_vip;
+        if (joining_remote) {
+          RememberSessionInfo(session_info, false);
+          OnlineClient::Get().set_advertise_as_host(false);
+        }
+        REXKRNL_INFO(
+            "[online-diag] XSessionCreate flags={:08X} host_bit=0 host=10.0.0.{} port={} "
+            "sid={:016X} joining_remote={}",
+            flags, host_ip & 0xFF, memory::load_and_swap<uint16_t>(session_info + 16),
+            memory::load_and_swap<uint64_t>(session_info + 0), joining_remote ? 1 : 0);
+      }
+
+      if (session_info_ptr && creating_as_host) {
         auto session_info = memory_->TranslateVirtual(session_info_ptr);
 
         auto& oc = OnlineClient::Get();
@@ -295,6 +368,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         // Write keyExchangeKey (16 bytes)
         uint8_t key[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
         std::memcpy(session_info + 44, key, 16);
+
+        RememberSessionInfo(session_info, true);
+        oc.set_advertise_as_host(true);
+        REXKRNL_INFO("[online-diag] XSessionCreate HOST flags={:08X} ip=10.0.0.{} port={}", flags,
+                     my_ip & 0xFF, game_port);
       }
 
       if (nonce_ptr) {
@@ -630,29 +708,38 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         // qwNonce (ULONGLONG)
         memory::store_and_swap<uint64_t>(details + 44, 0x1122334455667788ull);
 
-        // sessionInfo (XSESSION_INFO) - Offset 52
-        // Write sessionID (uint64_t)
-        memory::store_and_swap<uint64_t>(details + 52, sid);
+        // sessionInfo (XSESSION_INFO) - Offset 52.
+        // Replay the info the session was created/joined with. Describing
+        // ourselves here on a guest is what let the joiner keep pointing its
+        // netSession at its own address (see kSessionCreateHost).
+        uint8_t remembered[kSessionInfoSize];
+        bool remembered_is_host = false;
+        if (RecallSessionInfo(remembered, &remembered_is_host)) {
+          std::memcpy(details + 52, remembered, kSessionInfoSize);
+        } else {
+          // Write sessionID (uint64_t)
+          memory::store_and_swap<uint64_t>(details + 52, sid);
 
-        // Write hostAddress.ina (uint32_t)
-        memory::store_and_swap<uint32_t>(details + 60, my_ip);
-        // Write hostAddress.inaOnline (uint32_t)
-        memory::store_and_swap<uint32_t>(details + 64, my_ip);
-        // Write hostAddress.wPortOnline (uint16_t)
-        uint16_t game_port = oc.game_port();
-        if (game_port == 0) game_port = 1000;
-        memory::store_and_swap<uint16_t>(details + 68, game_port);
+          // Write hostAddress.ina (uint32_t)
+          memory::store_and_swap<uint32_t>(details + 60, my_ip);
+          // Write hostAddress.inaOnline (uint32_t)
+          memory::store_and_swap<uint32_t>(details + 64, my_ip);
+          // Write hostAddress.wPortOnline (uint16_t)
+          uint16_t game_port = oc.game_port();
+          if (game_port == 0) game_port = 1000;
+          memory::store_and_swap<uint16_t>(details + 68, game_port);
 
-        // Write hostAddress.abEnet (6 bytes)
-        uint8_t mac[6] = {0xCC, 0xCC, 0xCC, 0xCC, static_cast<uint8_t>((my_ip >> 8) & 0xFF), static_cast<uint8_t>(my_ip & 0xFF)};
-        std::memcpy(details + 70, mac, 6);
+          // Write hostAddress.abEnet (6 bytes)
+          uint8_t mac[6] = {0xCC, 0xCC, 0xCC, 0xCC, static_cast<uint8_t>((my_ip >> 8) & 0xFF), static_cast<uint8_t>(my_ip & 0xFF)};
+          std::memcpy(details + 70, mac, 6);
 
-        // Write hostAddress.abOnline (20 bytes)
-        std::memset(details + 76, 0, 20);
+          // Write hostAddress.abOnline (20 bytes)
+          std::memset(details + 76, 0, 20);
 
-        // Write keyExchangeKey (16 bytes)
-        uint8_t key[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-        std::memcpy(details + 96, key, 16);
+          // Write keyExchangeKey (16 bytes)
+          uint8_t key[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+          std::memcpy(details + 96, key, 16);
+        }
 
         // xnkidArbitration (XNKID) - Offset 112 (8 bytes)
         std::memset(details + 112, 0, 8);
