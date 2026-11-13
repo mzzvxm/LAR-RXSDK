@@ -7,11 +7,16 @@
  */
 
 #include <catch2/catch_test_macros.hpp>
+#include <rex/platform.h>
 #include <rex/thread.h>
 
 #include <atomic>
 #include <chrono>
 #include <thread>
+
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+#include <time.h>
+#endif
 
 using namespace std::chrono_literals;
 using rex::thread::Event;
@@ -141,3 +146,78 @@ TEST_CASE("rex::thread::WaitAny - ping-pong between two threads does not stall",
   REQUIRE(bad == 0);
   REQUIRE(elapsed < 5s);
 }
+
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+namespace {
+// CPU time used so far by the calling thread.
+std::chrono::nanoseconds ThreadCpuTime() {
+  timespec ts{};
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  return std::chrono::seconds(ts.tv_sec) + std::chrono::nanoseconds(ts.tv_nsec);
+}
+}  // namespace
+
+TEST_CASE("rex::thread::WaitAny - an idle wait on several handles does not spin", "[thread][wait]") {
+  // The poll used to sleep for whole milliseconds of the time left, so the last millisecond of a
+  // wait (all of an alertable one: it waits in 1 ms slices) was a busy loop. 400 ms of waiting
+  // must cost far less than 400 ms of CPU, alertable or not.
+  auto a = Event::CreateAutoResetEvent(false);
+  auto b = Event::CreateAutoResetEvent(false);
+  WaitHandle* handles[] = {a.get(), b.get()};
+
+  for (bool alertable : {false, true}) {
+    const auto cpu_before = ThreadCpuTime();
+    auto [result, index] = WaitAny(handles, 2, alertable, 400ms);
+    const auto cpu_used = ThreadCpuTime() - cpu_before;
+    (void)index;
+    REQUIRE(result == WaitResult::kTimeout);
+    INFO("alertable " << alertable << ": " << std::chrono::duration_cast<std::chrono::milliseconds>(cpu_used).count()
+                      << " ms of CPU in a 400 ms wait");
+    CHECK(cpu_used < 100ms);
+  }
+}
+
+TEST_CASE("rex::thread::WaitAny - an alertable wait on several handles wakes for a user callback",
+          "[thread][wait]") {
+  auto a = Event::CreateAutoResetEvent(false);
+  auto b = Event::CreateAutoResetEvent(false);
+  WaitHandle* handles[] = {a.get(), b.get()};
+
+  rex::thread::Thread* self = rex::thread::Thread::GetCurrentThread();
+  std::atomic<bool> ran{false};
+  std::thread queuer([&] {
+    std::this_thread::sleep_for(50ms);
+    self->QueueUserCallback([&] { ran = true; });
+  });
+  auto start = std::chrono::steady_clock::now();
+  auto [result, index] = WaitAny(handles, 2, true, 5000ms);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  queuer.join();
+  (void)index;
+
+  REQUIRE(result == WaitResult::kUserCallback);
+  CHECK(ran.load());
+  CHECK(elapsed >= 40ms);
+  CHECK(elapsed < 1000ms);
+}
+
+TEST_CASE("rex::thread::WaitAny - an alertable wait on several handles wakes for a signal",
+          "[thread][wait]") {
+  auto a = Event::CreateAutoResetEvent(false);
+  auto b = Event::CreateAutoResetEvent(false);
+  WaitHandle* handles[] = {a.get(), b.get()};
+
+  std::thread signaler([&] {
+    std::this_thread::sleep_for(50ms);
+    a->Set();
+  });
+  const auto cpu_before = ThreadCpuTime();
+  auto [result, index] = WaitAny(handles, 2, true, 5000ms);
+  const auto cpu_used = ThreadCpuTime() - cpu_before;
+  signaler.join();
+
+  REQUIRE(result == WaitResult::kSuccess);
+  CHECK(index == 0);
+  CHECK(cpu_used < 30ms);
+}
+#endif  // REX_PLATFORM_LINUX || REX_PLATFORM_MAC
