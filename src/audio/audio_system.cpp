@@ -44,6 +44,8 @@ namespace rex::audio {
 
 namespace {
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
+// How long the worker rests after a failed wait before it tries again.
+constexpr std::chrono::milliseconds kWorkerWaitFailedBackoff{10};
 }  // namespace
 
 AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
@@ -102,6 +104,10 @@ void AudioSystem::WorkerThreadMain() {
 
   // Main run loop.
   uint32_t diag_pump_count = 0;
+  // A failed wait (an invalid or unsupported handle) does not fix itself, and it returns at once,
+  // so retrying straight away spins a core and logs on every pass. Rest between tries, log the
+  // first failure and count the rest.
+  uint64_t wait_failures = 0;
   while (worker_running_) {
     // These handles signify the number of submitted samples. Once we reach
     // 64 samples, we wait until our audio backend releases a semaphore
@@ -109,8 +115,17 @@ void AudioSystem::WorkerThreadMain() {
     auto result = rex::thread::WaitAny(wait_handles_, rex::countof(wait_handles_), true,
                                        std::chrono::milliseconds(500));
     if (result.first == rex::thread::WaitResult::kFailed) {
-      REXAPU_WARN("AudioWorker: WaitAny failed");
+      if (wait_failures++ == 0) {
+        REXAPU_WARN(
+            "AudioWorker: WaitAny failed; retrying every {} ms, repeats are counted, not logged",
+            kWorkerWaitFailedBackoff.count());
+      }
+      rex::thread::Sleep(kWorkerWaitFailedBackoff);
       continue;
+    }
+    if (wait_failures) {
+      REXAPU_INFO("AudioWorker: WaitAny works again after {} failed waits", wait_failures);
+      wait_failures = 0;
     }
 
     if (result.first == rex::thread::WaitResult::kTimeout) {
@@ -169,6 +184,10 @@ void AudioSystem::WorkerThreadMain() {
     }
   }
   worker_running_ = false;
+  if (wait_failures > 1) {
+    REXAPU_WARN("AudioWorker: WaitAny was still failing at shutdown ({} failed waits in all)",
+                wait_failures);
+  }
 
   // TODO(benvanik): call module API to kill?
 }
