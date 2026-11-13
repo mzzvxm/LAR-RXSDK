@@ -35,6 +35,11 @@ class SDLAudioDriver : public AudioDriver {
   static void SDLCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
                           int total_amount);
 
+  // Puts data on the stream from the callback (with frames_mutex_ held). A failure is logged once
+  // per spell of failures, not on every callback: the repeats are counted and reported when
+  // the output works again, or at shutdown.
+  bool PutStreamData(SDL_AudioStream* stream, const void* data, int len, const char* what);
+
   rex::thread::Semaphore* semaphore_ = nullptr;
 
   SDL_AudioStream* sdl_stream_ = nullptr;
@@ -49,6 +54,10 @@ class SDLAudioDriver : public AudioDriver {
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
+
+  // Guarded by frames_mutex_.
+  bool put_failing_ = false;
+  uint64_t put_failures_suppressed_ = 0;
 };
 
 }  // namespace rex::audio::sdl
