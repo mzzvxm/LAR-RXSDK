@@ -299,6 +299,31 @@ static bool IsRangeFullyMapped(void* base_address, size_t length) {
     return false;
   }
 
+#if REX_HAS_PROCMAP_QUERY
+  // One kernel lookup per mapping that the range crosses instead of reading all of
+  // /proc/self/maps. This runs for every commit on a reserved range.
+  {
+    uintptr_t covered = begin;
+    while (covered < end) {
+      LinuxMapEntry e;
+      const int queried = QueryMapEntry(covered, e);
+      if (queried < 0) {
+        break;  // the kernel cannot answer: read the file below
+      }
+      if (queried == 0) {
+        return false;  // a gap
+      }
+      if (e.end <= covered) {
+        break;  // not possible for a mapping that covers the address: do not loop on it
+      }
+      covered = e.end;
+    }
+    if (covered >= end) {
+      return true;
+    }
+  }
+#endif  // REX_HAS_PROCMAP_QUERY
+
   std::ifstream maps("/proc/self/maps");
   if (!maps.is_open())
     return false;
