@@ -304,6 +304,16 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
 
   OnPostLoadXexImage();
 
+  // Auto-install DLC dropped in the "DLC" folder next to the executable.
+  // Title id is valid now that the XEX is loaded. Encrypted STFS packages
+  // (LIVE/CON/PIRS) and decrypted/loose folders are both handled.
+  {
+    auto dlc_dir = rex::filesystem::GetExecutableFolder() / "DLC";
+    if (std::filesystem::is_directory(dlc_dir)) {
+      runtime_->kernel_state()->content_manager()->InstallAllFromDirectory(dlc_dir);
+    }
+  }
+
   if (ppc_info_.rexcrt_heap) {
     if (!rex::kernel::crt::InitHeap(REXCVAR_GET(rexcrt_heap_size_mb), runtime_->memory())) {
       REXLOG_ERROR("Failed to initialize rexcrt heap");

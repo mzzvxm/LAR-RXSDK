@@ -1001,6 +1001,92 @@ X_RESULT ContentManager::InstallContent(const std::filesystem::path& package_pat
   return WriteContentHeaderFile(0, content_data, license_mask);
 }
 
+X_RESULT ContentManager::InstallContentFromFolder(const std::filesystem::path& folder) {
+  if (!std::filesystem::is_directory(folder)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  auto folder_name = rex::path_to_utf8(folder.filename());
+
+  XCONTENT_AGGREGATE_DATA content_data;
+  content_data.device_id = static_cast<uint32_t>(DummyDeviceId::HDD);
+  content_data.content_type = XContentType::kMarketplaceContent;
+  content_data.title_id = kernel_state_->title_id();
+  content_data.xuid = 0;
+  content_data.set_file_name(folder_name);
+  content_data.set_display_name(rex::path_to_utf16(folder.filename()));
+
+  auto install_path = ResolvePackagePath(0, content_data);
+
+  // Copy the loose files into the content tree.
+  std::error_code ec;
+  std::filesystem::create_directories(install_path, ec);
+  if (ec) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+  std::filesystem::copy(folder, install_path,
+                        std::filesystem::copy_options::recursive |
+                            std::filesystem::copy_options::overwrite_existing,
+                        ec);
+  if (ec) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+
+  // Loose folders carry no STFS license data; grant a full license mask so the
+  // title accepts the content.
+  return WriteContentHeaderFile(0, content_data, 0xFFFFFFFF);
+}
+
+uint32_t ContentManager::InstallAllFromDirectory(const std::filesystem::path& dlc_dir) {
+  if (!std::filesystem::is_directory(dlc_dir)) {
+    return 0;
+  }
+
+  uint32_t installed = 0;
+  for (const auto& info : rex::filesystem::ListFiles(dlc_dir)) {
+    auto entry_path = dlc_dir / info.name;
+    auto name = rex::path_to_utf8(info.name);
+
+    // Skip content that is already installed (keyed on file name / title / type).
+    XCONTENT_AGGREGATE_DATA probe;
+    probe.device_id = static_cast<uint32_t>(DummyDeviceId::HDD);
+    probe.content_type = XContentType::kMarketplaceContent;
+    probe.title_id = kernel_state_->title_id();
+    probe.xuid = 0;
+    probe.set_file_name(name);
+    if (ContentExists(0, probe)) {
+      REXSYS_INFO("DLC: '{}' already installed, skipping", name);
+      continue;
+    }
+
+    X_RESULT result;
+    if (info.type == rex::filesystem::FileInfo::Type::kDirectory) {
+      // Decrypted / already-extracted package.
+      result = InstallContentFromFolder(entry_path);
+    } else {
+      // Encrypted STFS container (LIVE/CON/PIRS). Ignore anything else.
+      if (!rex::filesystem::StfsContainerDevice::ReadPackageHeader(entry_path)) {
+        REXSYS_WARN("DLC: skipping '{}' (not an STFS package)", name);
+        continue;
+      }
+      result = InstallContent(entry_path);
+    }
+
+    if (XSUCCEEDED(result)) {
+      ++installed;
+      REXSYS_INFO("DLC: installed '{}'", name);
+    } else {
+      REXSYS_WARN("DLC: failed to install '{}' (0x{:08X})", name, static_cast<uint32_t>(result));
+    }
+  }
+
+  if (installed) {
+    REXSYS_INFO("DLC: installed {} package(s) from '{}'", installed,
+                rex::path_to_utf8(dlc_dir));
+  }
+  return installed;
+}
+
 }  // namespace xam
 }  // namespace system
 }  // namespace rex

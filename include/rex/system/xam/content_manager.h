@@ -206,6 +206,20 @@ class ContentManager {
   // and writes a .header file for XAM enumeration.
   X_RESULT InstallContent(const std::filesystem::path& package_path);
 
+  // Installs a decrypted / already-extracted content folder from an arbitrary
+  // host path. Copies its contents into
+  // root_path_/0000000000000000/{title_id}/00000002/{folder_name}/ and writes a
+  // fully-licensed .header. Use for DLC that has already been unpacked from its
+  // STFS container (loose files, no LIVE/CON/PIRS header).
+  X_RESULT InstallContentFromFolder(const std::filesystem::path& folder);
+
+  // Scans a directory for marketplace DLC and installs each entry:
+  // encrypted STFS packages (LIVE/CON/PIRS) via InstallContent, loose folders
+  // via InstallContentFromFolder. Content already installed is skipped.
+  // Returns the number of packages newly installed. Requires title_id() to be
+  // valid, so call only after the executable module is loaded.
+  uint32_t InstallAllFromDirectory(const std::filesystem::path& dlc_dir);
+
  private:
   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
                                            uint32_t title_id = -1);
