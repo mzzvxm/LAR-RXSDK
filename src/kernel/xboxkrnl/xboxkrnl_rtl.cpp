@@ -28,6 +28,7 @@
 #include <rex/kernel/object/kernel_thread.h>
 #include <rex/platform/thread.h>
 #include "kernel/stub_log.h"
+#include "kernel/xboxkrnl/critical_section_spin.h"
 #include "kernel/title_state.h"
 #include "kernel/kernel.h"
 #include <rex/kernel/types/xex.h>
@@ -445,12 +446,10 @@ void RtlEnterCriticalSection_entry(GuestPtrT<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
-  while (spin_count--) {
-    if (TryAcquireLockCount(*cs)) {
-      cs->owning_thread = cur_thread;
-      cs->recursion_count = 1;
-      return;
-    }
+  if (SpinAcquire(LockCount(*cs), spin_count)) {
+    cs->owning_thread = cur_thread;
+    cs->recursion_count = 1;
+    return;
   }
 
   if (++LockCount(*cs) != 0) {
