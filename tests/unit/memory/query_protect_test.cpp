@@ -71,5 +71,76 @@ TEST_CASE("QueryProtect fails for an unmapped address", "[memory][protect]") {
   CHECK(length == 0);
 }
 
+TEST_CASE("QueryProtect follows protections set page by page", "[memory][protect]") {
+  // Write watches split guest memory into many mappings: every lookup has to find the right one.
+  const size_t page = rex::memory::page_size();
+  constexpr size_t kPages = 256;
+  void* base =
+      mmap(nullptr, page * kPages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  REQUIRE(base != MAP_FAILED);
+  auto* bytes = static_cast<uint8_t*>(base);
+  auto expected = [](size_t i) {
+    return i % 7 == 0 ? PageAccess::kNoAccess
+                      : (i % 3 == 0 ? PageAccess::kReadOnly : PageAccess::kReadWrite);
+  };
+
+  for (size_t i = 0; i < kPages; ++i) {
+    REQUIRE(rex::memory::Protect(bytes + i * page, page, expected(i)));
+  }
+  for (size_t i = 0; i < kPages; ++i) {
+    size_t length = 0;
+    PageAccess access = PageAccess::kExecuteReadWrite;
+    REQUIRE(rex::memory::QueryProtect(bytes + i * page, length, access));
+    CHECK(access == expected(i));
+    CHECK(length >= page);
+    // The old protection that Protect reports is the one that was set.
+    PageAccess old_access = PageAccess::kExecuteReadWrite;
+    REQUIRE(rex::memory::Protect(bytes + i * page, page, PageAccess::kReadWrite, &old_access));
+    CHECK(old_access == expected(i));
+    REQUIRE(rex::memory::QueryProtect(bytes + i * page, length, access));
+    CHECK(access == PageAccess::kReadWrite);
+  }
+
+  munmap(base, page * kPages);
+}
+
+#if REX_PLATFORM_LINUX
+TEST_CASE("AllocFixed commits on a reservation that is split into several mappings",
+          "[memory][protect]") {
+  const size_t page = rex::memory::page_size();
+  constexpr size_t kPages = 8;
+  void* base = rex::memory::AllocFixed(nullptr, page * kPages, rex::memory::AllocationType::kReserve,
+                                       PageAccess::kNoAccess);
+  REQUIRE(base != nullptr);
+  auto* bytes = static_cast<uint8_t*>(base);
+
+  // Split the reservation as write watches would.
+  REQUIRE(rex::memory::Protect(bytes + page * 2, page, PageAccess::kReadOnly));
+  REQUIRE(rex::memory::Protect(bytes + page * 5, page, PageAccess::kReadWrite));
+
+  // The commit goes through the EEXIST path and needs the whole range to be mapped.
+  void* committed = rex::memory::AllocFixed(base, page * kPages, rex::memory::AllocationType::kCommit,
+                                            PageAccess::kReadWrite);
+  CHECK(committed == base);
+  size_t length = 0;
+  PageAccess access = PageAccess::kNoAccess;
+  REQUIRE(rex::memory::QueryProtect(bytes + page * 2, length, access));
+  CHECK(access == PageAccess::kReadWrite);
+
+  // A hole in the range: the commit is refused and nothing is changed.
+  REQUIRE(rex::memory::Protect(bytes, page * kPages, PageAccess::kReadOnly));
+  REQUIRE(munmap(bytes + page * 3, page) == 0);
+  void* refused = rex::memory::AllocFixed(base, page * kPages, rex::memory::AllocationType::kCommit,
+                                          PageAccess::kReadWrite);
+  CHECK(refused == nullptr);
+  REQUIRE(rex::memory::QueryProtect(bytes, length, access));
+  CHECK(access == PageAccess::kReadOnly);
+  CHECK(length == page * 3);
+
+  munmap(bytes, page * 3);
+  munmap(bytes + page * 4, page * (kPages - 4));
+}
+#endif  // REX_PLATFORM_LINUX
+
 }  // namespace
 #endif
