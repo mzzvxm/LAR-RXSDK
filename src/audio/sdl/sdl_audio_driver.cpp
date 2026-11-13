@@ -148,6 +148,14 @@ void SDLAudioDriver::Shutdown() {
     sdl_initialized_ = false;
   }
   std::unique_lock<std::mutex> guard(frames_mutex_);
+  if (put_failing_ && put_failures_suppressed_) {
+    REXAPU_WARN(
+        "SDL_PutAudioStreamData() was still failing at shutdown; {} repeated failures were not "
+        "logged",
+        put_failures_suppressed_);
+  }
+  put_failing_ = false;
+  put_failures_suppressed_ = 0;
   while (!frames_unused_.empty()) {
     delete[] frames_unused_.top();
     frames_unused_.pop();
@@ -156,6 +164,32 @@ void SDLAudioDriver::Shutdown() {
     delete[] frames_queued_.front();
     frames_queued_.pop();
   }
+}
+
+bool SDLAudioDriver::PutStreamData(SDL_AudioStream* stream, const void* data, int len,
+                                   const char* what) {
+  if (!SDL_PutAudioStreamData(stream, data, len)) {
+    // When the output device goes away (a headset is unplugged) every callback fails the same
+    // way, so only the first failure of a spell is logged.
+    if (!put_failing_) {
+      put_failing_ = true;
+      put_failures_suppressed_ = 0;
+      REXAPU_ERROR(
+          "SDL_PutAudioStreamData() failed{}: {}; further failures are counted, not logged, until "
+          "it works again",
+          what, SDL_GetError());
+    } else {
+      ++put_failures_suppressed_;
+    }
+    return false;
+  }
+  if (put_failing_) {
+    REXAPU_INFO("SDL_PutAudioStreamData() works again; {} repeated failures were not logged",
+                put_failures_suppressed_);
+    put_failing_ = false;
+    put_failures_suppressed_ = 0;
+  }
+  return true;
 }
 
 void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int additional_amount,
@@ -187,8 +221,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
         sdl_callback_count++;
       }
       std::memset(data, 0, len);
-      if (!SDL_PutAudioStreamData(stream, data, len)) {
-        REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
+      if (!driver->PutStreamData(stream, data, len, " while filling silence")) {
         break;
       }
       additional_amount -= len;
@@ -212,8 +245,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
             break;
         }
       }
-      if (!SDL_PutAudioStreamData(stream, data, len)) {
-        REXAPU_ERROR("SDL_PutAudioStreamData() failed: {}", SDL_GetError());
+      if (!driver->PutStreamData(stream, data, len, "")) {
         driver->frames_unused_.push(buffer);
         break;
       }
