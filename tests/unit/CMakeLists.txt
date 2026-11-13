@@ -18,6 +18,7 @@ add_executable(unit_tests
     system/content_manager_test.cpp
     system/function_dispatcher_test.cpp
     input/input_assignment_test.cpp
+    memory/mapped_views_test.cpp
     codegen/codegen_writer_test.cpp
     codegen/output_partition_test.cpp
     codegen/output_stamp_test.cpp
