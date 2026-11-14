@@ -16,7 +16,10 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <fcntl.h>
 
@@ -358,6 +361,116 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
   return w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
 }
 
+// The address ranges the runtime has mapped with MapFileView and not unmapped since: the guest
+// arena (Memory::MapViews). A commit on a reservation inside them (AllocFixed's EEXIST path, once
+// per guest allocation) has to know the range has no hole before it calls mprotect. For these
+// ranges that is known without reading /proc/self/maps, which on kernels without PROCMAP_QUERY is
+// a parse of every mapping per guest allocation, and the file has thousands of lines once write
+// watches split the arena. Every call in this file that can unmap pages (MapFileView,
+// UnmapFileView, DeallocFixed's release) updates the list, so a range is listed only while it is
+// mapped; anything else (a reservation made by AllocFixed, a range that crosses an unlisted gap)
+// still goes to the kernel.
+class MappedViews {
+ public:
+  using Range = std::pair<uintptr_t, uintptr_t>;  // [first, second)
+
+  // The union with [begin, end); ranges that overlap or touch it become one.
+  void Add(uintptr_t begin, uintptr_t end) {
+    if (begin >= end) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Range> merged;
+    merged.reserve(ranges_.size() + 1);
+    bool placed = false;
+    for (const Range& r : ranges_) {
+      if (r.second < begin) {
+        merged.push_back(r);
+      } else if (r.first > end) {
+        if (!placed) {
+          merged.emplace_back(begin, end);
+          placed = true;
+        }
+        merged.push_back(r);
+      } else {
+        begin = r.first < begin ? r.first : begin;
+        end = r.second > end ? r.second : end;
+      }
+    }
+    if (!placed) {
+      merged.emplace_back(begin, end);
+    }
+    ranges_ = std::move(merged);
+  }
+
+  // Takes [begin, end) out of the list, splitting a range that it cuts in two.
+  void Remove(uintptr_t begin, uintptr_t end) {
+    if (begin >= end) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Range> kept;
+    kept.reserve(ranges_.size() + 1);
+    for (const Range& r : ranges_) {
+      if (r.second <= begin || r.first >= end) {
+        kept.push_back(r);
+        continue;
+      }
+      if (r.first < begin) {
+        kept.emplace_back(r.first, begin);
+      }
+      if (r.second > end) {
+        kept.emplace_back(end, r.second);
+      }
+    }
+    ranges_ = std::move(kept);
+  }
+
+  // Whether one listed range holds all of [begin, end). Listed ranges never touch, so a range
+  // without a gap is inside exactly one of them.
+  bool Covers(uintptr_t begin, uintptr_t end) const {
+    if (begin >= end) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const Range& r : ranges_) {
+      if (r.first <= begin && end <= r.second) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<Range> ranges_;  // sorted, disjoint
+};
+
+static MappedViews& GetMappedViews() {
+  static MappedViews* views = new MappedViews();  // never destroyed: threads outlive statics
+  return *views;
+}
+
+// mmap and munmap round the length up to whole pages.
+static uintptr_t PageEnd(void* base_address, size_t length) {
+  return rex::round_up(reinterpret_cast<uintptr_t>(base_address) + length, uintptr_t(page_size()));
+}
+
+static void RecordMappedView(void* base_address, size_t length) {
+  GetMappedViews().Add(reinterpret_cast<uintptr_t>(base_address), PageEnd(base_address, length));
+}
+
+static void ForgetMappedRange(void* base_address, size_t length) {
+  GetMappedViews().Remove(reinterpret_cast<uintptr_t>(base_address),
+                          PageEnd(base_address, length));
+}
+
+static bool IsInsideMappedView(void* base_address, size_t length) {
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(base_address);
+  const uintptr_t end = begin + length;
+  return end > begin && GetMappedViews().Covers(begin, end);
+}
+
 }  // namespace
 #endif  // REX_PLATFORM_LINUX
 
@@ -428,8 +541,9 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
   if (errno == EEXIST && base_address &&
       (allocation_type == AllocationType::kCommit ||
        allocation_type == AllocationType::kReserveCommit)) {
-    // Verify the entire range is mapped before using mprotect
-    if (IsRangeFullyMapped(base_address, length)) {
+    // Verify the entire range is mapped before using mprotect. The runtime's own views are known
+    // to be; the rest is asked of the kernel.
+    if (IsInsideMappedView(base_address, length) || IsRangeFullyMapped(base_address, length)) {
       if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
         return base_address;
       }
@@ -453,7 +567,13 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
       return true;
     }
     case DeallocationType::kRelease: {
-      return munmap(base_address, length) == 0;
+      const bool unmapped = munmap(base_address, length) == 0;
+#if REX_PLATFORM_LINUX
+      if (unmapped) {
+        ForgetMappedRange(base_address, length);
+      }
+#endif
+      return unmapped;
     }
     default:
       // how we get here? :(
@@ -653,11 +773,20 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
     return nullptr;
   }
 
+#if REX_PLATFORM_LINUX
+  RecordMappedView(result, length);
+#endif
   return result;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
-  return munmap(base_address, length) == 0;
+  const bool unmapped = munmap(base_address, length) == 0;
+#if REX_PLATFORM_LINUX
+  if (unmapped) {
+    ForgetMappedRange(base_address, length);
+  }
+#endif
+  return unmapped;
 }
 
 }  // namespace memory
