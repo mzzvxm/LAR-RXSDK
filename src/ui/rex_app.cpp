@@ -17,6 +17,7 @@
 #include <rex/cvar.h>
 #include <rex/ui/flags.h>
 #include <rex/kernel/crt/heap.h>
+#include <rex/kernel/xam/module.h>
 #include <rex/filesystem.h>
 #include <rex/logging/sink.h>
 #include <rex/logging.h>
@@ -41,6 +42,21 @@
 
 #include <fmt/format.h>
 #include <imgui.h>
+
+#if REX_PLATFORM_WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+#endif
 
 #include <algorithm>
 #include <filesystem>
@@ -314,6 +330,20 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     }
   }
 
+  // If a previous boot requested a title relaunch (e.g. reboot to load DLC),
+  // reload the stashed launch data so XamLoaderGetLaunchData returns it. Must
+  // happen before the guest runs.
+  if (auto relaunch = rex::Runtime::ConsumeRelaunchData()) {
+    auto xam = runtime_->kernel_state()->GetKernelModule<rex::kernel::xam::XamModule>("xam.xex");
+    if (xam) {
+      auto& loader_data = xam->loader_data();
+      loader_data.launch_flags = relaunch->launch_flags;
+      loader_data.launch_data = std::move(relaunch->launch_data);
+      loader_data.launch_data_present = true;
+      REXLOG_INFO("Restored launch data from relaunch ({} bytes)", loader_data.launch_data.size());
+    }
+  }
+
   if (ppc_info_.rexcrt_heap) {
     if (!rex::kernel::crt::InitHeap(REXCVAR_GET(rexcrt_heap_size_mb), runtime_->memory())) {
       REXLOG_ERROR("Failed to initialize rexcrt heap");
@@ -493,11 +523,91 @@ void ReXApp::LaunchModule() {
       main_thread->Wait(0, 0, 0, nullptr);
       OnGuestThreadExit(main_thread.get());
       REXLOG_INFO("Execution complete");
-      if (!shutting_down_.load(std::memory_order_acquire)) {
-        app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
+      if (shutting_down_.load(std::memory_order_acquire)) {
+        return;
       }
+      // A title that rebooted itself (e.g. to load DLC) terminated instead of
+      // exiting for good. Respawn the process so it boots again with the stashed
+      // launch data, rather than closing the window.
+      if (runtime_ && runtime_->relaunch_requested()) {
+        app_context().CallInUIThread([this]() { RelaunchProcess(); });
+        return;
+      }
+      app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
     });
   });
+}
+
+void ReXApp::RelaunchProcess() {
+#if REX_PLATFORM_WIN32
+  REXLOG_INFO("Relaunching process to complete title reboot...");
+
+  wchar_t exe_path[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+
+  // CreateProcessW may mutate the command-line buffer, so copy it.
+  std::wstring command_line = GetCommandLineW();
+
+  STARTUPINFOW startup_info = {};
+  startup_info.cb = sizeof(startup_info);
+  PROCESS_INFORMATION process_info = {};
+
+  BOOL ok = CreateProcessW(exe_path, command_line.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                           nullptr, &startup_info, &process_info);
+  if (ok) {
+    CloseHandle(process_info.hProcess);
+    CloseHandle(process_info.hThread);
+  } else {
+    REXLOG_ERROR("Title relaunch failed: CreateProcessW error {}", GetLastError());
+  }
+#else
+  REXLOG_INFO("Relaunching process to complete title reboot...");
+
+  // Rebuild the original argument vector from /proc/self/cmdline (NUL-separated
+  // strings, no trailing entry). Everything that touches the heap has to happen
+  // before the fork: between fork() and execv() only async-signal-safe calls are
+  // legal, and this process is heavily multithreaded by now.
+  std::vector<std::string> args;
+  if (FILE* cmdline = std::fopen("/proc/self/cmdline", "rb")) {
+    std::string arg;
+    int c;
+    while ((c = std::fgetc(cmdline)) != EOF) {
+      if (c == '\0') {
+        args.push_back(std::move(arg));
+        arg.clear();
+      } else {
+        arg.push_back(static_cast<char>(c));
+      }
+    }
+    if (!arg.empty()) {
+      args.push_back(std::move(arg));
+    }
+    std::fclose(cmdline);
+  }
+  if (args.empty()) {
+    REXLOG_ERROR("Title relaunch failed: unable to read /proc/self/cmdline");
+  } else {
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (auto& arg : args) {
+      argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+      // /proc/self/exe survives a renamed or PATH-relative argv[0].
+      execv("/proc/self/exe", argv.data());
+      _exit(127);
+    } else if (pid < 0) {
+      REXLOG_ERROR("Title relaunch failed: fork error {}", std::strerror(errno));
+    }
+  }
+#endif
+
+  // Close this instance regardless; the fresh process (if spawned) takes over.
+  shutting_down_.store(true, std::memory_order_release);
+  app_context().QuitFromUIThread();
 }
 
 std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {

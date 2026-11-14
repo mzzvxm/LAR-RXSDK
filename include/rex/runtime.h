@@ -12,12 +12,15 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/embedded_metadata.h>
@@ -181,7 +184,36 @@ class Runtime {
   // Access the memory base pointer for recompiled code
   uint8_t* virtual_membase() const;
 
+  // --- Title relaunch (cross-process reboot) ---
+  // Some titles (e.g. after installing DLC) reboot themselves via
+  // XamLoaderLaunchTitle: they stash launch data, terminate, and expect the
+  // title to be relaunched with that data still readable. Since an in-process
+  // reset would run on dirty guest memory, relaunch is done by respawning the
+  // host process. The launch data is persisted to a sidecar file next to the
+  // executable and reloaded on the next boot.
+
+  struct RelaunchData {
+    uint32_t launch_flags = 0;
+    std::vector<uint8_t> launch_data;
+  };
+
+  // Persist launch data for a cross-process relaunch and flag the request.
+  // Called from the guest thread handling XamLoaderLaunchTitle.
+  void RequestRelaunch(uint32_t launch_flags, const std::vector<uint8_t>& launch_data);
+
+  // True once a title has requested a relaunch. The host app checks this when
+  // the main guest thread exits and respawns the process instead of quitting.
+  bool relaunch_requested() const { return relaunch_requested_.load(std::memory_order_acquire); }
+
+  // If a relaunch sidecar file exists, load and delete it. Returns the stashed
+  // data, or nullopt when there is nothing pending. Call at boot before the
+  // guest runs so XamLoaderGetLaunchData sees the data.
+  static std::optional<RelaunchData> ConsumeRelaunchData();
+
  private:
+  // Host path of the relaunch sidecar file (next to the executable).
+  static std::filesystem::path RelaunchSidecarPath();
+
   // Set up VFS: mounts game_data_root as game:/d:, update_data_root as update:
   bool SetupVfs();
 
@@ -197,6 +229,7 @@ class Runtime {
   bool tool_mode_ = false;
   PPCCodegenFlags codegen_flags_{};
   bool setup_complete_ = false;
+  std::atomic<bool> relaunch_requested_{false};
 
   std::unique_ptr<memory::Memory> memory_;
   std::unique_ptr<runtime::FunctionDispatcher> function_dispatcher_;

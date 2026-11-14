@@ -11,6 +11,7 @@
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/devices/null_device.h>
 #include <rex/filesystem/vfs.h>
@@ -81,6 +82,62 @@ std::optional<std::filesystem::path> Runtime::FindMetadataPath(
     }
   }
   return std::nullopt;
+}
+
+std::filesystem::path Runtime::RelaunchSidecarPath() {
+  return rex::filesystem::GetExecutableFolder() / ".rex_relaunch";
+}
+
+void Runtime::RequestRelaunch(uint32_t launch_flags, const std::vector<uint8_t>& launch_data) {
+  // Sidecar format: [u32 launch_flags][u32 data_size][data bytes]. Little-endian
+  // host order is fine; only this same host build reads it back.
+  auto path = RelaunchSidecarPath();
+  auto file = rex::filesystem::OpenFile(path, "wb");
+  if (!file) {
+    REXSYS_ERROR("RequestRelaunch: cannot write relaunch sidecar '{}'", path.string());
+    return;
+  }
+  uint32_t size = static_cast<uint32_t>(launch_data.size());
+  fwrite(&launch_flags, sizeof(launch_flags), 1, file);
+  fwrite(&size, sizeof(size), 1, file);
+  if (size) {
+    fwrite(launch_data.data(), 1, size, file);
+  }
+  fclose(file);
+
+  relaunch_requested_.store(true, std::memory_order_release);
+  REXSYS_INFO("Title requested relaunch (flags=0x{:08X}, {} bytes launch data)", launch_flags, size);
+}
+
+std::optional<Runtime::RelaunchData> Runtime::ConsumeRelaunchData() {
+  auto path = RelaunchSidecarPath();
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) {
+    return std::nullopt;
+  }
+
+  RelaunchData out;
+  bool ok = false;
+  if (auto* file = rex::filesystem::OpenFile(path, "rb")) {
+    uint32_t size = 0;
+    if (fread(&out.launch_flags, sizeof(out.launch_flags), 1, file) == 1 &&
+        fread(&size, sizeof(size), 1, file) == 1 && size <= 0x10000) {
+      out.launch_data.resize(size);
+      ok = size == 0 || fread(out.launch_data.data(), 1, size, file) == size;
+    }
+    fclose(file);
+  }
+
+  // Always remove the sidecar so a relaunch happens at most once.
+  std::filesystem::remove(path, ec);
+
+  if (!ok) {
+    REXSYS_WARN("ConsumeRelaunchData: relaunch sidecar was malformed, ignoring");
+    return std::nullopt;
+  }
+  REXSYS_INFO("Consumed relaunch data ({} bytes) from previous title boot",
+              out.launch_data.size());
+  return out;
 }
 
 std::optional<EmbeddedMetadataAsset> Runtime::FindEmbeddedMetadata(

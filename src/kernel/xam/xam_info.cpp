@@ -13,6 +13,7 @@
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
+#include <rex/runtime.h>
 #include <rex/types.h>
 #include <rex/string.h>
 #include <rex/system/kernel_state.h>
@@ -282,6 +283,16 @@ void XamLoaderLaunchTitle_entry(mapped_string raw_name_ptr, u32 flags) {
     }
   } else {
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
+  }
+
+  // Titles that reboot themselves (e.g. to fold newly installed DLC into their
+  // archive set) stash launch data via XamLoaderSetLaunchData, then call this to
+  // restart the title. An in-process reset would run on dirty guest memory, so
+  // persist the launch data and flag a cross-process relaunch. The host app
+  // respawns the process when the main guest thread exits; the next boot reloads
+  // the launch data so XamLoaderGetLaunchData returns it.
+  if (auto* runtime = rex::Runtime::instance()) {
+    runtime->RequestRelaunch(loader_data.launch_flags, loader_data.launch_data);
   }
 
   // This function does not return.

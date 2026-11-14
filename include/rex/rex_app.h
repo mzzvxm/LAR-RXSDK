@@ -264,6 +264,10 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
  private:
   std::function<void(PathConfig)> MakeResumeCallback();
 
+  // Respawns this process to satisfy a title relaunch request (see
+  // Runtime::RequestRelaunch). Never returns on success.
+  void RelaunchProcess();
+
   // Stand up the ImGui overlay stack (drawer, F3/Backtick/F4 binds, dialogs)
   // independently of how the presenter/drawer were obtained. `presenter` may be
   // null (detached mode).
