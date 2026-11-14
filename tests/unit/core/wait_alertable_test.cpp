@@ -140,7 +140,10 @@ TEST_CASE("alertable waits - a callback queued before the wait is run by it", "[
 
 TEST_CASE("alertable waits - a wait with a timeout shorter than a millisecond ends", "[thread][alert]") {
   auto never = Event::CreateAutoResetEvent(false);
-  WaitHandle* handles[] = {never.get(), never.get()};
+  // Two different handles: a handle listed twice is not a valid wait (the Windows API forbids it,
+  // and the POSIX scan would try to lock the same mutex twice and never get to its timeout).
+  auto never_too = Event::CreateAutoResetEvent(false);
+  WaitHandle* handles[] = {never.get(), never_too.get()};
   auto start = std::chrono::steady_clock::now();
   CHECK(rex::thread::Wait(never.get(), true, 0ms) == WaitResult::kTimeout);
   CHECK(rex::thread::Wait(never.get(), true, 1ms) == WaitResult::kTimeout);
