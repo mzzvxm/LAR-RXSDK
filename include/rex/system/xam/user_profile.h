@@ -249,7 +249,9 @@ class UserProfile {
   // XUID, before the guest can ask for it.
   void set_xuid(uint64_t xuid) { xuid_ = xuid; }
   std::string name() const { return name_; }
-  uint32_t signin_state() const { return 1; }
+  // 2 = eXUserSigninState_SignedInToLive. Titles gate their Xbox LIVE modes
+  // (online play, user content) on it, and the online relay stands in for LIVE.
+  uint32_t signin_state() const { return 2; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
