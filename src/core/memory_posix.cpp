@@ -9,6 +9,7 @@
  * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -43,6 +44,16 @@
 #else
 #define rex_mmap64 mmap64
 #define rex_ftruncate64 ftruncate64
+#endif
+
+// The PROCMAP_QUERY lookup (Linux 6.11+) is built for every Linux target but Android. The kernel's
+// definitions are written out below instead of taken from <linux/fs.h>, which older build headers
+// do not have (the Linux kit's Ubuntu 22.04 sysroot has the 5.15 ones).
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
+#define REX_HAS_PROCMAP_QUERY 1
+#include <sys/ioctl.h>
+#else
+#define REX_HAS_PROCMAP_QUERY 0
 #endif
 
 #if REX_PLATFORM_ANDROID
@@ -170,9 +181,97 @@ static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
   return out.start < out.end;
 }
 
+#if REX_HAS_PROCMAP_QUERY
+// struct procmap_query, PROCMAP_QUERY and the vma_flags bits as the kernel defines them (linux/fs.h,
+// Linux 6.11). This is kernel ABI: the layout does not change, and the size field lets the kernel
+// accept a struct of any size it knows.
+struct ProcmapQuery {
+  uint64_t size;
+  uint64_t query_flags;
+  uint64_t query_addr;
+  uint64_t vma_start;
+  uint64_t vma_end;
+  uint64_t vma_flags;
+  uint64_t vma_page_size;
+  uint64_t vma_offset;
+  uint64_t inode;
+  uint32_t dev_major;
+  uint32_t dev_minor;
+  uint32_t vma_name_size;
+  uint32_t build_id_size;
+  uint64_t vma_name_addr;
+  uint64_t build_id_addr;
+};
+static_assert(sizeof(ProcmapQuery) == 104, "struct procmap_query changed");
+constexpr unsigned long kProcmapQuery = _IOWR('f', 17, ProcmapQuery);
+static_assert(kProcmapQuery == 0xC0686611UL, "PROCMAP_QUERY changed");
+constexpr uint64_t kProcmapVmaReadable = 0x01;
+constexpr uint64_t kProcmapVmaWritable = 0x02;
+constexpr uint64_t kProcmapVmaExecutable = 0x04;
+constexpr uint64_t kProcmapVmaShared = 0x08;
+
+// Looks up the mapping containing the address with the PROCMAP_QUERY ioctl
+// (Linux 6.11+): one lookup rather than reading and parsing all of
+// /proc/self/maps, which has thousands of lines once guest memory is watched
+// page by page, and which the access violation handler queries on every write
+// watch fault while holding the global critical region. Returns 1 if found, 0 if
+// the address is not mapped, -1 if the kernel lacks the ioctl.
+static int QueryMapEntry(uintptr_t addr, LinuxMapEntry& out_entry) {
+  static std::atomic<bool> unsupported{false};
+  if (unsupported.load(std::memory_order_relaxed)) {
+    return -1;
+  }
+  // One descriptor per thread: concurrent queries never share one.
+  struct MapsFile {
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    ~MapsFile() {
+      if (fd >= 0) {
+        close(fd);
+      }
+    }
+  };
+  thread_local MapsFile maps;
+  if (maps.fd < 0) {
+    return -1;
+  }
+  ProcmapQuery query = {};
+  query.size = sizeof(query);
+  query.query_addr = addr;
+  if (ioctl(maps.fd, kProcmapQuery, &query) != 0) {
+    if (errno == ENOENT) {
+      return 0;
+    }
+    if (errno == ENOTTY && !unsupported.exchange(true, std::memory_order_relaxed)) {
+      REXSYS_INFO(
+          "memory: this kernel has no PROCMAP_QUERY (Linux 6.11+); page protection is read from "
+          "/proc/self/maps, which is slow once write watches split guest memory");
+    }
+    return -1;
+  }
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true, std::memory_order_relaxed)) {
+    REXSYS_INFO("memory: page protection is looked up with PROCMAP_QUERY");
+  }
+  out_entry = LinuxMapEntry{};
+  out_entry.start = uintptr_t(query.vma_start);
+  out_entry.end = uintptr_t(query.vma_end);
+  out_entry.perms[0] = (query.vma_flags & kProcmapVmaReadable) ? 'r' : '-';
+  out_entry.perms[1] = (query.vma_flags & kProcmapVmaWritable) ? 'w' : '-';
+  out_entry.perms[2] = (query.vma_flags & kProcmapVmaExecutable) ? 'x' : '-';
+  out_entry.perms[3] = (query.vma_flags & kProcmapVmaShared) ? 's' : 'p';
+  return 1;
+}
+#endif  // REX_HAS_PROCMAP_QUERY
+
 // Find the mapping entry in /proc/self/maps that contains the given address
 static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+#if REX_HAS_PROCMAP_QUERY
+  int queried = QueryMapEntry(addr, out_entry);
+  if (queried >= 0) {
+    return queried != 0;
+  }
+#endif  // REX_HAS_PROCMAP_QUERY
   std::ifstream maps("/proc/self/maps");
   if (!maps.is_open())
     return false;
@@ -199,6 +298,31 @@ static bool IsRangeFullyMapped(void* base_address, size_t length) {
   if (end < begin) {  // overflow check
     return false;
   }
+
+#if REX_HAS_PROCMAP_QUERY
+  // One kernel lookup per mapping that the range crosses instead of reading all of
+  // /proc/self/maps. This runs for every commit on a reserved range.
+  {
+    uintptr_t covered = begin;
+    while (covered < end) {
+      LinuxMapEntry e;
+      const int queried = QueryMapEntry(covered, e);
+      if (queried < 0) {
+        break;  // the kernel cannot answer: read the file below
+      }
+      if (queried == 0) {
+        return false;  // a gap
+      }
+      if (e.end <= covered) {
+        break;  // not possible for a mapping that covers the address: do not loop on it
+      }
+      covered = e.end;
+    }
+    if (covered >= end) {
+      return true;
+    }
+  }
+#endif  // REX_HAS_PROCMAP_QUERY
 
   std::ifstream maps("/proc/self/maps");
   if (!maps.is_open())

@@ -3,6 +3,7 @@
 add_executable(unit_tests
     test_memory.cpp
     memory/heap_allocation_test.cpp
+    memory/query_protect_test.cpp
     kernel/object_table_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
