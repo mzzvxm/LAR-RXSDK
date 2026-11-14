@@ -125,7 +125,10 @@ TEST_CASE("Unchanged files keep their modification time", "[codegen_writer]") {
   CodegenWriter second(*fx.ctx);
   REQUIRE(second.write(false));
 
-  CHECK(fs::last_write_time(probe) == before);
+  // Compared as a bool: with libc++ the file clock's rep is __int128, which Catch2 cannot print
+  // when it stringifies the two operands of a failed or reconstructed comparison.
+  const bool same_time = fs::last_write_time(probe) == before;
+  CHECK(same_time);
 }
 
 TEST_CASE("Stale generated files are swept after the write", "[codegen_writer]") {
