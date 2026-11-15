@@ -409,7 +409,27 @@ class PosixConditionBase {
     // the wait registered itself (AlertableWait). So an alertable wait never comes here with one.
     assert_true(!alert || handles.size() > 1);
 
-    if (handles.size() == 1) {
+    // A handle listed more than once is waited on once. The scan below locks each mutex with
+    // trylock, and a second lock of the same mutex by the same thread never succeeds, so a repeated
+    // handle used to make the scan retry for ever, past any timeout. `distinct` holds the index of
+    // the first occurrence of every handle. A wait-any still returns the lowest index of a signaled
+    // handle; a wait-all takes each handle once.
+    std::vector<size_t> distinct;
+    distinct.reserve(handles.size());
+    for (size_t i = 0; i < handles.size(); ++i) {
+      bool seen = false;
+      for (size_t first : distinct) {
+        if (handles[first] == handles[i]) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) {
+        distinct.push_back(i);
+      }
+    }
+
+    if (distinct.size() == 1 && !alert) {
       auto result = handles[0]->Wait(timeout);
       return std::make_pair(result, 0);
     }
@@ -426,6 +446,10 @@ class PosixConditionBase {
       ~WaiterGuard() { n.fetch_sub(1, std::memory_order_seq_cst); }
     } waiter_guard(ms.waiters);
 
+    constexpr auto kStuckLockSpin = std::chrono::milliseconds(50);
+    bool lock_spinning = false;  // the scan has been failing to lock since lock_spin_start
+    std::chrono::steady_clock::time_point lock_spin_start;
+
     while (true) {
       const uint64_t seen_epoch = ms.epoch.load(std::memory_order_seq_cst);
       size_t first_signaled = std::numeric_limits<size_t>::max();
@@ -433,9 +457,9 @@ class PosixConditionBase {
       bool all_locked = true;
 
       std::vector<std::unique_lock<std::mutex>> locks;
-      locks.reserve(handles.size());
+      locks.reserve(distinct.size());
 
-      for (size_t i = 0; i < handles.size(); ++i) {
+      for (size_t i : distinct) {
 #if REX_PLATFORM_LINUX
         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
@@ -458,10 +482,24 @@ class PosixConditionBase {
       }
 
       if (!all_locked) {
+        // Another thread holds one of the mutexes for a moment (often a signaler about to set the
+        // state we wait for): scan again, as the wait always did, whatever the timeout; giving up
+        // here would report a timeout for a handle that is about to be, or already is, signaled.
+        // Safety valve only: when the deadline has passed AND this lock attempt has been spinning
+        // for kStuckLockSpin, something holds the mutex for good, and the wait ends instead of
+        // hanging.
         locks.clear();
+        const auto now = std::chrono::steady_clock::now();
+        if (!lock_spinning) {
+          lock_spinning = true;
+          lock_spin_start = now;
+        } else if (now >= end_time && now - lock_spin_start >= kStuckLockSpin) {
+          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+        }
         std::this_thread::yield();
         continue;
       }
+      lock_spinning = false;
 
       if (wait_all) {
         bool all_signaled = true;
@@ -487,7 +525,7 @@ class PosixConditionBase {
 
       if (condition_met) {
         if (wait_all) {
-          for (size_t i = 0; i < handles.size(); ++i) {
+          for (size_t i : distinct) {
             handles[i]->post_execution();
           }
         } else {
