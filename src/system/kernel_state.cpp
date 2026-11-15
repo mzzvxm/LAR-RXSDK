@@ -785,6 +785,15 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
               recomp->pe_name, image_info->image_base,
               image_info->image_base + image_info->image_size, xex->base_address(),
               xex->base_address() + xex->image_size());
+        } else if (image_info->codegen_flags.exact_e0_view !=
+                   emulator_->codegen_flags().exact_e0_view) {
+          // One guest memory layout serves every image: the 0xE0000000 view is either at its exact
+          // offset for all of them or for none.
+          REXSYS_ERROR(
+              "Recompiled module '{}' was generated with exact_e0_view={} but the main image with "
+              "{}; generate every image with the same setting",
+              recomp->pe_name, image_info->codegen_flags.exact_e0_view,
+              emulator_->codegen_flags().exact_e0_view);
         } else if (!function_dispatcher_->InitializeFunctionTable(
                        image_info->code_base, image_info->code_size, image_info->image_base,
                        image_info->image_size)) {

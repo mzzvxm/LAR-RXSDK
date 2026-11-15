@@ -35,6 +35,9 @@ struct PPCCodegenFlags {
   bool cr_as_local = false;
   bool non_argument_as_local = false;
   bool non_volatile_as_local = false;
+  /// The generated code skips the +0x1000 add for guest addresses at or above 0xE0000000 (Windows),
+  /// so the runtime must map that view at its exact offset. See RecompilerConfig::exactE0View.
+  bool exact_e0_view = false;
 };
 
 /// PPC image layout passed from the generated config header into ReXApp.

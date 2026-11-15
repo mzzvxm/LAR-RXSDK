@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <utility>
 
@@ -42,6 +43,19 @@ REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
 
 namespace rex::memory {
+
+#if REX_PLATFORM_WIN32
+namespace detail {
+namespace {
+// 0x1000 until Memory::Initialize maps the 0xE0000000 view at its exact offset.
+std::atomic<uint32_t> g_e0_host_offset{0x1000u};
+}  // namespace
+
+u32 E0HostOffset() noexcept {
+  return g_e0_host_offset.load(std::memory_order_relaxed);
+}
+}  // namespace detail
+#endif
 
 uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
   return rex::round_up(value, page_size) >> page_size_shift;
@@ -131,7 +145,23 @@ Memory::~Memory() {
   physical_membase_ = nullptr;
 }
 
-bool Memory::Initialize() {
+bool Memory::Initialize(bool exact_e0_view) {
+#if REX_PLATFORM_WIN32
+  exact_e0_view_ = exact_e0_view;
+  if (exact_e0_view_ && !rex::memory::MapFileViewTakesPageOffsets()) {
+    // The generated code has no +0x1000 test, so there is no old layout to fall back to.
+    REXSYS_ERROR(
+        "This game was generated with exact_e0_view and needs Windows 10 version 1803 or later "
+        "(placeholder views: VirtualAlloc2 and MapViewOfFile3). Generate it again without "
+        "exact_e0_view to run it on this Windows.");
+    return false;
+  }
+#else
+  // Linux and macOS x86_64 already map that view exactly; macOS arm64 cannot (16 KB pages) and its
+  // generated code keeps the add. Nothing to choose there.
+  exact_e0_view_ = false;
+  (void)exact_e0_view;
+#endif
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
   // Create main page file-backed mapping. This is all reserved but
@@ -170,12 +200,24 @@ bool Memory::Initialize() {
   }
   if (!mapping_base_) {
     REXSYS_ERROR("Unable to find a continuous block in the 64bit address space.");
+    if (exact_e0_view_) {
+      REXSYS_ERROR(
+          "(exact_e0_view: the placeholder mapping of the 0xE0000000 view may have been refused; "
+          "generate the game again without exact_e0_view to run it without that mapping)");
+    }
     assert_always();
     return false;
   }
 #endif
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
+
+  // Where the 0xE0000000 view starts in the host's address space relative to its guest address:
+  // 4 KB short when the file offset had to be rounded to the allocation granularity.
+  e0_host_offset_ = (system_allocation_granularity_ > 0x1000 && !exact_e0_view_) ? 0x1000u : 0u;
+#if REX_PLATFORM_WIN32
+  detail::g_e0_host_offset.store(e0_host_offset_, std::memory_order_relaxed);
+#endif
 
   REXSYS_INFO("Guest memory arena mapped: virtual base 0x{:016X}, physical base 0x{:016X}",
               reinterpret_cast<uintptr_t>(virtual_membase_),
@@ -221,6 +263,19 @@ bool Memory::Initialize() {
   rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
                           rex::memory::AllocationType::kCommit,
                           rex::memory::PageAccess::kReadWrite);
+
+  if (exact_e0_view_) {
+    if (!VerifyExactE0View()) {
+      REXSYS_ERROR(
+          "The 0xE0000000 view of guest memory is not at its exact 4 KB offset on this Windows, "
+          "but the game was generated with exact_e0_view and cannot run without it. Generate it "
+          "again without exact_e0_view.");
+      return false;
+    }
+    REXSYS_INFO(
+        "Guest memory: 0xE0000000 view mapped at its exact 4 KB file offset (no +0x1000 add in "
+        "generated code)");
+  }
 
   // Install MMIO handler for physical address translation and MMIO ranges
   mmio_handler_ = runtime::MMIOHandler::Install(
@@ -361,13 +416,18 @@ int Memory::MapViewsMac() {
 int Memory::MapViews(uint8_t* mapping_base) {
   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
-  // side if system allocation granularity is bigger than 4 KB.
+  // side if system allocation granularity is bigger than 4 KB, unless exact_e0_view_ asks for
+  // the exact offset: MapFileView then maps that view through a placeholder (Windows) and the
+  // other views, whose offsets are multiples of 64 KB, are mapped as before.
   uint64_t granularity_mask = ~uint64_t(system_allocation_granularity_ - 1);
   for (size_t n = 0; n < rex::countof(map_info); n++) {
+    const uint64_t file_offset = exact_e0_view_
+                                     ? map_info[n].target_address
+                                     : (map_info[n].target_address & granularity_mask);
     views_.all_views[n] = reinterpret_cast<uint8_t*>(rex::memory::MapFileView(
         mapping_, mapping_base + map_info[n].virtual_address_start,
         map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1,
-        rex::memory::PageAccess::kReadWrite, map_info[n].target_address & granularity_mask));
+        rex::memory::PageAccess::kReadWrite, file_offset));
     if (!views_.all_views[n]) {
       // Failed, so bail and try again.
       UnmapViews();
@@ -375,6 +435,45 @@ int Memory::MapViews(uint8_t* mapping_base) {
     }
   }
   return 0;
+}
+
+bool Memory::VerifyExactE0View() {
+  // Guest 0xE0000000 + x is physical 0x1000 + x (see map_info), so a byte written through one view
+  // has to appear 4 KB further on in the other.
+  const size_t page = system_page_size_;
+  volatile uint8_t* via_e0 = virtual_membase_ + 0xE0000000u;
+  volatile uint8_t* via_physical = physical_membase_ + 0x1000u;
+
+  // The raw physical view was committed whole above; the 0xE0 view commits per page.
+  if (!rex::memory::AllocFixed(const_cast<uint8_t*>(via_e0), page,
+                               rex::memory::AllocationType::kCommit,
+                               rex::memory::PageAccess::kReadWrite)) {
+    REXSYS_ERROR("Could not commit the first page of the 0xE0000000 view");
+    return false;
+  }
+
+  constexpr size_t kProbeBytes = 64;
+  uint8_t saved[kProbeBytes];
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    saved[i] = via_physical[i];
+  }
+  bool same = true;
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    via_e0[i] = uint8_t(0xA5 ^ (i * 7));
+  }
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    same = same && via_physical[i] == uint8_t(0xA5 ^ (i * 7));
+  }
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    via_physical[i] = uint8_t(0x3C ^ (i * 11));
+  }
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    same = same && via_e0[i] == uint8_t(0x3C ^ (i * 11));
+  }
+  for (size_t i = 0; i < kProbeBytes; ++i) {
+    via_physical[i] = saved[i];
+  }
+  return same;
 }
 
 void Memory::UnmapViews() {
@@ -1883,12 +1982,9 @@ PhysicalHeap::~PhysicalHeap() = default;
 void PhysicalHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type,
                               uint32_t heap_base, uint32_t heap_size, uint32_t page_size,
                               VirtualHeap* parent_heap) {
-  uint32_t host_address_offset;
-  if (heap_base >= 0xE0000000 && rex::memory::allocation_granularity() > 0x1000) {
-    host_address_offset = 0x1000;
-  } else {
-    host_address_offset = 0;
-  }
+  // The 0xE0000000 heap is the one whose view can sit 4 KB short of its guest address; Memory
+  // knows whether it mapped it exactly.
+  uint32_t host_address_offset = heap_base >= 0xE0000000 ? memory->e0_host_offset() : 0;
 
   BaseHeap::Initialize(memory, membase, heap_type, heap_base, heap_size, page_size,
                        host_address_offset);
