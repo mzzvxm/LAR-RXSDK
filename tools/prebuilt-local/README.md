@@ -99,6 +99,12 @@ The WSL VM gets half of the PC's RAM by default; if the Linux build runs out of 
   sysroot (an Ubuntu 22.04 sysroot, glibc 2.35), so the host should not change the result. The kit goes to
   `/opt/larecomp-kit` when this user can make it (directly, or with `sudo -n`), else `~/larecomp-kit`; the folder only
   appears in the kit's own `clang.cfg` and in the rpath of build-time libraries.
+- **wayland-scanner (Linux)**: SDL's configure runs the kit's `sysroot/hostbin/wayland-scanner`, an Ubuntu 22.04 binary that
+  needs `libxml2.so.2`; Ubuntu 26.04 has only `libxml2.so.16`, so it does not run, and SDL then drops its Wayland driver
+  without an error (the game on a Wayland desktop: "wayland not available"). `build-linux.sh` tests the kit's scanner
+  before the configure and passes `-DWAYLAND_SCANNER=/usr/bin/wayland-scanner` (package `libwayland-bin`) when it does not
+  run, and stops when neither runs. Step 6 refuses to pack an SDK whose `libSDL3.a` has no Wayland objects, whose
+  `SDL_build_config.h` lacks `SDL_VIDEO_DRIVER_WAYLAND`, or whose `librexruntime.so` does not name `wl_display_connect`.
 - **The Linux json** is written with `python3` (the WSL distro has no `jq`), the same keys in the same order.
 - **Version number**: the SDK's version comes from `git describe` over the tags; the public repository has no tags, so the
   workflow's `fetch-tags` finds none and the launcher's own clone finds none either. These scripts clone the public
