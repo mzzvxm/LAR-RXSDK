@@ -52,10 +52,13 @@ void InputSystem::Shutdown() {
   devices_.clear();
   device_owners_.clear();
   drivers_.clear();
+  driver_list_generations_.clear();
+  device_list_known_ = false;
 }
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
   drivers_.push_back(std::move(driver));
+  device_list_known_ = false;
 }
 
 void InputSystem::AttachWindow(rex::ui::Window* window) {
@@ -78,7 +81,29 @@ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignme
   }
 }
 
+bool InputSystem::DeviceListUnchanged() {
+  bool unchanged = device_list_known_ && driver_list_generations_.size() == drivers_.size();
+  driver_list_generations_.resize(drivers_.size());
+  for (size_t i = 0; i < drivers_.size(); i++) {
+    const std::optional<uint64_t> generation = drivers_[i]->DeviceListGeneration();
+    // A driver with no answer has to be asked every time.
+    if (!generation || *generation != driver_list_generations_[i]) {
+      unchanged = false;
+    }
+    driver_list_generations_[i] = generation.value_or(0);
+  }
+  return unchanged;
+}
+
 void InputSystem::RefreshDevices() {
+  // The guest asks about every user several times a frame and a device list almost never moves.
+  // The numbers are read before the enumeration below, so a change that lands in between costs
+  // one extra refresh on the next call and is never missed.
+  if (DeviceListUnchanged()) {
+    return;
+  }
+  device_list_known_ = true;
+
   std::vector<DeviceInfo> seen;
   std::vector<InputDriver*> owners;
   std::vector<DeviceInfo> enumerated;

@@ -22,6 +22,8 @@ class NopInputDriver final : public InputDriver {
   X_STATUS Setup() override;
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  // The stand-in is always listed and never changes.
+  std::optional<uint64_t> DeviceListGeneration() const override { return 0; }
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;

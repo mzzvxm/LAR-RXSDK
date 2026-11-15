@@ -35,6 +35,8 @@ class MnkInputDriver final : public InputDriver,
   X_STATUS Setup() override;
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  // The one device is listed while mnk_mode is on.
+  std::optional<uint64_t> DeviceListGeneration() const override { return IsEnabled() ? 1 : 0; }
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;

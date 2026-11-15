@@ -49,8 +49,12 @@ class InputSystem : public system::IInputSystem {
 
  private:
   /// Re-enumerates every driver and notifies the assignment when the set
-  /// changed.
+  /// changed. Returns at once while no driver reports a change
+  /// (InputDriver::DeviceListGeneration), which is nearly every call.
   void RefreshDevices();
+  /// True when no driver's list can have changed since the last refresh. Remembers the numbers it
+  /// read, so the refresh that follows a change runs once.
+  bool DeviceListUnchanged();
   InputDriver* DriverForDevice(DeviceId id);
   const DeviceInfo* DeviceInfoFor(DeviceId id) const;
 
@@ -65,6 +69,10 @@ class InputSystem : public system::IInputSystem {
   // does not renumber pad two.
   std::vector<DeviceInfo> devices_;
   std::vector<InputDriver*> device_owners_;
+
+  // What each driver's DeviceListGeneration() said when RefreshDevices last looked.
+  std::vector<uint64_t> driver_list_generations_;
+  bool device_list_known_ = false;
 };
 
 /// Create a default InputSystem with SDL + NOP drivers.
