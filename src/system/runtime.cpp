@@ -116,7 +116,7 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
 
   // Create memory system first
   memory_ = std::make_unique<memory::Memory>();
-  if (!memory_->Initialize()) {
+  if (!memory_->Initialize(config.exact_e0_view)) {
     return fail(X_STATUS_UNSUCCESSFUL, "memory init failed");
   }
 
@@ -198,6 +198,9 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
 }
 
 X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig config) {
+  // The generated code was compiled with or without the +0x1000 test for the 0xE0000000 view; the
+  // guest memory has to be laid out the way that code expects.
+  config.exact_e0_view = image_info.codegen_flags.exact_e0_view;
   X_STATUS status = Setup(std::move(config));
   if (status != X_STATUS_SUCCESS) {
     return status;
@@ -249,9 +252,10 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
   const auto& flags = image_info.codegen_flags;
   REXSYS_DEBUG(
       "Codegen config: skip_lr={} skip_msr={} ctr={} xer={} cr={} reserved={} "
-      "non_argument={} non_volatile={}",
+      "non_argument={} non_volatile={} exact_e0_view={}",
       flags.skip_lr, flags.skip_msr, flags.ctr_as_local, flags.xer_as_local, flags.cr_as_local,
-      flags.reserved_as_local, flags.non_argument_as_local, flags.non_volatile_as_local);
+      flags.reserved_as_local, flags.non_argument_as_local, flags.non_volatile_as_local,
+      flags.exact_e0_view);
 
   return X_STATUS_SUCCESS;
 }

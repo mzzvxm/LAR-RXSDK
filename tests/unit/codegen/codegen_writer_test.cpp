@@ -255,3 +255,63 @@ TEST_CASE("Every name a recomp file calls is declared in its header", "[codegen_
     }
   }
 }
+
+TEST_CASE("exact_e0_view is off unless the config turns it on", "[codegen_writer]") {
+  WriterFixture fx("e0view_off");
+
+  CodegenWriter writer(*fx.ctx);
+  REQUIRE(writer.write(false));
+
+  // Off: the generated header defines no marker (the template's guard only names it) and the image
+  // says false, so the code is what it was before the option existed.
+  const auto pch = ReadAll(fx.outputDir() / "testproj_pch.h");
+  CHECK(pch.find("#define REX_CONFIG_EXACT_E0_VIEW") == std::string::npos);
+  CHECK(pch.find("REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)") !=
+        std::string::npos);
+  const auto init = ReadAll(fx.outputDir() / "testproj_init.cpp");
+  CHECK(init.find(".exact_e0_view = false,") != std::string::npos);
+}
+
+TEST_CASE("exact_e0_view turns the +0x1000 test off on Windows and tells the runtime",
+          "[codegen_writer]") {
+  WriterFixture fx("e0view_on");
+  fx.ctx->Config().exactE0View = true;
+
+  CodegenWriter writer(*fx.ctx);
+  REQUIRE(writer.write(false));
+
+  // The marker comes before every SDK header, so a translation unit that includes the generated
+  // header first sees it; the Windows branch of REX_PHYS_HOST_OFFSET is guarded by it.
+  const auto pch = ReadAll(fx.outputDir() / "testproj_pch.h");
+  const auto marker = pch.find("#define REX_CONFIG_EXACT_E0_VIEW");
+  REQUIRE(marker != std::string::npos);
+  CHECK(marker < pch.find("#include <rex/ppc.h>"));
+  CHECK(pch.find("REX_PLATFORM_WIN32 && !defined(REX_CONFIG_EXACT_E0_VIEW)") != std::string::npos);
+  const auto init = ReadAll(fx.outputDir() / "testproj_init.cpp");
+  CHECK(init.find(".exact_e0_view = true,") != std::string::npos);
+}
+
+TEST_CASE("exact_e0_view is read from the TOML", "[codegen_writer]") {
+  const auto dir = fs::temp_directory_path() / "rexglue_writer_test" / "e0view_toml";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  {
+    std::ofstream out(dir / "on.toml");
+    out << "file_path = \"game.xex\"\nexact_e0_view = true\n";
+  }
+  {
+    std::ofstream out(dir / "off.toml");
+    out << "file_path = \"game.xex\"\n";
+  }
+
+  RecompilerConfig on;
+  REQUIRE(on.Load((dir / "on.toml").string()));
+  CHECK(on.exactE0View);
+
+  RecompilerConfig off;
+  REQUIRE(off.Load((dir / "off.toml").string()));
+  CHECK_FALSE(off.exactE0View);
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

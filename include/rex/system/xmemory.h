@@ -34,17 +34,31 @@ namespace rex::memory::detail {
 /// MapViewOfFileEx rounds down to 64KB; macOS arm64 uses 16KB pages), so guest
 /// accesses must add it back. This must agree with Memory::MapViews, which only
 /// sets host_address_offset when allocation_granularity() > 0x1000:
-///   - Windows:        64KB granularity  -> offset
+///   - Windows:        64KB granularity  -> offset, unless the title was generated with
+///                     exact_e0_view: Memory::Initialize then maps the view at its exact
+///                     4KB offset (placeholder view) and the offset is 0
 ///   - macOS arm64:    16KB granularity  -> offset
 ///   - macOS x86_64:    4KB granularity  -> no offset
 ///   - Linux (any):     4KB granularity  -> no offset (mmap handles it natively)
+#if REX_PLATFORM_WIN32
+/// The Windows offset of the 0xE0000000 view: 0x1000, or 0 once Memory::Initialize has mapped
+/// the view at its exact offset. It is set while the memory initialises, before any guest thread
+/// runs. A function, not a variable, so that the application and the GPU plugin read the copy
+/// that rexruntime owns.
+u32 E0HostOffset() noexcept;
+
+inline u32 PhysicalHostOffset(u32 guest_addr) noexcept {
+  return (guest_addr >= 0xE0000000u) ? E0HostOffset() : 0u;
+}
+#else
 constexpr u32 PhysicalHostOffset([[maybe_unused]] u32 guest_addr) noexcept {
-#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
+#if REX_PLATFORM_MAC && defined(__aarch64__)
   return (guest_addr >= 0xE0000000u) ? 0x1000u : 0u;
 #else
   return 0u;
 #endif
 }
+#endif
 
 }  // namespace rex::memory::detail
 
@@ -368,7 +382,16 @@ class Memory {
   // Initializes the memory system.
   // This may fail if the host address space could not be reserved or the
   // mapping to the file system fails.
-  bool Initialize();
+  //
+  // exact_e0_view (Windows only, the title was generated with exact_e0_view): map the 0xE0000000
+  // view at its exact 4 KB file offset, so a guest address is base + address everywhere. It fails
+  // where that cannot be done (Windows before 10 version 1803, or the mapping is refused); the
+  // generated code has no other way to reach that view. Ignored on the other platforms.
+  bool Initialize(bool exact_e0_view = false);
+
+  // Offset added to a guest address in the 0xE0000000 range to get its host address (see
+  // detail::PhysicalHostOffset): 0x1000 when the view is mapped from a rounded file offset, else 0.
+  uint32_t e0_host_offset() const { return e0_host_offset_; }
 
   // Resets all memory to zero and resets all allocations.
   void Reset();
@@ -563,6 +586,9 @@ class Memory {
 #endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
+  // Writes through the 0xE0000000 view and reads through the raw physical view 4 KB in, and the
+  // other way round: true when they are the same memory.
+  bool VerifyExactE0View();
 
   static uint32_t HostToGuestVirtualThunk(const void* context, const void* host_address);
 
@@ -575,6 +601,8 @@ class Memory {
   std::filesystem::path file_name_;
   uint32_t system_page_size_ = 0;
   uint32_t system_allocation_granularity_ = 0;
+  bool exact_e0_view_ = false;
+  uint32_t e0_host_offset_ = 0;
   uint8_t* virtual_membase_ = nullptr;
   uint8_t* physical_membase_ = nullptr;
 

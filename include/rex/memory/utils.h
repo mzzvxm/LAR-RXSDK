@@ -148,9 +148,20 @@ constexpr FileMappingHandle kFileMappingHandleInvalid = -1;
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit);
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path);
+// Maps length bytes of the file mapping at base_address (any address when it is null).
+// file_offset has to be a multiple of allocation_granularity(), except where
+// MapFileViewTakesPageOffsets() is true: then a multiple of page_size() is enough, which is what
+// the 0xE0000000 view of the guest arena needs (4 KB into the file) on Windows, whose
+// granularity is 64 KB.
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset);
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length);
+
+// Whether MapFileView accepts a file offset that is only page-aligned. Always true on POSIX (a
+// file offset needs page alignment there, whatever the granularity reports). On Windows it needs
+// placeholder views (VirtualAlloc2 and MapViewOfFile3, Windows 10 version 1803 or later), which
+// are looked up at run time, so an older Windows still starts the program and gets false here.
+bool MapFileViewTakesPageOffsets();
 
 inline size_t hash_combine(size_t seed) {
   return seed;

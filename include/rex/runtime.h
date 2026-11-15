@@ -72,6 +72,9 @@ struct RuntimeConfig {
   std::function<std::unique_ptr<system::IInputSystem>(bool tool_mode)> input_factory;
   std::function<void(Runtime*, system::KernelState*)> kernel_init;
   bool tool_mode = false;
+  // Map the 0xE0000000 view of guest memory at its exact 4 KB file offset (Windows). Setup(image)
+  // fills it in from the image's codegen flags; the generated code decides, not the application.
+  bool exact_e0_view = false;
 };
 
 /// Helper macros for populating RuntimeConfig with concrete backends.

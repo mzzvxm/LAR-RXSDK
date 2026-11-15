@@ -779,6 +779,10 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
   return result;
 }
 
+bool MapFileViewTakesPageOffsets() {
+  return true;
+}
+
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
   const bool unmapped = munmap(base_address, length) == 0;
 #if REX_PLATFORM_LINUX

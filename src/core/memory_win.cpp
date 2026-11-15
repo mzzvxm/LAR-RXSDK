@@ -192,6 +192,104 @@ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::pat
   CloseHandle(reinterpret_cast<HANDLE>(handle));
 }
 
+#ifdef REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS
+namespace {
+
+// MapViewOfFileEx wants a file offset that is a multiple of the 64 KB allocation granularity. A
+// view that has to start 4 KB into the file (the guest's 0xE0000000 range, see
+// Memory::MapViews) is mapped into a placeholder instead: with MEM_REPLACE_PLACEHOLDER the 64 KB
+// rule for the offset and the base address no longer applies and a page-aligned offset is enough.
+// The same technique is used by the ShiftGlue (bfbb2e6c) and ReIGlue (0405) forks, which are BSD-3
+// like this file.
+//
+// VirtualAlloc2 and MapViewOfFile3 exist from Windows 10 version 1803. They are looked up at run
+// time, so the program still starts on an older Windows and only learns it cannot map such a view.
+#ifndef MEM_RESERVE_PLACEHOLDER
+#define MEM_RESERVE_PLACEHOLDER 0x00040000
+#endif
+#ifndef MEM_REPLACE_PLACEHOLDER
+#define MEM_REPLACE_PLACEHOLDER 0x00004000
+#endif
+
+using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE process, PVOID base_address, SIZE_T size,
+                                       ULONG allocation_type, ULONG page_protection,
+                                       PVOID extended_parameters, ULONG parameter_count);
+using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE file_mapping, HANDLE process, PVOID base_address,
+                                        ULONG64 offset, SIZE_T view_size, ULONG allocation_type,
+                                        ULONG page_protection, PVOID extended_parameters,
+                                        ULONG parameter_count);
+
+struct PlaceholderApi {
+  VirtualAlloc2Fn virtual_alloc2 = nullptr;
+  MapViewOfFile3Fn map_view_of_file3 = nullptr;
+};
+
+const PlaceholderApi& GetPlaceholderApi() {
+  static const PlaceholderApi api = [] {
+    PlaceholderApi found;
+    for (const wchar_t* module_name : {L"kernelbase.dll", L"kernel32.dll"}) {
+      HMODULE module = GetModuleHandleW(module_name);
+      if (!module) {
+        continue;
+      }
+      found.virtual_alloc2 =
+          reinterpret_cast<VirtualAlloc2Fn>(GetProcAddress(module, "VirtualAlloc2"));
+      found.map_view_of_file3 =
+          reinterpret_cast<MapViewOfFile3Fn>(GetProcAddress(module, "MapViewOfFile3"));
+      if (found.virtual_alloc2 && found.map_view_of_file3) {
+        return found;
+      }
+    }
+    return PlaceholderApi{};
+  }();
+  return api;
+}
+
+void* MapFileViewIntoPlaceholder(FileMappingHandle handle, void* base_address, size_t length,
+                                 PageAccess access, size_t file_offset) {
+  const PlaceholderApi& api = GetPlaceholderApi();
+  if (!api.virtual_alloc2 || !api.map_view_of_file3) {
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return nullptr;
+  }
+  // The placeholder's size and the view's have to match, and both are whole pages.
+  if (file_offset % page_size() != 0 || length % page_size() != 0) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return nullptr;
+  }
+  HANDLE process = GetCurrentProcess();
+  void* placeholder = api.virtual_alloc2(process, base_address, length,
+                                         MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                                         nullptr, 0);
+  if (!placeholder) {
+    return nullptr;
+  }
+  void* view = api.map_view_of_file3(reinterpret_cast<HANDLE>(handle), process, placeholder,
+                                     ULONG64(file_offset), length, MEM_REPLACE_PLACEHOLDER,
+                                     ToWin32ProtectFlags(access), nullptr, 0);
+  if (!view) {
+    // Keep the error of the mapping; a placeholder is released whole (size zero).
+    const DWORD error = GetLastError();
+    VirtualFree(placeholder, 0, MEM_RELEASE);
+    SetLastError(error);
+    return nullptr;
+  }
+  return view;
+}
+
+}  // namespace
+#endif  // REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS
+
+bool MapFileViewTakesPageOffsets() {
+#ifdef REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS
+  const PlaceholderApi& api = GetPlaceholderApi();
+  return api.virtual_alloc2 && api.map_view_of_file3;
+#else
+  // VirtualAlloc2FromApp and MapViewOfFile3FromApp are always there (see MapFileView).
+  return true;
+#endif
+}
+
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset) {
 #ifdef REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS
@@ -215,6 +313,9 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
     default:
       assert_unhandled_case(access);
       return nullptr;
+  }
+  if (file_offset % allocation_granularity() != 0) {
+    return MapFileViewIntoPlaceholder(handle, base_address, length, access, file_offset);
   }
   return MapViewOfFileEx(reinterpret_cast<HANDLE>(handle), file_access, target_address_high,
                          target_address_low, length, base_address);
