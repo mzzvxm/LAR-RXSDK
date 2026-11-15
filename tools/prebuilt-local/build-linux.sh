@@ -16,7 +16,9 @@
 #              A Windows folder is fine (/mnt/c/...), and it can be the same folder build-windows.ps1 writes to.
 #
 # Needs in WSL: bash, git, curl, tar, unzip, brotli, python3, coreutils (all present in Ubuntu 26.04 here; no jq
-# and no gh: json is written with python3, and the upload is done from Windows).
+# and no gh: json is written with python3, and the upload is done from Windows). Also /usr/bin/wayland-scanner (Ubuntu package
+# libwayland-bin) when the kit's own wayland-scanner does not run on the host (Ubuntu 26.04 has no libxml2.so.2): without a
+# working scanner SDL is built without its Wayland driver, and this script stops before it packs such an SDK (step 6).
 #
 # Environment (all optional):
 #   KIT                where the build kit is unpacked. Default /opt/larecomp-kit as in the workflow when this user
@@ -357,6 +359,37 @@ phase "5/8 configure, build, install"
 jobs_args=()
 if [ -n "${JOBS}" ]; then jobs_args=(--parallel "${JOBS}"); fi
 
+# wayland-scanner: SDL's configure (cmake/sdlchecks.cmake, CheckWayland) runs `wayland-scanner --version` and, when that does not
+# work, drops SDL's Wayland video driver WITHOUT an error (one cmake warning, "Failed to get wayland-scanner version"): the SDK then
+# has X11 only and a game on a Wayland desktop says "SDL_InitSubSystem failed: wayland not available". The kit's scanner
+# (sysroot/hostbin, an Ubuntu 22.04 binary) needs libxml2.so.2; Ubuntu 26.04 has only libxml2.so.16, so it exits 127 here. The
+# workflow's runner (ubuntu-22.04) runs it fine, so nothing is passed there. When it does not run, the host's own scanner
+# (Ubuntu package libwayland-bin) generates SDL's protocol sources instead: its output compiles against the kit's wayland 1.20
+# headers. Neither runs: stop here, an SDK without the Wayland driver must not be built (the checks of step 6 would stop it too).
+echo "--- wayland-scanner"
+wl_args=()
+kit_scanner="${KIT}/sysroot/hostbin/wayland-scanner"
+host_scanner=/usr/bin/wayland-scanner
+scanner_out=$("${kit_scanner}" --version 2>&1 < /dev/null) && scanner_rc=0 || scanner_rc=$?
+if [ "${scanner_rc}" = 0 ] && [[ "${scanner_out}" =~ [0-9]+\.[0-9]+ ]]; then
+  echo "wayland-scanner: the kit's runs (${scanner_out}); SDL finds it on PATH."
+  WAYLAND_SCANNER_USED="${kit_scanner} (${scanner_out})"
+else
+  echo "note: the kit's ${kit_scanner} does not run here (exit ${scanner_rc}): ${scanner_out}"
+  host_out=""
+  host_rc=1
+  if [ -x "${host_scanner}" ]; then
+    host_out=$("${host_scanner}" --version 2>&1 < /dev/null) && host_rc=0 || host_rc=$?
+  fi
+  if [ "${host_rc}" = 0 ] && [[ "${host_out}" =~ [0-9]+\.[0-9]+ ]]; then
+    echo "wayland-scanner: ${host_scanner} is used instead (${host_out}): -DWAYLAND_SCANNER=${host_scanner}"
+    wl_args=(-DWAYLAND_SCANNER="${host_scanner}")
+    WAYLAND_SCANNER_USED="${host_scanner} (${host_out})"
+  else
+    die "no wayland-scanner runs here: the kit's fails (exit ${scanner_rc}: ${scanner_out}) and ${host_scanner} is $([ -x "${host_scanner}" ] && echo "not working (exit ${host_rc}: ${host_out})" || echo "not installed"). Without one SDL is built without its Wayland driver. Install it (sudo apt-get install libwayland-bin) or the library the kit's needs (libxml2.so.2)."
+  fi
+fi
+
 cd "${SRC}"
 echo "--- Configure"
 cmake --preset linux-amd64 \
@@ -376,7 +409,8 @@ cmake --preset linux-amd64 \
   -DCMAKE_RANLIB="${KIT}/llvm/bin/llvm-ranlib" \
   -DCMAKE_NM="${KIT}/llvm/bin/llvm-nm" \
   -DCMAKE_STRIP="${KIT}/llvm/bin/llvm-strip" \
-  -DCMAKE_OBJCOPY="${KIT}/llvm/bin/llvm-objcopy"
+  -DCMAKE_OBJCOPY="${KIT}/llvm/bin/llvm-objcopy" \
+  ${wl_args[@]+"${wl_args[@]}"}
 
 echo "--- Build"
 cmake --build "${BUILD}" --config Release ${jobs_args[@]+"${jobs_args[@]}"}
@@ -433,6 +467,54 @@ while IFS= read -r -d '' link; do
   esac
 done < <(find "${SDK}" -type l -print0)
 [ "${bad}" = 0 ] || die "the install has links that leave it."
+
+# CHECK: SDL's Wayland driver is in the build. SDL's configure leaves the driver out without an error when it cannot run
+# wayland-scanner (see the step before the configure) and a Linux SDK with X11 only cannot start the game on a Wayland
+# desktop, so a build that lost it is not packed. Every fact below has to hold (no switch turns this off):
+#   - every SDL_build_config.h of this build defines SDL_VIDEO_DRIVER_WAYLAND (SDL's own configure result);
+#   - the installed libSDL3.a holds the driver's objects: every SDL_wayland*.c of the SDL sources, one generated
+#     <protocol>-protocol.c per wayland-protocols/*.xml, and Wayland_bootstrap (the driver's entry in SDL's video driver
+#     list), with X11_bootstrap still there;
+#   - librexruntime.so, which carries SDL for the game, names wl_display_connect (its dlopen table, or an undefined
+#     symbol in a build that links wayland-client): the call that opens the Wayland socket.
+sdl_dir="${SRC}/thirdparty/sdl3"
+sdl_lib="${SDK}/lib/libSDL3.a"
+sdl_runtime="${SDK}/lib/librexruntime.so"
+sdl_bad=0
+sdl_fail() { err "SDL Wayland check: $*"; sdl_bad=1; }
+sdl_configs=0
+while IFS= read -r -d '' cfg_h; do
+  sdl_configs=$((sdl_configs + 1))
+  if ! grep -Eq '^[[:space:]]*#[[:space:]]*define[[:space:]]+SDL_VIDEO_DRIVER_WAYLAND([[:space:]]|$)' "${cfg_h}"; then
+    sdl_fail "${cfg_h#"${BUILD}"/} does not define SDL_VIDEO_DRIVER_WAYLAND (SDL's configure dropped the driver)."
+  fi
+done < <(find "${BUILD}/thirdparty/sdl3" -name SDL_build_config.h -print0)
+[ "${sdl_configs}" -gt 0 ] || sdl_fail "no SDL_build_config.h under ${BUILD}/thirdparty/sdl3 (the layout of the build changed: fix this check, do not skip it)."
+n_wl_obj=0; n_wl_src=0; n_wl_proto=0; n_wl_xml=0
+if [ -f "${sdl_lib}" ]; then
+  sdl_members=$("${KIT}/llvm/bin/llvm-ar" t "${sdl_lib}")
+  n_wl_obj=$(grep -c '^SDL_wayland.*\.c\.o$' <<< "${sdl_members}" || true)
+  n_wl_proto=$(grep -c -- '-protocol\.c\.o$' <<< "${sdl_members}" || true)
+  n_wl_src=$(find "${sdl_dir}/src/video/wayland" -maxdepth 1 -name 'SDL_wayland*.c' | wc -l)
+  n_wl_xml=$(find "${sdl_dir}/wayland-protocols" -maxdepth 1 -name '*.xml' | wc -l)
+  [ "${n_wl_src}" -gt 0 ] && [ "${n_wl_xml}" -gt 0 ] || sdl_fail "found no SDL Wayland sources or protocol files under ${sdl_dir} (the layout changed: fix this check, do not skip it)."
+  [ "${n_wl_obj}" -ge "${n_wl_src}" ] || sdl_fail "libSDL3.a has ${n_wl_obj} SDL_wayland*.c.o objects, the SDL sources have ${n_wl_src}."
+  [ "${n_wl_proto}" -ge "${n_wl_xml}" ] || sdl_fail "libSDL3.a has ${n_wl_proto} generated protocol objects (*-protocol.c.o), SDL has ${n_wl_xml} protocol files."
+  grep -qx 'SDL_waylandvideo.c.o' <<< "${sdl_members}" || sdl_fail "libSDL3.a has no SDL_waylandvideo.c.o."
+  grep -qx 'SDL_waylandwindow.c.o' <<< "${sdl_members}" || sdl_fail "libSDL3.a has no SDL_waylandwindow.c.o."
+  sdl_symbols=$("${KIT}/llvm/bin/llvm-nm" --defined-only "${sdl_lib}" 2> /dev/null || true)
+  grep -Eq '[[:space:]][DdRr][[:space:]]+Wayland_bootstrap$' <<< "${sdl_symbols}" || sdl_fail "libSDL3.a does not define Wayland_bootstrap."
+  grep -Eq '[[:space:]][DdRr][[:space:]]+X11_bootstrap$' <<< "${sdl_symbols}" || sdl_fail "libSDL3.a lost X11_bootstrap (the X11 driver)."
+else
+  sdl_fail "${sdl_lib} is not installed."
+fi
+if [ -f "${sdl_runtime}" ]; then
+  grep -aqF 'wl_display_connect' "${sdl_runtime}" || sdl_fail "librexruntime.so does not name wl_display_connect: its SDL has no Wayland driver."
+else
+  sdl_fail "${sdl_runtime} is not installed."
+fi
+[ "${sdl_bad}" = 0 ] || die "SDL was built without its Wayland driver (wayland-scanner used: ${WAYLAND_SCANNER_USED}); nothing is packed. See the configure output above (cmake's 'Failed to get wayland-scanner version')."
+echo "SDL Wayland driver: ok (${sdl_configs} SDL_build_config.h define SDL_VIDEO_DRIVER_WAYLAND; libSDL3.a: ${n_wl_obj}/${n_wl_src} SDL_wayland*.c.o, ${n_wl_proto}/${n_wl_xml} protocol objects, Wayland_bootstrap and X11_bootstrap; wl_display_connect in librexruntime.so; wayland-scanner ${WAYLAND_SCANNER_USED})"
 
 echo "install: $(find "${SDK}" -type f | wc -l) files, $(du -sh "${SDK}" | cut -f1)"
 
