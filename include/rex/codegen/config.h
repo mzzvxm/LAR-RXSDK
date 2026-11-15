@@ -98,6 +98,13 @@ struct RecompilerConfig {
   bool nonVolatileRegistersAsLocalVariables = false;
   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
 
+  /// exact_e0_view: generated code on Windows no longer adds 0x1000 to a guest address at or above
+  /// 0xE0000000 (a compare, a conditional set and an add on every memory access). The runtime then
+  /// has to map that view at its exact 4 KB file offset, which needs Windows 10 1803 or later; it
+  /// refuses to start where it cannot. Linux and macOS ignore it (they map the view exactly, or
+  /// keep the add, as before). Off by default: the generated code is what it was.
+  bool exactE0View = false;
+
   // === Analysis tuning (optional) ===
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
   uint32_t dataRegionThreshold = 16;  ///< Consecutive invalid instructions to mark as data region

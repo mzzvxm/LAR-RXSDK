@@ -97,6 +97,10 @@ std::string FingerprintModule(const RecompilerConfig& cfg,
       fmt::format("max_jump_table_entries={}", REXCVAR_GET(max_jump_table_entries)),
       fmt::format("max_blocks_per_function={}", REXCVAR_GET(max_blocks_per_function)),
   };
+  // An option that changes the generated code counts only when it is on, so a project that does
+  // not use it keeps the fingerprint (and the stamp) it had.
+  if (cfg.exactE0View)
+    flags.emplace_back("exact_e0_view=true");
 
   return ComputeInputFingerprint(inputs, sdkVersion, flags);
 }

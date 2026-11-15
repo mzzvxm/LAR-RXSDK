@@ -116,6 +116,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("non_volatile_as_local"), "non_volatile_as_local");
   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
             hasBool("generate_exception_handlers"), "generate_exception_handlers");
+  MergeBool(cfg.exactE0View, toml["exact_e0_view"].value_or(false), hasBool("exact_e0_view"),
+            "exact_e0_view");
   if (hasBool("is_dll")) {
     cfg.isDll = toml["is_dll"].value_or(false);
   }
