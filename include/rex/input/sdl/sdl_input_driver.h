@@ -20,6 +20,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <rex/input/sdl/joystick_update_gate.h>
+
 #define HID_SDL_THUMB_THRES 0x4E00
 #define HID_SDL_TRIGG_THRES 0x1F
 #define HID_SDL_REPEAT_DELAY 400
@@ -89,12 +91,22 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
   void QueueControllerUpdate();
+  /// Brings the pads up to date before a guest call reads them: by the calling thread when SDL's
+  /// own update is off (on_demand_update_), by the UI thread's SDL_PumpEvents otherwise.
+  void RefreshJoystickState();
+  static Uint32 SDLCALL IdleUpdateTimer(void* userdata, SDL_TimerID timer_id, Uint32 interval);
 
   rex::ui::Window* attached_window_ = nullptr;
   bool sdl_events_initialized_;
   bool SDL_Gamepad_initialized_;
   std::atomic<int> sdl_events_unflushed_;
   std::atomic<bool> sdl_pumpevents_queued_;
+  // True when SDL's event loop no longer reads the joysticks (SDL_HINT_AUTO_UPDATE_JOYSTICKS is
+  // "0"): the loop then does not wake the UI thread every millisecond while a pad is open.
+  // Written once on the UI thread before the first pad can be opened.
+  std::atomic<bool> on_demand_update_{false};
+  JoystickUpdateGate update_gate_;
+  SDL_TimerID idle_update_timer_ = 0;
   // Appended in connection order, never re-sorted, and unbounded: the
   // assignment decides how many the guest sees.
   std::vector<ControllerState> controllers_;

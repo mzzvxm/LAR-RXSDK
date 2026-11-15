@@ -21,6 +21,7 @@ add_executable(unit_tests
     system/achievement_manager_test.cpp
     system/content_manager_test.cpp
     system/function_dispatcher_test.cpp
+    input/joystick_update_gate_test.cpp
     input/input_assignment_test.cpp
     memory/mapped_views_test.cpp
     memory/exact_e0_view_test.cpp
