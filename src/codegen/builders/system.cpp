@@ -147,16 +147,6 @@ bool build_dcbtst(BuilderContext& ctx) {
   return true;
 }
 
-bool build_dcbz(BuilderContext& ctx) {
-  // Compute EA, align to 32-byte cache line, apply physical offset
-  ctx.print("\t{} = (", ctx.ea());
-  if (ctx.insn.operands[0] != 0)
-    ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
-  ctx.println("{}.u32) & ~31;", ctx.r(ctx.insn.operands[1]));
-  ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 32);", ctx.ea());
-  return true;
-}
-
 bool build_dcbzl(BuilderContext& ctx) {
   // Compute EA, align to 128-byte cache line, apply physical offset
   ctx.print("\t{} = (", ctx.ea());
@@ -165,6 +155,12 @@ bool build_dcbzl(BuilderContext& ctx) {
   ctx.println("{}.u32) & ~127;", ctx.r(ctx.insn.operands[1]));
   ctx.println("\tmemset((void*)REX_RAW_ADDR({}), 0, 128);", ctx.ea());
   return true;
+}
+
+bool build_dcbz(BuilderContext& ctx) {
+  // The Xbox 360 has no short cache line: plain dcbz clears the whole 128-byte line, like dcbzl
+  // (dcbz128). Code that zeroes a buffer with dcbz steps through it 128 bytes at a time.
+  return build_dcbzl(ctx);
 }
 
 bool build_dcbst(BuilderContext& ctx) {
