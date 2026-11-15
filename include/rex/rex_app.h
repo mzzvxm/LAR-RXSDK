@@ -241,6 +241,10 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// drawer, register overlay keybinds, run OnCreateDialogs.
   virtual bool SetupPresentation();
 
+  /// Runs the path-finalization and runtime-construction phases. Split out of
+  /// OnInitialize so the first-launch profile name prompt can resume it.
+  bool ContinueInitialize();
+
   /// Kick off the deferred module launch: shader storage init,
   /// PrepareModuleLaunch, main thread resume, background wait.
   virtual void LaunchModule();

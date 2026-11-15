@@ -26,6 +26,7 @@
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
+#include <rex/ui/overlay/username_overlay.h>
 #include <rex/audio/audio_system.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
 #include <rex/input/input_system.h>
@@ -33,6 +34,7 @@
 #include <rex/string/numeric.h>
 #include <rex/system.h>
 #include <rex/system/achievement_manager.h>
+#include <rex/system/flags.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
@@ -116,6 +118,38 @@ bool ReXApp::OnInitialize() {
   if (!SetupPresentation())
     return false;
 
+  // First launch: ask for a profile name before the runtime (and with it the
+  // content manager, which names save directories after the profile) exists.
+  if (REXCVAR_GET(user_name).empty() && !REXCVAR_GET(headless)) {
+    (void)new ui::UsernameDialog(imgui_drawer_.get(), std::string(), [this](std::string name) {
+      if (shutting_down_.load(std::memory_order_acquire))
+        return;
+      rex::cvar::SetFlagByName("user_name", name);
+      if (!config_path_.empty())
+        rex::cvar::SaveConfig(config_path_);
+      REXLOG_INFO("Profile name set to '{}'", name);
+      // The dialog completes from inside its OnDraw, which runs inside
+      // Window::OnPaint. Window::OnPaint has a re-entrancy guard, so anything
+      // that paints from here paints nothing: a setup wizard opened by
+      // OnFinalizePaths would never draw and its pump would spin forever, and
+      // module launch would run a full init inside a paint. Hand the rest of
+      // initialization to the event loop so it starts with the paint unwound.
+      app_context().CallInUIThreadDeferred([this]() {
+        if (shutting_down_.load(std::memory_order_acquire))
+          return;
+        REXLOG_INFO("Continuing initialization after profile name (deferred, outside paint)");
+        if (!ContinueInitialize())
+          app_context().QuitFromUIThread();
+      });
+    });
+    // Async: the event loop keeps pumping so the dialog renders.
+    return true;
+  }
+
+  return ContinueInitialize();
+}
+
+bool ReXApp::ContinueInitialize() {
   auto paths = OnFinalizePaths(resolved_defaults_, MakeResumeCallback());
   if (!paths) {
     // Async: consumer will invoke resume when ready. OnInitialize returns
@@ -614,11 +648,20 @@ std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {
   return [this](PathConfig paths) {
     if (shutting_down_.load(std::memory_order_acquire))
       return;
-    if (!ConstructRuntime(std::move(paths))) {
-      app_context().QuitFromUIThread();
-      return;
-    }
-    LaunchModule();
+    // Wizards resume from their own OnDraw, which runs inside Window::OnPaint,
+    // and that has a re-entrancy guard - constructing the runtime and launching
+    // the module from there would run the whole init inside a paint that
+    // nothing else can interrupt. Defer so the paint is unwound first. Also
+    // makes the callback safe to invoke from a worker thread.
+    app_context().CallInUIThreadDeferred([this, paths = std::move(paths)]() mutable {
+      if (shutting_down_.load(std::memory_order_acquire))
+        return;
+      if (!ConstructRuntime(std::move(paths))) {
+        app_context().QuitFromUIThread();
+        return;
+      }
+      LaunchModule();
+    });
   };
 }
 
