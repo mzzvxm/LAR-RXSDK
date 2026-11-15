@@ -439,11 +439,26 @@ class Win32Thread : public Win32Handle<Thread> {
 
 thread_local std::unique_ptr<Win32Thread> current_thread_ = nullptr;
 
+// ::GetCurrentThread() returns a pseudo-handle that always means "the thread that uses it". A
+// Thread built on it would send QueueUserAPC (and anything else done through the handle) to the
+// thread that calls it, not to the thread it stands for, so a callback queued from another thread
+// would never reach the waiting one. Use a real handle to the calling thread instead.
+static HANDLE DuplicateCurrentThreadHandle() {
+  HANDLE process = ::GetCurrentProcess();
+  HANDLE handle = nullptr;
+  if (!DuplicateHandle(process, ::GetCurrentThread(), process, &handle, 0, FALSE,
+                       DUPLICATE_SAME_ACCESS)) {
+    LOG_LASTERROR();
+    return nullptr;
+  }
+  return handle;
+}
+
 struct ThreadStartData {
   std::function<void()> start_routine;
 };
 DWORD WINAPI ThreadStartRoutine(LPVOID parameter) {
-  current_thread_ = std::make_unique<Win32Thread>(::GetCurrentThread());
+  Thread::GetCurrentThread();
 
   auto start_data = reinterpret_cast<ThreadStartData*>(parameter);
   start_data->start_routine();
@@ -470,8 +485,8 @@ Thread* Thread::GetCurrentThread() {
     return current_thread_.get();
   }
 
-  HANDLE handle = ::GetCurrentThread();
-  if (handle == INVALID_HANDLE_VALUE) {
+  HANDLE handle = DuplicateCurrentThreadHandle();
+  if (!handle) {
     return nullptr;
   }
 

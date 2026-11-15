@@ -42,6 +42,15 @@ Thread* WaitForThreadObject(const std::atomic<Thread*>& slot) {
   return slot.load();
 }
 
+// Pauses for a short time by yielding. sleep_for rounds up to the timer tick on Windows (up to
+// 15.6 ms), which stretches the sub-millisecond gaps of the test below until it runs for seconds.
+void ShortPause(std::chrono::microseconds duration) {
+  const auto end = std::chrono::steady_clock::now() + duration;
+  while (std::chrono::steady_clock::now() < end) {
+    std::this_thread::yield();
+  }
+}
+
 }  // namespace
 
 TEST_CASE("alertable waits - a queued user callback wakes a wait on one handle", "[thread][alert]") {
@@ -196,7 +205,7 @@ TEST_CASE("alertable waits - queued callbacks all reach a thread that waits in e
     thread->QueueUserCallback([&] { ++ran; });
     // Some gaps long enough for the worker to be asleep again, some back to back.
     if (i % 3 != 0) {
-      std::this_thread::sleep_for(std::chrono::microseconds(i % 2 ? 100 : 700));
+      ShortPause(std::chrono::microseconds(i % 2 ? 100 : 700));
     }
   }
   worker.join();
