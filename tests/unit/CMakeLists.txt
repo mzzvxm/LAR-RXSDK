@@ -668,6 +668,8 @@ elseif (REXGLUE_ENABLE_SANITIZERS)
     "UBSAN_OPTIONS=handle_segv=0:handle_sigbus=0:handle_abort=0:handle_sigfpe=0:handle_sigill=0"
   )
 endif ()
+# SDL_ASSERT=always_ignore makes SDL print an assert and go on instead of waiting on a dialog. A run
+# with no display reaches an SDL assert on Windows.
 catch_discover_tests(
   unit_tests
   DISCOVERY_MODE
@@ -679,6 +681,8 @@ catch_discover_tests(
   PROPERTIES
   TIMEOUT
   60
+  ENVIRONMENT
+  "SDL_ASSERT=always_ignore"
 )
 catch_discover_tests(
   cross_module_tests
@@ -690,4 +694,6 @@ catch_discover_tests(
   PROPERTIES
   TIMEOUT
   60
+  ENVIRONMENT
+  "SDL_ASSERT=always_ignore"
 )
