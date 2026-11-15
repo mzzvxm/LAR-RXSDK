@@ -30,6 +30,27 @@ namespace {
 // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
 constexpr uint32_t kRumbleDurationMs = 0xFFFF;
 
+// What SDL's gamepad type says about the family; the USB vendor outranks it (ClassifyPad).
+PadKind PadKindFromSdlType(SDL_GamepadType type) {
+  switch (type) {
+    case SDL_GAMEPAD_TYPE_XBOX360:
+    case SDL_GAMEPAD_TYPE_XBOXONE:
+      return PadKind::kXbox;
+    case SDL_GAMEPAD_TYPE_PS3:
+    case SDL_GAMEPAD_TYPE_PS4:
+    case SDL_GAMEPAD_TYPE_PS5:
+      return PadKind::kPlayStation;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+    case SDL_GAMEPAD_TYPE_GAMECUBE:
+      return PadKind::kSwitch;
+    default:
+      return PadKind::kGeneric;
+  }
+}
+
 }  // namespace
 
 SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
@@ -162,6 +183,9 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
                      static_cast<int>(sizeof(guid_text)));
     info.guid = guid_text;
     info.synthetic = false;
+    info.vendor_id = controller.vendor_id;
+    info.product_id = controller.product_id;
+    info.pad_kind = controller.pad_kind;
     out.push_back(info);
   }
 }
@@ -463,6 +487,9 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   ControllerState state = {};
   state.sdl = controller;
   state.id = AllocateDeviceId();
+  state.vendor_id = SDL_GetGamepadVendor(controller);
+  state.product_id = SDL_GetGamepadProduct(controller);
+  state.pad_kind = ClassifyPad(state.vendor_id, PadKindFromSdlType(SDL_GetGamepadType(controller)));
   state.state_changed = true;  // XInput starts with packet_number = 1
   UpdateXCapabilities(state);
   controllers_.push_back(state);
