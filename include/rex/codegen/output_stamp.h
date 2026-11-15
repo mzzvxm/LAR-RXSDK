@@ -24,6 +24,13 @@ inline constexpr std::string_view kStampFileName = "codegen.stamp";
 inline constexpr std::string_view kBuildStampFileName = "codegen.build.stamp";
 inline constexpr std::string_view kDepfileName = "codegen.d";
 
+/// Revision of the code generator's output rules (the builders, the analysis): part of every
+/// module's fingerprint, so a change that alters what is emitted for unchanged inputs makes every
+/// stamped project generate once more. Bump it by one in any commit that does that (the inja
+/// templates are hashed already, see EmbeddedTemplatesHash). The SDK version in the fingerprint is
+/// only floor + channel, so without this a builder fix is not noticed and stale code is kept.
+inline constexpr int kCodegenRevision = 1;
+
 /// What a module's output was generated from, and what it produced.
 struct OutputStamp {
   std::string fingerprint;
