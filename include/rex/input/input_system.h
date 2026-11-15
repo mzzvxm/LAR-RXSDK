@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -47,6 +48,18 @@ class InputSystem : public system::IInputSystem {
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
 
+  /// Moves when a device is added or removed and at no other time, so a caller can ask "did the
+  /// list change?" without enumerating anything.
+  uint32_t device_generation() const { return device_generation_.load(std::memory_order_relaxed); }
+
+  /// Devices as of the last poll. The list is rebuilt on the polling thread (the one that calls
+  /// GetState), so call these from there.
+  std::vector<DeviceInfo> Devices() const { return devices_; }
+
+  /// The device that last produced real input for this user, or null (none yet, it was
+  /// unplugged, or the user is out of range). The pointer lasts until the next poll.
+  const DeviceInfo* ActiveDevice(uint32_t user_index) const;
+
  private:
   /// Re-enumerates every driver and notifies the assignment when the set
   /// changed.
@@ -60,6 +73,7 @@ class InputSystem : public system::IInputSystem {
 
   std::unique_ptr<DeviceAssignment> assignment_;
   ActiveDeviceTracker active_devices_;
+  std::atomic<uint32_t> device_generation_{0};
 
   // Ordered by ordinal. Ordinals are never recycled, so unplugging pad one
   // does not renumber pad two.

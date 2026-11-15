@@ -65,6 +65,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     bool state_changed;
     bool is_active;
     DeviceId id;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    PadKind pad_kind;
     // Per pad rather than per guest user, so it survives reassignment.
     KeystrokeState keystroke;
   };

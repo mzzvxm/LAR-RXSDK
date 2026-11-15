@@ -13,11 +13,13 @@
 using rex::X_RESULT;
 using rex::X_STATUS;
 
+using rex::input::ClassifyPad;
 using rex::input::DeviceAssignment;
 using rex::input::DeviceId;
 using rex::input::DeviceInfo;
 using rex::input::InputDriver;
 using rex::input::InputSystem;
+using rex::input::PadKind;
 using rex::input::SharedAssignment;
 using rex::input::SlotAssignment;
 using rex::input::X_INPUT_CAPABILITIES;
@@ -55,6 +57,17 @@ class FakeDriver final : public InputDriver {
     info.synthetic = synthetic;
     devices_.push_back(info);
     states_[static_cast<DeviceId>(id)] = {};
+  }
+
+  /// What a real driver would put in the DeviceInfo it enumerates.
+  void Describe(uint64_t id, uint16_t vendor, uint16_t product, PadKind kind) {
+    for (auto& info : devices_) {
+      if (info.id == static_cast<DeviceId>(id)) {
+        info.vendor_id = vendor;
+        info.product_id = product;
+        info.pad_kind = kind;
+      }
+    }
   }
 
   void Remove(uint64_t id) {
@@ -235,4 +248,129 @@ TEST_CASE("A synthetic device does not push the first pad off guest user 0", "[i
   REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
   REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_B);
   REQUIRE(system->GetState(1, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
+}
+
+TEST_CASE("The USB vendor decides the controller family, the driver's guess settles the rest",
+          "[input]") {
+  REQUIRE(ClassifyPad(0x054C, PadKind::kGeneric) == PadKind::kPlayStation);  // Sony
+  REQUIRE(ClassifyPad(0x057E, PadKind::kGeneric) == PadKind::kSwitch);       // Nintendo
+  REQUIRE(ClassifyPad(0x28DE, PadKind::kXbox) == PadKind::kSteamDeck);  // Valve, even as XInput
+  REQUIRE(ClassifyPad(0x045E, PadKind::kGeneric) == PadKind::kXbox);    // Microsoft
+  // Sony hardware that reports another type is still a Sony pad.
+  REQUIRE(ClassifyPad(0x054C, PadKind::kXbox) == PadKind::kPlayStation);
+  // A clone from another vendor keeps what the driver recognised.
+  REQUIRE(ClassifyPad(0x0F0D, PadKind::kPlayStation) == PadKind::kPlayStation);
+  REQUIRE(ClassifyPad(0x0F0D, PadKind::kSwitch) == PadKind::kSwitch);
+  REQUIRE(ClassifyPad(0x0F0D, PadKind::kGeneric) == PadKind::kGeneric);
+  REQUIRE(ClassifyPad(0, PadKind::kXbox) == PadKind::kXbox);  // vendor unknown
+}
+
+TEST_CASE("The device generation moves when a device is added or removed, not otherwise",
+          "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  X_INPUT_STATE state = {};
+
+  const uint32_t start = system->device_generation();
+  REQUIRE(system->GetState(0, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
+  REQUIRE(system->device_generation() == start);  // nothing there, nothing changed
+
+  driver->Add(1);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  const uint32_t one_pad = system->device_generation();
+  REQUIRE(one_pad != start);
+
+  // Input, capabilities and more polls leave it alone.
+  driver->SetButtons(1, X_INPUT_GAMEPAD_A);
+  X_INPUT_CAPABILITIES caps = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->GetCapabilities(0, 0, &caps) == X_ERROR_SUCCESS);
+  REQUIRE(system->device_generation() == one_pad);
+
+  driver->Add(2);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  const uint32_t two_pads = system->device_generation();
+  REQUIRE(two_pads != one_pad);
+
+  driver->Remove(1);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  const uint32_t after_remove = system->device_generation();
+  REQUIRE(after_remove != two_pads);
+
+  // A swap that leaves the count alone is still a change.
+  driver->Remove(2);
+  driver->Add(3);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->device_generation() != after_remove);
+}
+
+TEST_CASE("Devices() carries the vendor, product and family the driver reported", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  driver->Describe(1, 0x054C, 0x0CE6, PadKind::kPlayStation);
+  driver->Add(2);  // a driver that knows nothing
+
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+
+  const std::vector<DeviceInfo> devices = system->Devices();
+  REQUIRE(devices.size() == 2);
+  REQUIRE(devices[0].vendor_id == 0x054C);
+  REQUIRE(devices[0].product_id == 0x0CE6);
+  REQUIRE(devices[0].pad_kind == PadKind::kPlayStation);
+  REQUIRE(devices[1].vendor_id == 0);
+  REQUIRE(devices[1].pad_kind == PadKind::kGeneric);
+}
+
+TEST_CASE("ActiveDevice follows the last device with real input", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  driver->Describe(1, 0x045E, 0x028E, PadKind::kXbox);
+  driver->Add(2);
+  driver->Describe(2, 0x054C, 0x0CE6, PadKind::kPlayStation);
+
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0) == nullptr);  // nobody has touched anything yet
+
+  driver->SetButtons(1, X_INPUT_GAMEPAD_A);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0) != nullptr);
+  REQUIRE(system->ActiveDevice(0)->id == static_cast<DeviceId>(1));
+  REQUIRE(system->ActiveDevice(0)->pad_kind == PadKind::kXbox);
+
+  // The other pad is picked up: it takes over, with its own family.
+  driver->SetButtons(1, 0);
+  driver->SetButtons(2, X_INPUT_GAMEPAD_B);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0)->id == static_cast<DeviceId>(2));
+  REQUIRE(system->ActiveDevice(0)->pad_kind == PadKind::kPlayStation);
+
+  // Letting go does not hand it back: neutral never takes over.
+  driver->SetButtons(2, 0);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0)->id == static_cast<DeviceId>(2));
+
+  // Other users and out-of-range users have none.
+  REQUIRE(system->ActiveDevice(1) == nullptr);
+  REQUIRE(system->ActiveDevice(rex::input::kMaxGuestUsers) == nullptr);
+}
+
+TEST_CASE("ActiveDevice is cleared when its device is unplugged", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  driver->Add(2);
+  driver->SetButtons(2, X_INPUT_GAMEPAD_B);
+
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0)->id == static_cast<DeviceId>(2));
+
+  driver->Remove(2);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->ActiveDevice(0) == nullptr);  // the survivor is idle: no claim to the slot
+  REQUIRE(system->Devices().size() == 1);
 }

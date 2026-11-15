@@ -161,8 +161,11 @@ void InputSystem::RefreshDevices() {
     device_owners_.push_back(owners[i]);
   }
 
-  if (changed && assignment_) {
-    assignment_->OnDevicesChanged(devices_);
+  if (changed) {
+    device_generation_.fetch_add(1, std::memory_order_relaxed);
+    if (assignment_) {
+      assignment_->OnDevicesChanged(devices_);
+    }
   }
 }
 
@@ -182,6 +185,11 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
     }
   }
   return nullptr;
+}
+
+const DeviceInfo* InputSystem::ActiveDevice(uint32_t user_index) const {
+  const DeviceId id = active_devices_.Active(user_index);
+  return id == DeviceId::kInvalid ? nullptr : DeviceInfoFor(id);
 }
 
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
