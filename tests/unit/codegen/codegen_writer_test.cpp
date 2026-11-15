@@ -262,10 +262,10 @@ TEST_CASE("exact_e0_view is off unless the config turns it on", "[codegen_writer
   CodegenWriter writer(*fx.ctx);
   REQUIRE(writer.write(false));
 
-  // Off: the generated header defines no marker and the image says false, so the output is what it
-  // was before the option existed.
+  // Off: the generated header defines no marker (the template's guard only names it) and the image
+  // says false, so the code is what it was before the option existed.
   const auto pch = ReadAll(fx.outputDir() / "testproj_pch.h");
-  CHECK(pch.find("REX_CONFIG_EXACT_E0_VIEW") == std::string::npos);
+  CHECK(pch.find("#define REX_CONFIG_EXACT_E0_VIEW") == std::string::npos);
   CHECK(pch.find("REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)") !=
         std::string::npos);
   const auto init = ReadAll(fx.outputDir() / "testproj_init.cpp");
