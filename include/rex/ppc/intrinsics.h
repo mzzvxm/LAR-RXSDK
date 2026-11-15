@@ -26,6 +26,7 @@
 #include <arm_neon.h>
 #endif
 
+#include <rex/ppc/dot_product.h>
 #include <rex/types.h>
 
 namespace rex::ppc {
