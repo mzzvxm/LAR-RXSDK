@@ -431,15 +431,25 @@ bool ReXApp::SetupPresentation() {
 
   window_->AddListener(this);
   window_->AddInputListener(this, 0);
+  // Deferred on purpose: the writer of the cvar can be any thread (a guest
+  // thread driving an in-game options menu, the console), and SDL window state
+  // may only be touched from the UI thread. Doing it inline would also run the
+  // mode switch -- and the surface/swapchain recreation that follows it -- with
+  // the cvar registry mutex still held by the writer, which deadlocks anything
+  // that reads a cvar by name while the UI thread services the switch.
+  rex::cvar::RegisterChangeCallback(
+      "fullscreen", [this](std::string_view, std::string_view value) {
+        const bool new_fullscreen = rex::string::from_string<bool>(value, false);
+        app_context().CallInUIThreadDeferred([this, new_fullscreen]() {
+          if (window_) {
+            window_->SetFullscreen(new_fullscreen);
+          }
+        });
+      });
 
   if (REXCVAR_GET(fullscreen)) {
     window_->SetFullscreen(true);
   }
-  rex::cvar::RegisterChangeCallback("fullscreen", [this](std::string_view, std::string_view value) {
-    if (window_) {
-      window_->SetFullscreen(rex::string::from_string<bool>(value, false));
-    }
-  });
   window_->Open();
 
   auto* graphics_system = config_.graphics.get();
@@ -730,6 +740,8 @@ void ReXApp::OnRestored(ui::UIEvent& e) {
 void ReXApp::OnDestroy() {
   // Notify subclass before cleanup
   OnShutdown();
+
+  rex::cvar::UnregisterChangeCallbacks("fullscreen");
 
   // Unregister overlay keybinds before destroying dialogs
   rex::ui::UnregisterBind("bind_debug_overlay");
