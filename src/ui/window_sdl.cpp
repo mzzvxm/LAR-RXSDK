@@ -29,7 +29,13 @@
 #include <rex/ui/sdl_virtual_key.h>
 
 #if REX_PLATFORM_WIN32
+#include <dwmapi.h>
+
 #include <rex/ui/surface_win.h>
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 #elif REX_PLATFORM_MAC
 #include <CoreFoundation/CoreFoundation.h>
 #include <SDL3/SDL_metal.h>
@@ -39,6 +45,9 @@
 #include <X11/Xlib-xcb.h>
 #include <rex/ui/surface_gnulinux.h>
 #endif
+
+REXCVAR_DEFINE_STRING(window_theme, "white", "UI/Window", "Window theme")
+    .allowed({"white", "dark"});
 
 namespace rex::ui {
 
@@ -129,6 +138,8 @@ WindowSDL::WindowSDL(WindowedAppContext& app_context, const std::string_view tit
     : Window(app_context, title, desired_logical_width, desired_logical_height) {}
 
 WindowSDL::~WindowSDL() {
+  // The callback captures `this`; drop it before the object goes away.
+  rex::cvar::UnregisterChangeCallbacks("window_theme");
   EnterDestructor();
   DestroySDLWindow();
 }
@@ -183,6 +194,9 @@ bool WindowSDL::OpenImpl() {
   // desired state so a reopened window comes back with the state it had.
   ApplyTextInputActiveNow();
   ApplyCursorVisibilityNow();
+  ApplyWindowTheme();
+  rex::cvar::RegisterChangeCallback(
+      "window_theme", [this](std::string_view, std::string_view) { ApplyWindowTheme(); });
   SDL_ShowWindow(sdl_window_);
 
   // Actualize state for the common Window code. Listener dispatch is handled
@@ -303,6 +317,19 @@ void WindowSDL::ApplyNewTitle() {
     return;
   }
   SDL_SetWindowTitle(sdl_window_, GetTitle().c_str());
+}
+
+void WindowSDL::ApplyWindowTheme() {
+#if REX_PLATFORM_WIN32
+  HWND hwnd = static_cast<HWND>(GetNativeWindowHandle());
+  if (!hwnd) {
+    return;
+  }
+  // DWM only repaints the non-client area on a state change, so this is enough
+  // to retheme a window that is already up.
+  BOOL dark = REXCVAR_GET(window_theme) == "dark" ? TRUE : FALSE;
+  DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+#endif
 }
 
 void WindowSDL::ApplyNewMouseCapture() {

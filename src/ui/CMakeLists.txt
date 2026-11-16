@@ -117,6 +117,11 @@ target_link_libraries(rexui PUBLIC
 )
 target_link_libraries(rexui PRIVATE utf8cpp)
 
+if(WIN32)
+    # DwmSetWindowAttribute, for the window_theme cvar.
+    target_link_libraries(rexui PRIVATE dwmapi)
+endif()
+
 if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include")
     target_include_directories(rexui PRIVATE
         "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include"

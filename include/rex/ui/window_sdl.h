@@ -75,6 +75,10 @@ class WindowSDL final : public Window {
   void ApplyTextInputActiveNow();
   void RearmCursorAutoHideTimer();
 
+  // Follows the `window_theme` cvar. Win32-only (DWM immersive dark mode); a
+  // no-op elsewhere.
+  void ApplyWindowTheme();
+
   // Ratio between SDL window coordinates and the physical pixels listeners
   // expect. Never zero.
   float GetPixelDensity() const;
