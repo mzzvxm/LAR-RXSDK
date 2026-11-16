@@ -542,6 +542,35 @@ void XamShowDirtyDiscErrorUI_entry(u32 user_index) {
   exit(1);
 }
 
+// MCLA calls this from the social/pause menu once it believes it is online
+// (guest sub_8228AF60 gates it on the live-status check). There is no Xbox LIVE
+// friends backend in an offline runtime, so surface a short notice and report
+// the blade as shown; returning success keeps the guest UI flow intact instead
+// of leaving a dead stub.
+u32 XamShowFriendsUI_entry(u32 user_index) {
+  REXKRNL_DEBUG("XamShowFriendsUI({:08X})", uint32_t(user_index));
+  if (user_index >= 4) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  if (REXCVAR_GET(headless)) {
+    return X_ERROR_SUCCESS;
+  }
+  const Runtime* emulator = REX_KERNEL_STATE()->emulator();
+  ui::ImGuiDrawer* imgui_drawer = emulator ? emulator->imgui_drawer() : nullptr;
+  if (imgui_drawer) {
+    xeXamDispatchDialog<MessageBoxDialog>(
+        new MessageBoxDialog(imgui_drawer, "Friends",
+                             "Xbox LIVE friends are not available in this build.", {"OK"}, 0),
+        [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
+  }
+  return X_ERROR_SUCCESS;
+}
+
+// 'p' variant takes an extra argument (target user/xuid); same offline handling.
+u32 XamShowFriendsUIp_entry(u32 user_index, u32 unk) {
+  return XamShowFriendsUI_entry(user_index);
+}
+
 u32 XamShowPartyUI_entry(u32 r3, u32 r4) {
   return X_ERROR_FUNCTION_FAILED;
 }
@@ -609,8 +638,8 @@ REX_EXPORT_STUB(__imp__XamShowFitnessWarnAboutTimeUI);
 REX_EXPORT_STUB(__imp__XamShowFofUI);
 REX_EXPORT_STUB(__imp__XamShowForcedNameChangeUI);
 REX_EXPORT_STUB(__imp__XamShowFriendRequestUI);
-REX_EXPORT_STUB(__imp__XamShowFriendsUI);
-REX_EXPORT_STUB(__imp__XamShowFriendsUIp);
+REX_EXPORT(__imp__XamShowFriendsUI, rex::kernel::xam::XamShowFriendsUI_entry)
+REX_EXPORT(__imp__XamShowFriendsUIp, rex::kernel::xam::XamShowFriendsUIp_entry)
 REX_EXPORT_STUB(__imp__XamShowGameInviteUI);
 REX_EXPORT_STUB(__imp__XamShowGameVoiceChannelUI);
 REX_EXPORT_STUB(__imp__XamShowGamerCardUI);
