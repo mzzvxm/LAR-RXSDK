@@ -13,6 +13,8 @@
 #include <cctype>
 #include <charconv>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -543,8 +545,19 @@ std::map<std::string, std::string> ParseCategoryLevelsFromConfig(
   if (!std::filesystem::exists(config_path))
     return result;
 
+  // Read through the path object: toml::parse_file takes the file name as
+  // UTF-8, while path::string() yields the ANSI code page on Windows, so a
+  // non-ASCII directory in the path would make the open fail silently.
+  std::string content;
+  {
+    std::ifstream file(config_path, std::ios::binary);
+    if (!file)
+      return result;
+    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  }
+
   try {
-    auto config = toml::parse_file(config_path.string());
+    auto config = toml::parse(content, config_path.string());
     auto* log_table = config["log"].as_table();
     if (!log_table)
       return result;
