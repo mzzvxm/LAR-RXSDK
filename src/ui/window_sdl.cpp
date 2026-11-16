@@ -466,6 +466,13 @@ void WindowSDL::HandlePaintEvent() {
   OnPaint();
 }
 
+void WindowSDL::PaintFromEventWatch() {
+  if (!sdl_window_) {
+    return;
+  }
+  OnPaint(true);
+}
+
 void WindowSDL::HandleWindowEvent(SDL_Event& event) {
   WindowDestructionReceiver destruction_receiver(this);
   switch (event.type) {

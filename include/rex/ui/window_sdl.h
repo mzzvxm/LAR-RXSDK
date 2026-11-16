@@ -43,6 +43,11 @@ class WindowSDL final : public Window {
   void HandleDropEvent(SDL_Event& event);
   void HandlePaintEvent();
 
+  // Paints from inside SDL's event watch, i.e. while the platform's modal
+  // move/size loop still owns the thread and queued events are not being
+  // drained. Without this the presentation freezes for the whole drag.
+  void PaintFromEventWatch();
+
  protected:
   uint32_t GetLatestDpiImpl() const override;
 

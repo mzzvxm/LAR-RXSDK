@@ -182,12 +182,26 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
 
 bool SDLCALL SDLWindowedAppContext::WatchEvent(void* userdata, SDL_Event* event) {
   auto* context = static_cast<SDLWindowedAppContext*>(userdata);
-  if (event->type == SDL_EVENT_QUIT && SDL_IsMainThread() && context->IsInUIThread()) {
+  if (!SDL_IsMainThread() || !context->IsInUIThread()) {
+    return true;
+  }
+  if (event->type == SDL_EVENT_QUIT) {
     // Cocoa stops making Metal drawables available as part of its termination
     // request. Handle the request synchronously while SDL is queueing it,
     // before rendering can enter another blocking nextDrawable call.
     ++context->synchronously_handled_quit_events_;
     context->ProcessQuitRequest();
+    return true;
+  }
+  if (event->type == SDL_EVENT_WINDOW_EXPOSED) {
+    // While the platform runs its modal move/size loop the queue is not being
+    // drained, so the queued EXPOSED only arrives after the drag ends and the
+    // window stays frozen throughout. This watch runs synchronously at push
+    // time, from inside that loop, which is the only place a paint can happen.
+    // Painting twice is harmless: the second one has nothing new to present.
+    if (WindowSDL* window = context->GetWindow(event->window.windowID)) {
+      window->PaintFromEventWatch();
+    }
   }
   return true;
 }
