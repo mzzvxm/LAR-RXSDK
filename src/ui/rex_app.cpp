@@ -166,6 +166,19 @@ bool ReXApp::ContinueInitialize() {
 bool ReXApp::SetupEnvironment() {
   auto exe_dir = rex::filesystem::GetExecutableFolder();
 
+  // Load the config before the path cvars are read, not after: game_data_root
+  // and friends decide where the game is looked for, and a value that only
+  // lands in the registry further down is a value the resolution never sees -
+  // the file appears in the log as loaded while the app still searches the
+  // executable directory. Command line and environment keep winning; the
+  // registry tracks the source and refuses to be downgraded by the file.
+  //
+  // OnConfigurePaths may still relocate the config, so this is the default
+  // location; a relocated one is loaded again below.
+  auto default_config_path = exe_dir / (std::string(GetName()) + ".toml");
+  if (std::filesystem::exists(default_config_path))
+    rex::cvar::LoadConfig(default_config_path);
+
   std::filesystem::path game_dir;
   std::string game_data_cvar = REXCVAR_GET(game_data_root);
   if (!game_data_cvar.empty()) {
@@ -214,8 +227,9 @@ bool ReXApp::SetupEnvironment() {
   config_path_ = path_config.config_path;
   resolved_defaults_ = std::move(path_config);
 
-  // Load config FIRST so log cvars have final values
-  if (std::filesystem::exists(config_path_))
+  // Already loaded above from the default location; only a config that
+  // OnConfigurePaths moved elsewhere still needs reading here.
+  if (config_path_ != default_config_path && std::filesystem::exists(config_path_))
     rex::cvar::LoadConfig(config_path_);
 
   // Late-phase logging
