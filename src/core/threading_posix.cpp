@@ -973,19 +973,24 @@ class PosixCondition<Thread> : public PosixConditionBase {
   void set_priority(int new_priority) {
     WaitStarted();
     sched_param param{};
-    param.sched_priority = new_priority;
-    int result = pthread_setschedparam(thread_, SCHED_FIFO, &param);
-    if (result != 0) {
-      switch (result) {
-        case EPERM:
-          REXSYS_WARN("set_priority: permission denied");
-          break;
-        case EINVAL:
-          assert_always();
-          break;
-        default:
-          REXSYS_WARN("set_priority: pthread_setschedparam failed ({})", result);
-          break;
+    // SCHED_FIFO needs CAP_SYS_NICE and a priority in [1,99]. The previous code
+    // fed the raw value straight in, so the common default of 0 hit EINVAL
+    // (asserting), and any positive value hit EPERM unprivileged (a no-op that
+    // only warned). Windows' SetThreadPriority never fails, so on Linux the CP
+    // and vsync workers silently never got the boost they get on Windows.
+    // Try real-time when a boost is actually requested, then fall back to a
+    // well-defined SCHED_OTHER slot so behavior is consistent everywhere.
+    if (new_priority > 0) {
+      param.sched_priority = new_priority < 99 ? new_priority : 99;
+      if (pthread_setschedparam(thread_, SCHED_FIFO, &param) == 0) {
+        return;
+      }
+    }
+    param.sched_priority = 0;
+    if (pthread_setschedparam(thread_, SCHED_OTHER, &param) != 0) {
+      static std::atomic<bool> warned{false};
+      if (!warned.exchange(true)) {
+        REXSYS_WARN("set_priority: unable to set thread scheduling policy");
       }
     }
   }
