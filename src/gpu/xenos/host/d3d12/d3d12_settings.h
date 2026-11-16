@@ -24,11 +24,11 @@ class D3D12Settings : public SettingOwner {
   D3D12Settings() : SettingOwner("gpu.d3d12") {}
 
   REX_SETTING(i32, adapter, -1, "Adapter index, -1 picks the first hardware adapter, -2 picks WARP",
-              Range{-2, 15}, kStartupOnly);
+              Range{-2, 15}, kInitOnly);
   REX_SETTING(bool, debug_markers, false,
               "Insert debug markers into GPU command streams for tools like PIX and RenderDoc. "
               "Turns on when RenderDoc is detected");
-  REX_SETTING(bool, bindless, true, "Use bindless resources where available", kRestart);
+  REX_SETTING(bool, bindless, true, "Use bindless resources where available", kRequiresRestart);
   REX_SETTING(bool, readback_memexport, false,
               "Read data written by memory export in shaders on the CPU");
   REX_SETTING(bool, readback_resolve, false, "Read render to texture results on the CPU");
@@ -53,7 +53,7 @@ class D3D12Settings : public SettingOwner {
   REX_SETTING(bool, dxbc_disasm, false, "Dump DXBC disassembly");
   REX_SETTING(bool, dxbc_disasm_dxilconv, false, "Dump DXIL conversion disassembly");
   REX_SETTING(i32, pipeline_creation_threads, -1,
-              "Number of pipeline creation threads, -1 for auto", Range{-1, 32}, kRestart);
+              "Number of pipeline creation threads, -1 for auto", Range{-1, 32}, kRequiresRestart);
   REX_SETTING(u32, async_skip_incomplete_frames_max_ms, 100,
               "With async shader compilation, frames with draws left out because their pipelines "
               "were still being created are not presented (the previous picture stays), as on "
@@ -72,8 +72,8 @@ class D3D12Settings : public SettingOwner {
   REX_SETTING(bool, native_stencil_value_output_intel, false,
               "Native stencil value output for Intel");
   REX_SETTING(std::string, render_target_path, "", "Render target implementation path",
-              kStartupOnly);
-  REX_SETTING(bool, tiled_shared_memory, true, "Use tiled shared memory", kRestart);
+              kInitOnly);
+  REX_SETTING(bool, tiled_shared_memory, true, "Use tiled shared memory", kRequiresRestart);
   REX_SETTING(bool, texture_heaps, true,
               "Place the textures that are not render targets or depth buffers in shared 256 MB "
               "heaps instead of making each one a committed resource of its own. Creating a "
@@ -83,7 +83,7 @@ class D3D12Settings : public SettingOwner {
               "only, to compare",
               kDebugOnly);
   REX_SETTING(bool, allow_tearing, true, "Allow variable refresh rate and tearing");
-  REX_SETTING(bool, debug, false, "Enable Direct3D 12 and DXGI debug layer", kStartupOnly);
+  REX_SETTING(bool, debug, false, "Enable Direct3D 12 and DXGI debug layer", kInitOnly);
   REX_SETTING(bool, break_on_error, false, "Break on Direct3D 12 validation errors");
   REX_SETTING(bool, break_on_warning, false, "Break on Direct3D 12 validation warnings");
   REX_SETTING(i32, queue_priority, 1,
