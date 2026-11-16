@@ -223,6 +223,14 @@ bool ManifestConfig::WriteSdkVersionStamp(const std::filesystem::path& path,
   }
 
   if (stamp_idx) {
+    // The manifest is an input of the codegen build stamp, so touching it when
+    // the stamp already matches makes every build rerun codegen.
+    std::string_view current = lines[*stamp_idx];
+    auto last = current.find_last_not_of(" \t\r");
+    current = last == std::string_view::npos ? std::string_view{} : current.substr(0, last + 1);
+    if (current == stamp_line) {
+      return true;
+    }
     lines[*stamp_idx] = stamp_line;
   } else if (project_header_idx) {
     lines.insert(lines.begin() + *project_header_idx + 1, stamp_line);
