@@ -90,6 +90,7 @@ add_executable(
   kernel/xam_test.cpp
   kernel/xmp_test.cpp
   kernel/identity_test.cpp
+  kernel/dbgprint_test.cpp
   kernel/interrupt_test.cpp
   kernel/dpc_test.cpp
   kernel/notify_test.cpp
