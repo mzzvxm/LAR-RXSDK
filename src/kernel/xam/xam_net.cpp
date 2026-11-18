@@ -1020,6 +1020,13 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
   }
 
   N_XSOCKADDR_IN native_name(name);
+  // Online off: the title's own address is 127.0.0.1 (XNetGetTitleXnAddr), so nothing outside
+  // this PC can reach its sockets anyway. Bound to loopback instead of every interface, they no
+  // longer make Windows ask for firewall access at the first start. Switching online on reopens
+  // every socket (LARecomp's system_link.cpp), so those binds take the address the title asked for.
+  if (!OnlineClient::Enabled() && uint32_t(native_name.sin_addr) == 0u) {
+    native_name.sin_addr = uint32_t(INADDR_LOOPBACK);
+  }
 #if REX_PLATFORM_WIN32
   if (OnlineClient::Enabled()) {
     // Let two local instances "bind" the same system-link port -- real match
