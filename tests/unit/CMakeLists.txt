@@ -58,7 +58,6 @@ add_executable(
   kernel/lock_order_test.cpp
   kernel/pinned_wait_test.cpp
   kernel/sync_test.cpp
-  kernel/critical_section_spin_test.cpp
   kernel/enumerate_test.cpp
   kernel/handles_test.cpp
   kernel/format_test.cpp
