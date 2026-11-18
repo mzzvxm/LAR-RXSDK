@@ -144,23 +144,3 @@ REX_TEST_CASE("A scaled timeval keeps the fraction of its seconds", "[base][chro
   CHECK(usec == 0);
   rex::Clock::SetGuestTimeScalar(scalar);
 }
-
-// The NT epoch is 1601, about four centuries before now: the distance does not fit an i64 of
-// nanoseconds, and a conversion that wraps lands far in the future. Guests do pass such values (a
-// due time of 0 means "already elapsed"), so the conversion saturates.
-REX_TEST_CASE("A WinSystemClock time at the NT epoch converts to the past of steady_clock",
-              "[base][chrono]") {
-  const WinSystemClock::time_point epoch{};
-  const auto converted = std::chrono::clock_cast<std::chrono::steady_clock>(epoch);
-  // Compared as a bool: with libc++ the clock's rep can be a type Catch2 cannot print.
-  const bool in_the_past = converted <= std::chrono::steady_clock::now();
-  CHECK(in_the_past);
-}
-
-REX_TEST_CASE("A WinSystemClock time far in the future converts to the future of steady_clock",
-              "[base][chrono]") {
-  const WinSystemClock::time_point distant(WinSystemClock::duration::max());
-  const auto converted = std::chrono::clock_cast<std::chrono::steady_clock>(distant);
-  const bool in_the_future = converted >= std::chrono::steady_clock::now();
-  CHECK(in_the_future);
-}

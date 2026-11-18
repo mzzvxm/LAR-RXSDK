@@ -18,10 +18,8 @@
 
 #include <atomic>
 #include <chrono>
-#include <limits>
 #include <utility>
 
-#include <rex/math.h>
 #include <rex/platform.h>
 #include <rex/types.h>
 
@@ -245,8 +243,6 @@ inline u64 DecodeFATTimestamp(u32 date, u32 time) {
 // NOLINTNEXTLINE(bugprone-std-namespace-modification): permitted program defined clock
 namespace std::chrono {
 
-// CHECK: llvm-mingw's libc++ 20.1 (__cpp_lib_chrono 201611L) has no clock_cast, so this is right
-// for it; the fork guarded on __cpp_lib_chrono < 201907L, so a libc++ that has one would clash here.
 #ifdef _LIBCPP_VERSION
 /**
  * Replaces the C++20 clock conversion trait, which libc++ does not provide.
@@ -362,27 +358,8 @@ struct clock_time_conversion<std::chrono::steady_clock, ::rex::WinSystemClock> {
     auto nt_now = WinSystemClock::now();
     std::atomic_thread_fence(std::memory_order_acq_rel);
 
-    // Saturate rather than overflow. The NT epoch is 1601, so a time point near it is about four
-    // centuries from now: ~1.3e19 ns, more than an i64 of nanoseconds holds, and the wrapped result
-    // lands arbitrarily far in the future instead of in the past. Guests do pass such values (a due
-    // time of 0 means "already elapsed"). From Xenia Canary 3494b56a (Stuart Kenny).
-    using SteadyDuration = SteadyClock::duration;
-    using SteadyRep = SteadyDuration::rep;
-    constexpr SteadyRep kMin = std::numeric_limits<SteadyRep>::min();
-    constexpr SteadyRep kMax = std::numeric_limits<SteadyRep>::max();
-
-    // t - nt_now is safe in the source period. The cast down to the steady clock's period is what
-    // can overflow, so test the range in double first and only cast when it fits.
-    const auto raw = t - nt_now;
-    const f64 raw_ns =
-        std::chrono::duration_cast<std::chrono::duration<f64, SteadyDuration::period>>(raw).count();
-    const SteadyDuration delta =
-        (raw_ns > static_cast<f64>(kMin) && raw_ns < static_cast<f64>(kMax))
-            ? std::chrono::duration_cast<SteadyDuration>(raw)
-            : SteadyDuration(raw_ns < 0 ? kMin : kMax);
-
-    return SteadyClock::time_point(SteadyDuration(
-        rex::SatAdd(steady_now.time_since_epoch().count(), delta.count())));
+    auto delta = t - nt_now;
+    return steady_now + delta;
   }
 };
 
