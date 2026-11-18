@@ -480,6 +480,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     u32 tile_count;
     u32 source_offset_bytes;
     u32 half_pixel_offset;
+    u32 unit_layout;
   };
   bool EnsureSwapFXAASourceImage(u32 width, u32 height);
   void DestroySwapFXAASourceImage();

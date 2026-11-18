@@ -596,6 +596,7 @@ class D3D12CommandProcessor : public CommandProcessor {
     u32 pixel_size_log2;
     u32 tile_count;
     u32 half_pixel_offset;
+    u32 unit_layout;
   };
   enum class ResolveDownscaleRootParameter : u8 {
     kConstants,

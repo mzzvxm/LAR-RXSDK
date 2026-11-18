@@ -363,6 +363,15 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
 
   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
 
+  /**
+   * 1 when the resolve downscale pass (the resolve readback uses it, and anything else that turns a
+   * scaled resolve back into 1x data) is to find the pixels of a resolution scaled resolve by the
+   * scaled layout's own addressing, 0 for the pass's original addressing (the
+   * resolve_downscale_unit_layout setting). The backends' downscale constants take it as their
+   * last field, so every user of the pass gets it.
+   */
+  u32 GetResolveDownscaleUnitLayoutConstant() const;
+
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
   bool IsReadbackMemexportEnabled() const;
 

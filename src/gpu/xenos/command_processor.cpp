@@ -231,6 +231,10 @@ void CommandProcessor::ClearCaches() {}
 
 void CommandProcessor::InvalidateGPUMemory() {}
 
+u32 CommandProcessor::GetResolveDownscaleUnitLayoutConstant() const {
+  return GetXenosSettings().resolve_downscale_unit_layout.Get() ? 1u : 0u;
+}
+
 ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
     bool legacy_readback_resolve_enabled) const {
   const XenosSettings& xenos_settings = GetXenosSettings();

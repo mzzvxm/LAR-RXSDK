@@ -4338,6 +4338,7 @@ bool VulkanCommandProcessor::IssueCopyReadbackResolvePath() {
                                    (constants.scale_x > 1 || constants.scale_y > 1))
                                       ? 1u
                                       : 0u;
+    constants.unit_layout = GetResolveDownscaleUnitLayoutConstant();
     deferred_command_buffer_.CmdVkPushConstants(resolve_downscale_pipeline_layout_,
                                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
                                                 &constants);

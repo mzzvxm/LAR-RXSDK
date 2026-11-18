@@ -2955,6 +2955,7 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
                                    (constants.scale_x > 1 || constants.scale_y > 1))
                                       ? 1u
                                       : 0u;
+    constants.unit_layout = GetResolveDownscaleUnitLayoutConstant();
     deferred_command_list_.D3DSetComputeRoot32BitConstants(
         static_cast<UINT>(ResolveDownscaleRootParameter::kConstants),
         sizeof(constants) / sizeof(u32), &constants, 0);
