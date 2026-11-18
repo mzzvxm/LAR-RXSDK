@@ -168,6 +168,19 @@ class REX_API SettingsRegistry final : public ISettingsRegistry {
   [[nodiscard]] Result<void> Load(const std::filesystem::path& file,
                                   SettingLayer layer = SettingLayer::kRuntime) override;
 
+  /**
+   * Reads a TOML file like Load, except that a key the settings refuse (a value that does not fit,
+   * an array, a setting that cannot change) is skipped, and the load goes on with the other keys.
+   * Not part of ISettingsRegistry: only the program that owns the registry calls it.
+   *
+   * @param skipped Receives one line for each skipped key, naming the file and the key.
+   * @return Ok, or an error when the file cannot be read or is not valid TOML. Nothing applies
+   *         then.
+   */
+  [[nodiscard]] Result<void> LoadSkippingRefused(const std::filesystem::path& file,
+                                                 SettingLayer layer,
+                                                 std::vector<std::string>& skipped);
+
  private:
   friend REX_API SettingsRegistry& GetSettingsRegistry();
   friend class ProcessSettingsControl;

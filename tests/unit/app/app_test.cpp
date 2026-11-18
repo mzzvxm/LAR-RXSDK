@@ -75,11 +75,14 @@ class TestApp : public rex::test::ObjectApp<rex::app::App> {
   bool fail_configure = false;
   bool fail_init = false;
   bool poll = false;
+  bool tolerate_broken_config = false;
   rex::i32 code = 0;
   rex::test::TempFolder folder{"rex_app_test_"};
   std::vector<rex::IModule*> extra_providers;
 
  protected:
+  bool ToleratesBrokenConfig() const override { return tolerate_broken_config; }
+
   void OnRegisterModules(std::vector<rex::IModule*>& providers) override {
     ObjectApp::OnRegisterModules(providers);
     providers.insert(providers.end(), extra_providers.begin(), extra_providers.end());
@@ -781,9 +784,26 @@ std::string ReadAll(const std::filesystem::path& file) {
 
 }  // namespace
 
+// Upstream's rule: a config file that fails to load fails Init and names the file. An app does not
+// get the fallback below unless it asks for it.
+REX_TEST_CASE_METHOD(Fixture, "a config file that cannot be read fails Init by default",
+                     "[app][app][config]") {
+  rex::test::TempFolder folder("rex_app_broken_default_");
+  const auto file = folder.path / "broken.toml";
+  std::ofstream(file, std::ios::binary) << "[clock\nno_scaling = true\n";
+
+  ActionApp app;
+  auto started = app.Init(Args({"--config_file=" + file.string()}));
+  REQUIRE_FALSE(started);
+  CHECK(started.error().message.find("broken.toml") != std::string::npos);
+  CHECK_FALSE(std::filesystem::exists(file.string() + ".unreadable.bak"));
+  CHECK(app.Shutdown() == 1);
+}
+
 // A broken config file (a typo from hand editing, a half written save) must not keep the player out
-// of the game: the start goes on with the defaults and the file is kept as <file>.unreadable.bak.
-REX_TEST_CASE_METHOD(Fixture, "a config file that cannot be read still lets the app start",
+// of the game: an app for players asks for the fallback, and the start goes on with the defaults
+// and the file is kept as <file>.unreadable.bak.
+REX_TEST_CASE_METHOD(Fixture, "a config file that cannot be read still lets a tolerant app start",
                      "[app][app][config]") {
   rex::test::TempFolder folder("rex_app_broken_");
   const auto file = folder.path / "broken.toml";
@@ -794,6 +814,7 @@ REX_TEST_CASE_METHOD(Fixture, "a config file that cannot be read still lets the 
   auto sink_guard = REX_LOGGER().AddSink(sink);
 
   ActionApp app;
+  app.tolerate_broken_config = true;
   REQUIRE(app.Init(Args({"--config_file=" + file.string()})));
   CHECK(app.config_value_at_init == "false");
   app.Shutdown();
@@ -814,6 +835,58 @@ REX_TEST_CASE_METHOD(Fixture, "a config file that cannot be read still lets the 
   }));
 }
 
+// A file that parses but holds a key the settings refuse (an array, a value that does not fit):
+// a tolerant app skips that key, names it in a warning and keeps every other key, and makes no
+// backup, because the file is not unreadable. An app that is not tolerant fails Init, which is
+// upstream's rule.
+REX_TEST_CASE_METHOD(Fixture, "a refused key in a config file is skipped for a tolerant app",
+                     "[app][app][config]") {
+  rex::test::TempFolder folder("rex_app_bad_value_");
+  const auto file = folder.path / "bad.toml";
+  // The keys apply in name order: clock.no_scaling before the refused ones, log.level after them.
+  const std::string bad =
+      "[clock]\nno_scaling = true\n"
+      "[log]\ncategories = [1, 2]\ncolor = \"maybe\"\nlevel = \"debug\"\n";
+  std::ofstream(file, std::ios::binary) << bad;
+  const std::string file_arg = "--config_file=" + file.string();
+  const std::filesystem::path backup = file.string() + ".unreadable.bak";
+
+  {
+    ActionApp strict;
+    auto started = strict.Init(Args({file_arg}));
+    REQUIRE_FALSE(started);
+    CHECK(started.error().message.find("log.categories") != std::string::npos);
+    CHECK(strict.Shutdown() == 1);
+  }
+  CHECK_FALSE(std::filesystem::exists(backup));
+
+  rex::log::LogCaptureSink sink;
+  auto sink_guard = REX_LOGGER().AddSink(sink);
+  ActionApp tolerant;
+  tolerant.tolerate_broken_config = true;
+  REQUIRE(tolerant.Init(Args({file_arg})));
+  CHECK(tolerant.config_value_at_init == "true");
+  CHECK(REX_LOGGER().level.Get() == "debug");
+  tolerant.Shutdown();
+  sink_guard.Reset();
+
+  CHECK_FALSE(std::filesystem::exists(backup));
+  CHECK(ReadAll(file) == bad);
+  std::vector<rex::log::CapturedMessage> entries;
+  sink.CopySince(0, entries);
+  const auto warned_about = [&entries](std::string_view key) {
+    return std::ranges::any_of(entries, [key](const rex::log::CapturedMessage& entry) {
+      return entry.level == rex::log::Level::kWarn && entry.text.contains(key) &&
+             entry.text.contains("bad.toml");
+    });
+  };
+  CHECK(warned_about("log.categories"));
+  CHECK(warned_about("log.color"));
+  CHECK_FALSE(std::ranges::any_of(entries, [](const rex::log::CapturedMessage& entry) {
+    return entry.text.contains("config file not used");
+  }));
+}
+
 REX_TEST_CASE_METHOD(Fixture, "the layers above a config file that cannot be read still apply",
                      "[app][app][config]") {
   rex::test::TempFolder folder("rex_app_broken_layers_");
@@ -821,13 +894,19 @@ REX_TEST_CASE_METHOD(Fixture, "the layers above a config file that cannot be rea
   std::ofstream(file, std::ios::binary) << "[feedlayers\ndepth = 2\n";
   const std::string file_arg = "--config_file=" + file.string();
 
-  LayerApp plain;
-  REQUIRE(plain.Init(Args({file_arg})));
-  CHECK(plain.depth_at_init == 0);
-  CHECK(plain.layer_at_init == rex::SettingLayer::kDefault);
-  plain.Shutdown();
+  // Each app registers its own "feedlayers" owner, so the first app is gone before the second
+  // exists (two live owners of one name make OnConfigure fail).
+  {
+    LayerApp plain;
+    plain.tolerate_broken_config = true;
+    REQUIRE(plain.Init(Args({file_arg})));
+    CHECK(plain.depth_at_init == 0);
+    CHECK(plain.layer_at_init == rex::SettingLayer::kDefault);
+    plain.Shutdown();
+  }
 
   LayerApp with_flag;
+  with_flag.tolerate_broken_config = true;
   REQUIRE(with_flag.Init(Args({file_arg, "--feedlayers.depth=4"})));
   CHECK(with_flag.depth_at_init == 4);
   CHECK(with_flag.layer_at_init == rex::SettingLayer::kCommandLine);

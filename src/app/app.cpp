@@ -281,6 +281,10 @@ platform::CrashReporterOptions App::GetCrashOptions() {
   return {};
 }
 
+bool App::ToleratesBrokenConfig() const {
+  return false;
+}
+
 rex::ui::IUISystem* App::FindUI() {
   return state_->ui;
 }
@@ -397,15 +401,29 @@ Result<void> App::Init(const CLIArgList& args) {
       }
       state.lock.emplace(std::move(*lock));
     }
-    // An unreadable config file does not stop the start. A player whose file is broken (a typo
-    // from hand editing, a half written save) must still get into the title, so the file is kept
-    // next to itself as <file>.unreadable.bak, the start goes on with the defaults and the
-    // layers above the file, and the problem is logged once the log file is open.
+    // A config file that fails to load fails Init, naming the file, unless the program asks to go
+    // on (ToleratesBrokenConfig). A program for players does: someone whose file is broken (a typo
+    // from hand editing, a half written save, a value an older version accepted) must still get
+    // into the title. A file that cannot be read or is not valid TOML is kept next to itself as
+    // <file>.unreadable.bak and the start goes on with the defaults and the layers above the file.
+    // A file that parses but holds a key the settings refuse keeps every other key: the refused
+    // key is skipped and named in a warning, and the file stays as it is. The problems are logged
+    // once the log file is open.
     std::vector<std::string> config_problems;
     if (const std::filesystem::path file = REX_PATHS().config_file.Get(); !file.empty()) {
       std::error_code exists;
       if (std::filesystem::exists(file, exists)) {
-        if (auto loaded = settings.Load(file, SettingLayer::kFile); !loaded) {
+        const bool tolerant = ToleratesBrokenConfig();
+        std::vector<std::string> skipped;
+        auto loaded = tolerant ? settings.LoadSkippingRefused(file, SettingLayer::kFile, skipped)
+                               : settings.Load(file, SettingLayer::kFile);
+        for (std::string& line : skipped) {
+          config_problems.push_back(std::move(line));
+        }
+        if (!loaded) {
+          if (!tolerant) {
+            return failed("config file", loaded.error());
+          }
           config_problems.push_back(
               std::format("config file not used, {}", loaded.error().GetDescription()));
           std::filesystem::path backup = file;

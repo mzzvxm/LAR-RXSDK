@@ -30,15 +30,25 @@ toml::table& TableFor(toml::table& root, std::string_view dotted_scope) {
   return *table;
 }
 
+/**
+ * Collects the name and text of every scalar key under table. An array is an error that stops the
+ * walk, or, when skipped is given, a line in skipped and the walk goes on.
+ */
 Result<void> CollectLeaves(const toml::table& table, const std::string& prefix,
                            const std::filesystem::path& file,
-                           std::vector<std::pair<std::string, std::string>>& out) {
+                           std::vector<std::pair<std::string, std::string>>& out,
+                           std::vector<std::string>* skipped) {
   for (auto&& [key, node] : table) {
     std::string name =
         prefix.empty() ? std::string(key.str()) : prefix + "." + std::string(key.str());
     if (auto* child = node.as_table()) {
-      REX_TRY_VOID(CollectLeaves(*child, name, file, out));
+      REX_TRY_VOID(CollectLeaves(*child, name, file, out, skipped));
     } else if (node.is_array()) {
+      if (skipped) {
+        skipped->push_back(
+            std::format("{}: key '{}' is an array and is skipped", file.string(), name));
+        continue;
+      }
       return Err(ErrorCategory::kConfig,
                  std::format("{}: key '{}' is an array", file.string(), name));
     } else if (auto* b = node.as_boolean()) {
@@ -104,7 +114,14 @@ Result<void> SettingsRegistry::Save(const std::filesystem::path& file) const {
   return Ok();
 }
 
-Result<void> SettingsRegistry::Load(const std::filesystem::path& file, SettingLayer layer) {
+namespace {
+
+/**
+ * Reads file and applies its keys at layer. A refused key stops the load with an error, or, when
+ * skipped is given, is noted in skipped and passed over.
+ */
+Result<void> LoadFile(SettingsRegistry& registry, const std::filesystem::path& file,
+                      SettingLayer layer, std::vector<std::string>* skipped) {
   // Read through the path object rather than handing the file name to toml::parse_file: that takes
   // the name as UTF-8, while path::string() yields the ANSI code page on Windows, so a non-ASCII
   // character anywhere in the path (a user folder like "Area de Trabalho") makes the open fail.
@@ -128,14 +145,31 @@ Result<void> SettingsRegistry::Load(const std::filesystem::path& file, SettingLa
                std::format("{}: {}", file.string(), std::string(error.description())));
   }
   std::vector<std::pair<std::string, std::string>> leaves;
-  REX_TRY_VOID(CollectLeaves(parsed, {}, file, leaves));
+  REX_TRY_VOID(CollectLeaves(parsed, {}, file, leaves, skipped));
   for (auto& [name, text] : leaves) {
-    if (auto r = SetText(layer, name, text); !r) {
+    if (auto r = registry.SetText(layer, name, text); !r) {
+      if (skipped) {
+        skipped->push_back(std::format("{}: key '{}' is skipped, {}", file.string(), name,
+                                       r.error().GetDescription()));
+        continue;
+      }
       return Err(ErrorCategory::kConfig,
                  std::format("{}: {}", file.string(), r.error().GetDescription()));
     }
   }
   return Ok();
+}
+
+}  // namespace
+
+Result<void> SettingsRegistry::Load(const std::filesystem::path& file, SettingLayer layer) {
+  return LoadFile(*this, file, layer, nullptr);
+}
+
+Result<void> SettingsRegistry::LoadSkippingRefused(const std::filesystem::path& file,
+                                                   SettingLayer layer,
+                                                   std::vector<std::string>& skipped) {
+  return LoadFile(*this, file, layer, &skipped);
 }
 
 }  // namespace rex

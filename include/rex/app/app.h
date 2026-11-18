@@ -215,6 +215,19 @@ class REX_APP_API App : public SettingOwner {
   virtual platform::CrashReporterOptions GetCrashOptions();
 
   /**
+   * Whether the start goes on when the config file fails to load. The default is false: Init fails
+   * naming the file, whether it cannot be read, is not valid TOML or holds a value the settings
+   * refuse. A program for players returns true:
+   * - A file that cannot be read or is not valid TOML is copied next to itself as
+   *   <file>.unreadable.bak, and the start goes on with the defaults and the layers above the file.
+   * - A file that parses but holds a key the settings refuse (a value that does not fit, an array,
+   *   a setting that cannot change) keeps every other key. The refused key is skipped and named in
+   *   a warning, and the file is left as it is.
+   * Warnings are logged once the log file is open. Init reads this once, after OnConfigure.
+   */
+  virtual bool ToleratesBrokenConfig() const;
+
+  /**
    * Returns the UI system, or null while the systems are not connected and after a failed start
    * released them.
    */
