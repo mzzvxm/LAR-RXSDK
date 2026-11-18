@@ -47,6 +47,7 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/apply_gamma_table_fxaa_luma_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/fxaa_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/fxaa_extreme_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/fullscreen_cw_vs.h"
 #include "../shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
 }  // namespace shaders
 
@@ -853,6 +854,11 @@ bool D3D12CommandProcessor::SetupContext() {
   // Optional, added in Creators Update (SDK 10.0.15063.0).
   command_list_->QueryInterface(IID_PPV_ARGS(&command_list_1_));
 
+  CreateMsaaLineGuardPipelines();
+  REXGPU_INFO("D3D12 MSAA line guard pipelines: 2x {}, 4x {}",
+              msaa_line_guard_pipelines_[0] ? "ready" : "none",
+              msaa_line_guard_pipelines_[1] ? "ready" : "none");
+
   bindless_resources_used_ = GetD3D12Settings().bindless.Get() &&
                              provider.GetResourceBindingTier() >= D3D12_RESOURCE_BINDING_TIER_2;
 
@@ -1523,9 +1529,70 @@ bool D3D12CommandProcessor::SetupContext() {
   return true;
 }
 
+bool D3D12CommandProcessor::CreateMsaaLineGuardPipelines() {
+  const gpu::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+  D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+  msaa_line_guard_root_signature_ =
+      gpu::d3d12::objects::CreateRootSignature(provider, root_signature_desc);
+  if (!msaa_line_guard_root_signature_) {
+    REXGPU_WARN("Failed to create the MSAA line guard root signature, the guard is not used");
+    return false;
+  }
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = msaa_line_guard_root_signature_;
+  desc.VS.pShaderBytecode = shaders::kFullscreenCWVS;
+  desc.VS.BytecodeLength = sizeof(shaders::kFullscreenCWVS);
+  desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  desc.SampleMask = UINT_MAX;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  // Only the sample count has to match what the line pipeline after it has; a
+  // pipeline with no outputs at all can't have one.
+  desc.NumRenderTargets = 1;
+  desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  bool any = false;
+  for (u32 i = 0; i < 2; ++i) {
+    desc.SampleDesc.Count = i ? 4 : 2;
+    if (FAILED(device->CreateGraphicsPipelineState(&desc,
+                                                   IID_PPV_ARGS(&msaa_line_guard_pipelines_[i])))) {
+      REXGPU_WARN("Failed to create the {}-sample MSAA line guard pipeline", desc.SampleDesc.Count);
+      msaa_line_guard_pipelines_[i] = nullptr;
+      continue;
+    }
+    msaa_line_guard_pipelines_[i]->SetName(i ? L"MSAA line guard 4x" : L"MSAA line guard 2x");
+    any = true;
+  }
+  return any;
+}
+
+ID3D12PipelineState* D3D12CommandProcessor::GetMsaaLineGuardPipeline(void* handle) const {
+  u32 samples = pipeline_cache_->GetMsaaLineGuardSamples(handle);
+  if (!samples) {
+    return nullptr;
+  }
+  // 2 samples: index 0, 4 samples: index 1.
+  ID3D12PipelineState* guard = msaa_line_guard_pipelines_[samples >> 2];
+  if (guard && msaa_line_guard_binds_.fetch_add(1, std::memory_order_relaxed) == 0) {
+    REXGPU_INFO("D3D12 MSAA line guard: first guard pipeline bound ({} samples)", samples);
+  }
+  return guard;
+}
+
 void D3D12CommandProcessor::ShutdownContext() {
   window_title_state_.store(0, std::memory_order_release);
   AwaitAllQueueOperationsCompletion();
+  if (msaa_line_guard_binds_.load(std::memory_order_relaxed)) {
+    REXGPU_INFO("D3D12 MSAA line guard: {} guard pipeline binds in this run",
+                msaa_line_guard_binds_.load(std::memory_order_relaxed));
+    msaa_line_guard_binds_.store(0, std::memory_order_relaxed);
+  }
+  for (ID3D12PipelineState*& guard : msaa_line_guard_pipelines_) {
+    gpu::d3d12::objects::ReleaseAndNull(guard);
+  }
+  gpu::d3d12::objects::ReleaseAndNull(msaa_line_guard_root_signature_);
   InvalidateAllVertexBufferResidency();
   ShutdownOcclusionQueryResources();
 
