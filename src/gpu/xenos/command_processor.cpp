@@ -349,10 +349,14 @@ void CommandProcessor::WriteRegister(u32 index, u32 value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile u32&>(regs.values[index]) = value;
+#ifndef NDEBUG
+  // Diagnostic only. The lookup is a large switch and this runs for every
+  // register write; it showed up as 8.7% of the GPU command thread.
   if (!regs.GetRegisterInfo(index)) {
     REXGPU_WARN_ONCE(unknown_write_once_, index, "GPU: Write to unknown register ({:04X} = {:08X})",
                      index, value);
   }
+#endif
 
   if (index >= std::to_underlying(xenos::Register::SCRATCH_REG0) &&
       index <= std::to_underlying(xenos::Register::SCRATCH_REG7)) {
