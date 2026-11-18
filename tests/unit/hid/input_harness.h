@@ -113,6 +113,7 @@ class InputApp final : public rex::test::ObjectApp<rex::app::App> {
 
   std::function<void(rex::hid::IInputSystem&)> body;
   std::exception_ptr failure;
+  bool shared_pads = false;
 
   rex::Result<void> Start() { return Init(rex::CLIArgList::Parse(std::vector<std::string>{})); }
 
@@ -133,6 +134,9 @@ class InputApp final : public rex::test::ObjectApp<rex::app::App> {
   rex::Result<void> OnConfigure(rex::SettingsRegistry&) override {
     REX_TRY_VOID(root.SetText(rex::SettingLayer::kTitle, folder_.path.string()));
     REX_TRY_VOID(GetInput().GetSettings().drivers.SetText(rex::SettingLayer::kTitle, names_));
+    if (shared_pads) {
+      REX_TRY_VOID(GetInput().GetSettings().shared_pads.SetText(rex::SettingLayer::kTitle, "true"));
+    }
     REX_TRY_VOID(GetUI().GetSettings().driver.SetText(rex::SettingLayer::kTitle, "none"));
     return rex::Ok();
   }
@@ -155,9 +159,11 @@ class InputApp final : public rex::test::ObjectApp<rex::app::App> {
   FakeProvider provider_;
 };
 
-inline void Run(const std::string& names, std::function<void(rex::hid::IInputSystem&)> body) {
+inline void Run(const std::string& names, std::function<void(rex::hid::IInputSystem&)> body,
+                bool shared_pads = false) {
   g_fake = {};
   InputApp app(names);
+  app.shared_pads = shared_pads;
   app.body = std::move(body);
   const bool started = static_cast<bool>(app.Start());
   app.Finish();

@@ -8,6 +8,7 @@ add_executable(
   apu/audio_system_test.cpp
   apu/sdl3_audio_test.cpp
   hid/input_system_test.cpp
+  hid/input_device_list_test.cpp
   hid/sdl3_input_test.cpp
   hid/bindings_test.cpp
   hid/input_source_test.cpp
