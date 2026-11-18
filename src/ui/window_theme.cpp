@@ -19,11 +19,23 @@
 #endif
 #include <windows.h>
 
-#include <dwmapi.h>
-
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+
+namespace {
+// dwmapi is loaded when the theme is first applied rather than linked: rexui may link only rexbase
+// (cmake/rexglue_link_audit.cmake), and dwmapi.dll is always present on the Windows versions the SDK runs on.
+using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+DwmSetWindowAttributeFn DwmSetWindowAttributeProc() {
+  static const DwmSetWindowAttributeFn fn = [] {
+    HMODULE dwm = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return dwm ? reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute"))
+               : nullptr;
+  }();
+  return fn;
+}
+}  // namespace
 #endif
 
 namespace rex::ui {
@@ -39,9 +51,12 @@ void UISystem::State::ApplyWindowTheme() {
   }
   // DWM only repaints the non-client area on a state change, so setting the attribute is enough to
   // retheme a window that is already up.
+  const DwmSetWindowAttributeFn set_attribute = DwmSetWindowAttributeProc();
+  if (!set_attribute) {
+    return;
+  }
   const BOOL dark = owner.GetSettings().window_theme.Get() == "dark" ? TRUE : FALSE;
-  DwmSetWindowAttribute(static_cast<HWND>(native->window), DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
-                        sizeof(dark));
+  set_attribute(static_cast<HWND>(native->window), DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 #endif
 }
 
