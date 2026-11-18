@@ -13,6 +13,7 @@
 #include "temp_folder.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -285,4 +286,34 @@ REX_TEST_CASE("A manifest with only known keys has no warnings", "[codegen][keys
   CHECK(manifest->shared.load_warnings.empty());
   CHECK(manifest->entrypoint.recompiler.load_warnings.empty());
   CHECK(manifest->modules[0].recompiler.load_warnings.empty());
+}
+
+REX_TEST_CASE("Stamping a manifest that holds the version leaves the file alone", "[codegen]") {
+  rex::test::TempFolder folder;
+  const auto path = folder.path / "demo_manifest.toml";
+  rex::test::WriteText(path, "[project]\nname = \"demo\"\nsdk_version = \"1.2.3\"\n");
+  // An old time, so that a rewrite shows even where the file system clock is coarse.
+  fs::last_write_time(path, fs::file_time_type::clock::now() - std::chrono::hours(24));
+  const auto time_before = fs::last_write_time(path);
+  const std::string text_before = rex::test::ReadText(path);
+
+  REQUIRE(rex::codegen::ManifestConfig::WriteSDKVersionStamp(path, "1.2.3"));
+
+  CHECK(rex::test::ReadText(path) == text_before);
+  // Compared as a bool: with libc++ the clock's rep can be a type Catch2 cannot print.
+  const bool unchanged = fs::last_write_time(path) == time_before;
+  CHECK(unchanged);
+}
+
+REX_TEST_CASE("Stamping a manifest writes the version when it differs or is missing", "[codegen]") {
+  rex::test::TempFolder folder;
+  const auto path = folder.path / "demo_manifest.toml";
+
+  rex::test::WriteText(path, "[project]\nname = \"demo\"\nsdk_version = \"1.2.3\"\n");
+  REQUIRE(rex::codegen::ManifestConfig::WriteSDKVersionStamp(path, "1.2.4"));
+  CHECK(rex::test::ReadText(path) == "[project]\nname = \"demo\"\nsdk_version = \"1.2.4\"\n");
+
+  rex::test::WriteText(path, "[project]\nname = \"demo\"\n");
+  REQUIRE(rex::codegen::ManifestConfig::WriteSDKVersionStamp(path, "1.2.4"));
+  CHECK(rex::test::ReadText(path) == "[project]\nsdk_version = \"1.2.4\"\nname = \"demo\"\n");
 }
