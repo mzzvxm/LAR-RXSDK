@@ -523,7 +523,7 @@ kernel::X_STATUS SocketObject::Bind(N_XSOCKADDR_IN* name, u32 name_len) const {
   return kernel::X_STATUS_SUCCESS;
 }
 
-kernel::X_STATUS SocketObject::GetName(N_XSOCKADDR* name, bool keep_address) const {
+kernel::X_STATUS SocketObject::GetName(N_XSOCKADDR* name) const {
   sockaddr_in host{};
   i32 host_len = sizeof(host);
   if (socket.GetLocalName(reinterpret_cast<sockaddr*>(&host), &host_len) < 0) {
@@ -532,9 +532,7 @@ kernel::X_STATUS SocketObject::GetName(N_XSOCKADDR* name, bool keep_address) con
   if (host.sin_port == 0) {
     return kernel::X_STATUS_INVALID_PARAMETER_1;
   }
-  if (!keep_address) {
-    host.sin_addr.s_addr = 0;
-  }
+  host.sin_addr.s_addr = 0;
   FromHost(host, *name);
   return kernel::X_STATUS_SUCCESS;
 }

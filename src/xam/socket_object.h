@@ -230,10 +230,8 @@ struct SocketObject final : kernel::IXAMObject {
    * X_STATUS_UNSUCCESSFUL.
    *
    * @param name Receives the local address.
-   * @param keep_address True to report the address the native socket is bound to instead of
-   *        INADDR_ANY. MCLA reads its own address from getsockname.
    */
-  kernel::X_STATUS GetName(N_XSOCKADDR* name, bool keep_address = false) const;
+  kernel::X_STATUS GetName(N_XSOCKADDR* name) const;
 
   /**
    * Returns the port the native socket is bound to, host byte order, 0 when it has none.

@@ -1254,12 +1254,11 @@ u32 NetDll_getsockname_entry([[maybe_unused]] u32 caller, u32 socket_handle,
     return -1;
   }
 
-  // CHECK: v0.11's getsockname reports INADDR_ANY; v0.10 + MCLA reported the bound address
-  // (127.0.0.1 after the offline loopback bind). Kept the MCLA behaviour.
-  // MCLA: the title reads its own address from here. Online that is the relay virtual ip, offline
-  // the address the socket is bound to (loopback, see NetDll_bind), not INADDR_ANY.
+  // The address is INADDR_ANY, as in v0.11, offline too: the loopback bind in NetDll_bind is a host
+  // detail the title must not see, and the title never asked for 127.0.0.1. Online the title reads
+  // its own address from here, and it is the relay virtual ip (MCLA).
   N_XSOCKADDR native_name;
-  kernel::X_STATUS status = socket->GetName(&native_name, /*keep_address=*/true);
+  kernel::X_STATUS status = socket->GetName(&native_name);
   if (kernel::XFAILED(status)) {
     CurrentThread().SetLastError(
         status == kernel::X_STATUS_INVALID_PARAMETER_1 ? kWSAEINVAL : CallError(*socket));
