@@ -31,6 +31,9 @@ using rex::memory::CreateFileMappingHandle;
 using rex::memory::kFileMappingHandleInvalid;
 using rex::memory::PageAccess;
 
+#if REX_PLATFORM_WIN32
+
+// POSIX drops the name as soon as the object exists, so only Windows keeps it taken.
 REX_TEST_CASE("Creating a file mapping under a name that exists fails", "[base][file_mapping]") {
   const std::filesystem::path name =
       std::format("rex_file_mapping_test_{:08x}", static_cast<rex::u32>(std::random_device{}()));
@@ -44,6 +47,8 @@ REX_TEST_CASE("Creating a file mapping under a name that exists fails", "[base][
   }
   CloseFileMappingHandle(first, name);
 }
+
+#endif
 
 #if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
 
@@ -68,7 +73,35 @@ bool SharedMemoryExists(const std::string& name) {
   return true;
 }
 
+/** Leaves a named object in /dev/shm, as a run that was killed before it closed its mapping did. */
+bool LeaveSharedMemory(const std::string& name) {
+  const int fd = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) {
+    return false;
+  }
+  close(fd);
+  return true;
+}
+
 }  // namespace
+
+REX_TEST_CASE("A file mapping's name is gone from /dev/shm as soon as it is created",
+              "[base][file_mapping]") {
+  const std::filesystem::path name = rex::memory::CreateFileMappingName("rex_unlink_test_");
+  const auto handle = CreateFileMappingHandle(name, 0x10000, PageAccess::kReadWrite, false);
+  REQUIRE(handle != kFileMappingHandleInvalid);
+
+  CHECK_FALSE(SharedMemoryExists("/" + name.string()));
+
+  // The descriptor keeps the object, and views map from it.
+  void* view = rex::memory::MapFileView(handle, nullptr, 0x10000, PageAccess::kReadWrite, 0);
+  REQUIRE(view != nullptr);
+  *static_cast<volatile rex::u8*>(view) = 0x5A;
+  CHECK(*static_cast<volatile rex::u8*>(view) == 0x5A);
+  CHECK(rex::memory::UnmapFileView(handle, view, 0x10000));
+
+  CloseFileMappingHandle(handle, name);
+}
 
 REX_TEST_CASE("Creating a file mapping name puts the process ID after the prefix",
               "[base][file_mapping]") {
@@ -85,12 +118,10 @@ REX_TEST_CASE("Removing stale file mappings unlinks names of dead processes and 
   const std::filesystem::path live_name = rex::memory::CreateFileMappingName(prefix);
   const std::filesystem::path other_name = std::format("rex_other_test_{}_x", ReapedProcessID());
 
-  const auto dead = CreateFileMappingHandle(dead_name, 0x10000, PageAccess::kReadWrite, false);
-  const auto live = CreateFileMappingHandle(live_name, 0x10000, PageAccess::kReadWrite, false);
-  const auto other = CreateFileMappingHandle(other_name, 0x10000, PageAccess::kReadWrite, false);
-  REQUIRE(dead != kFileMappingHandleInvalid);
-  REQUIRE(live != kFileMappingHandleInvalid);
-  REQUIRE(other != kFileMappingHandleInvalid);
+  // CreateFileMappingHandle drops the name at once, so leave the objects the way an older run did.
+  REQUIRE(LeaveSharedMemory("/" + dead_name.string()));
+  REQUIRE(LeaveSharedMemory("/" + live_name.string()));
+  REQUIRE(LeaveSharedMemory("/" + other_name.string()));
 
   rex::memory::RemoveStaleFileMappings(prefix);
 
@@ -98,9 +129,9 @@ REX_TEST_CASE("Removing stale file mappings unlinks names of dead processes and 
   CHECK(SharedMemoryExists("/" + live_name.string()));
   CHECK(SharedMemoryExists("/" + other_name.string()));
 
-  CloseFileMappingHandle(dead, dead_name);
-  CloseFileMappingHandle(live, live_name);
-  CloseFileMappingHandle(other, other_name);
+  shm_unlink(("/" + dead_name.string()).c_str());
+  shm_unlink(("/" + live_name.string()).c_str());
+  shm_unlink(("/" + other_name.string()).c_str());
 }
 
 #endif

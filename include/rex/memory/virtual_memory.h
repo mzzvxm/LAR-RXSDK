@@ -156,7 +156,8 @@ constexpr FileMappingHandle kFileMappingHandleInvalid = -1;
  * @param access Access rights of views of the object.
  * @param commit True to commit the whole object up front. Only Windows reads it.
  * @return Handle to the object, or kFileMappingHandleInvalid on failure or when an object with
- *         that name already exists.
+ *         that name already exists. POSIX removes the name as soon as the object exists, so the
+ *         object lasts as long as the handle and a second call with the name succeeds.
  */
 REX_API FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                                   PageAccess access, bool commit);
