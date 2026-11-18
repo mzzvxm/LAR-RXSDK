@@ -13,7 +13,6 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <string>
 
 #include <rex/logging/logger.h>
 #include <rex/setting.h>
@@ -307,8 +306,12 @@ REX_TEST_CASE("settings: save writes changed settings and load reads them back",
 REX_TEST_CASE("settings: load reads a file in a folder with non-ASCII characters",
               "[base][settings]") {
   rex::test::TempFolder folder("rex_settings_nonascii_");
-  const std::filesystem::path directory =
-      folder.path / std::u8string(u8"\u00C1rea de Trabalho");
+  // Not std::u8string: the SDK builds with -fno-char8_t.
+#ifdef _WIN32
+  const std::filesystem::path directory = folder.path / std::filesystem::path(L"\u00C1rea de Trabalho");
+#else
+  const std::filesystem::path directory = folder.path / std::filesystem::path("\xC3\x81rea de Trabalho");  // UTF-8 bytes
+#endif
   std::filesystem::create_directories(directory);
   const std::filesystem::path file = directory / "config.toml";
   {
