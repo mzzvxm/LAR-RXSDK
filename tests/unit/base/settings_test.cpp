@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
 
 #include <rex/logging/logger.h>
 #include <rex/setting.h>
