@@ -224,14 +224,9 @@ Result<void> TitleState::LoadKernel() {
 
   file_system_ = services->file_system->Create();
 
-  if (auto created = CreateSubsystems(); !created) {
-    return fail(X_STATUS_UNSUCCESSFUL, created.error().message);
-  }
-
-  if (auto initialized = kernel::InitializeKernel(owner_); !initialized) {
-    return fail(X_STATUS_UNSUCCESSFUL, initialized.error().message);
-  }
-
+  // The standard mounts come before the subsystems, so a game folder that is not there fails the
+  // load before anything is written to disk. Attaching XAM creates the profile folders, and in a
+  // tool the user root is the game root, so a missing game folder would be created by it.
   if (game_data_root_.empty()) {
     REXSYS_WARN("TitleRuntime::Load: no game_data_root, the standard mounts are skipped");
   } else {
@@ -240,6 +235,14 @@ Result<void> TitleState::LoadKernel() {
         !mounted) {
       return fail(X_STATUS_UNSUCCESSFUL, mounted.error().message);
     }
+  }
+
+  if (auto created = CreateSubsystems(); !created) {
+    return fail(X_STATUS_UNSUCCESSFUL, created.error().message);
+  }
+
+  if (auto initialized = kernel::InitializeKernel(owner_); !initialized) {
+    return fail(X_STATUS_UNSUCCESSFUL, initialized.error().message);
   }
 
   setup_complete_ = true;
