@@ -28,6 +28,14 @@
 
 namespace rex::gpu {
 
+/**
+ * Alpha to mask: an alpha this far under a coverage threshold still passes it, about half a step of
+ * 8 bit alpha (0.0039 / 2), the comparison of alpha rounded to 8 bits. A shader alpha that comes
+ * out a hair under 1.0 on the host lost a sample at the threshold 1.0, which showed as a lattice of
+ * dots.
+ */
+inline constexpr f32 kAlphaToMaskTolerance = 0.00195f;
+
 class REX_GPU_XENOS_API ShaderTranslator : public rex::NonCopyable {
  public:
   virtual ~ShaderTranslator();

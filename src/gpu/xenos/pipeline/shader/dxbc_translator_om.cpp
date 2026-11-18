@@ -969,7 +969,7 @@ void DXBCShaderTranslator::CompletePixelShaderAlphaToMaskSample(
   dxbc::Dest temp_dest(dxbc::Dest::R(temp, 1 << temp_component));
   dxbc::Src temp_src(dxbc::Src::R(temp).Select(temp_component));
   a_.OpMAd(temp_dest, threshold_offset, dxbc::Src::LF(-threshold_offset_scale),
-           dxbc::Src::LF(threshold_base));
+           dxbc::Src::LF(threshold_base - kAlphaToMaskTolerance));
   // A NaN alpha counts as not covered.
   a_.OpGE(temp_dest, dxbc::Src::R(system_temps_color_[0], dxbc::Src::kWWWW), temp_src);
   dxbc::Dest coverage_dest(dxbc::Dest::R(coverage_temp, 1 << coverage_temp_component));
