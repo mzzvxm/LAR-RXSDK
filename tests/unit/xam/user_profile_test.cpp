@@ -14,7 +14,6 @@
 
 #include <string>
 
-#include <rex/kernel/kernel_settings.h>
 #include <rex/setting.h>
 #include <rex/settings_registry.h>
 #include <rex/xam/user_profile.h>
@@ -72,11 +71,12 @@ REX_TEST_CASE("A generated XUID is valid, per profile and looks like the legacy 
   }
 }
 
+// The app loads the default modules, so the kernel module has registered kernel.user_name before
+// the test body runs; the test sets it by name instead of registering a second owner.
 REX_TEST_CASE("The configured name follows kernel.user_name", "[xam][profile]") {
-  rex::kernel::KernelSettings kernel_owner;
   HarnessApp app;
   app.configure = [&](rex::SettingsRegistry& settings) -> rex::Result<void> {
-    REX_TRY_VOID(settings.Register(kernel_owner));
+    REQUIRE(settings.Find("kernel.user_name"));
     // Nothing chosen yet: the front end asks for a name, and until then the default stands.
     CHECK(UserProfile::ConfiguredName() == UserProfile::kDefaultName);
     {
@@ -87,13 +87,13 @@ REX_TEST_CASE("The configured name follows kernel.user_name", "[xam][profile]") 
       CHECK(profile.GetXUID() == 0xB13E123456789ABCull);
     }
 
-    REX_TRY_VOID(kernel_owner.user_name.SetText(SettingLayer::kRuntime, "  Player<One>. "));
+    REX_TRY_VOID(settings.SetText(SettingLayer::kRuntime, "kernel.user_name", "  Player<One>. "));
     CHECK(UserProfile::ConfiguredName() == "PlayerOne");
     UserProfile named;
     CHECK(named.GetName() == "PlayerOne");
 
     // A name that sanitizes to nothing falls back to the default.
-    REX_TRY_VOID(kernel_owner.user_name.SetText(SettingLayer::kRuntime, "<>?"));
+    REX_TRY_VOID(settings.SetText(SettingLayer::kRuntime, "kernel.user_name", "<>?"));
     CHECK(UserProfile::ConfiguredName() == UserProfile::kDefaultName);
     return rex::Ok();
   };
