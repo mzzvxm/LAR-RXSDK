@@ -2955,7 +2955,9 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
                                    (constants.scale_x > 1 || constants.scale_y > 1))
                                       ? 1u
                                       : 0u;
-    constants.unit_layout = GetResolveDownscaleUnitLayoutConstant();
+    // Always the scaled resolve layout's addressing. The compiled shader keeps the original one
+    // behind this constant, which reads a neighbouring block's pixel at 2x2 for 4 bytes a pixel.
+    constants.unit_layout = 1u;
     deferred_command_list_.D3DSetComputeRoot32BitConstants(
         static_cast<UINT>(ResolveDownscaleRootParameter::kConstants),
         sizeof(constants) / sizeof(u32), &constants, 0);

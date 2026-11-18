@@ -4338,7 +4338,9 @@ bool VulkanCommandProcessor::IssueCopyReadbackResolvePath() {
                                    (constants.scale_x > 1 || constants.scale_y > 1))
                                       ? 1u
                                       : 0u;
-    constants.unit_layout = GetResolveDownscaleUnitLayoutConstant();
+    // Always the scaled resolve layout's addressing. The compiled shader keeps the original one
+    // behind this constant, which reads a neighbouring block's pixel at 2x2 for 4 bytes a pixel.
+    constants.unit_layout = 1u;
     deferred_command_buffer_.CmdVkPushConstants(resolve_downscale_pipeline_layout_,
                                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
                                                 &constants);

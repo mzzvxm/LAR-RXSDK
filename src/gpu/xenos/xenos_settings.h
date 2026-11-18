@@ -76,15 +76,6 @@ class XenosSettings : public SettingOwner {
   REX_SETTING(bool, readback_resolve_half_pixel_offset, false,
               "When draw resolution scaling is active, sample from the center of each scaled block "
               "during resolve readback downscale");
-  REX_SETTING(
-      bool, resolve_downscale_unit_layout, true,
-      "When draw resolution scaling is active, the pass that turns a scaled resolve back into "
-      "the 1x data (the resolve readback of the title's textures) finds each guest pixel's "
-      "host pixel by the scaled resolve layout's own addressing (host pixels are kept in N x 1 "
-      "sub-units, column-major, inside one guest unit of N pixels). Off: the pass's original "
-      "addressing (the pixel's byte address times the scale), which reads the right pixel at "
-      "1x and for 8 bytes a pixel at 2x2 only: with 4 bytes a pixel half of the pixels at 2x2 "
-      "come from a neighbouring block");
   REX_SETTING(bool, readback_memexport_fast, true,
               "Use fast double buffered memexport readback when possible, with automatic fallback "
               "to full synchronous readback");
