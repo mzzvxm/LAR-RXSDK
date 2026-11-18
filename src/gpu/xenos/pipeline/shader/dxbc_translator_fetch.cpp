@@ -395,6 +395,11 @@ u32 DXBCShaderTranslator::FindOrAddTextureBinding(u32 fetch_constant,
     return kMaxTextureBindings - 1;
   }
   u32 texture_binding_index = static_cast<u32>(texture_bindings_.size());
+  // The index in the shader's descriptor index constant buffer: the number of bindings before
+  // this one (0 to count - 1, as the command processor fills the buffer and the shader declares
+  // it). Taken after emplace_back it was one too high, and the last binding of a shader with a
+  // multiple of 4 bindings was read past the end of the buffer.
+  u32 bindless_descriptor_index = bindless_resources_used_ ? GetBindlessResourceCount() : 0;
   TextureBinding& new_texture_binding = texture_bindings_.emplace_back();
   if (!bindless_resources_used_) {
     new_texture_binding.bindful_srv_index = srv_count_++;
@@ -418,8 +423,7 @@ u32 DXBCShaderTranslator::FindOrAddTextureBinding(u32 fetch_constant,
   }
   new_texture_binding.bindful_srv_rdef_name_ptr = 0;
   // 0 if not bindless so it is consistent for hashing.
-  new_texture_binding.bindless_descriptor_index =
-      bindless_resources_used_ ? GetBindlessResourceCount() : 0;
+  new_texture_binding.bindless_descriptor_index = bindless_descriptor_index;
   new_texture_binding.fetch_constant = fetch_constant;
   new_texture_binding.dimension = dimension;
   new_texture_binding.is_signed = is_signed;
@@ -451,10 +455,11 @@ u32 DXBCShaderTranslator::FindOrAddSamplerBinding(u32 fetch_constant,
     REX_ASSERT_ALWAYS();
     return kMaxSamplerBindings - 1;
   }
-  SamplerBinding& new_sampler_binding = sampler_bindings_.emplace_back();
+  // The number of bindings before this one, as for the textures (FindOrAddTextureBinding).
   // 0 if not bindless so it is consistent for hashing.
-  new_sampler_binding.bindless_descriptor_index =
-      bindless_resources_used_ ? GetBindlessResourceCount() : 0;
+  u32 bindless_descriptor_index = bindless_resources_used_ ? GetBindlessResourceCount() : 0;
+  SamplerBinding& new_sampler_binding = sampler_bindings_.emplace_back();
+  new_sampler_binding.bindless_descriptor_index = bindless_descriptor_index;
   new_sampler_binding.fetch_constant = fetch_constant;
   new_sampler_binding.mag_filter = mag_filter;
   new_sampler_binding.min_filter = min_filter;
