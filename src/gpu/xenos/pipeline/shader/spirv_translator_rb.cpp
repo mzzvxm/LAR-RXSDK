@@ -798,6 +798,41 @@ void SPIRVShaderTranslator::CompleteFragmentShaderInMain() {
       spv::Id color_variable = output_or_var_fragment_data_[color_target_index];
       spv::Id color = builder_->createLoad(color_variable, spv::NoPrecision);
 
+      if (!edram_fragment_shader_interlock_) {
+        // MIN / MAX blending with the SrcAlpha source factor: the host ignores blend factors in
+        // those equations, the Xenos does not (see kSysFlagMinMaxColor0TimesSrcAlphaShift).
+        // The alpha as the blender takes it, saturated; 1 where the flag is not set.
+        spv::Id min_max_alpha = builder_->CreateTriBuiltinCall(
+            type_float, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+            builder_->createCompositeExtract(color, type_float, 3), const_float_0, const_float_1);
+        spv::Id min_max_color_factor = builder_->createTriOp(
+            spv::OpSelect, type_float,
+            builder_->createBinOp(
+                spv::OpINotEqual, type_bool,
+                builder_->createBinOp(spv::OpBitwiseAnd, type_uint, main_system_constant_flags_,
+                                      builder_->makeUintConstant(kSysFlagMinMaxColor0TimesSrcAlpha
+                                                                 << color_target_index)),
+                const_uint_0_),
+            min_max_alpha, const_float_1);
+        spv::Id min_max_alpha_factor = builder_->createTriOp(
+            spv::OpSelect, type_float,
+            builder_->createBinOp(
+                spv::OpINotEqual, type_bool,
+                builder_->createBinOp(spv::OpBitwiseAnd, type_uint, main_system_constant_flags_,
+                                      builder_->makeUintConstant(kSysFlagMinMaxAlpha0TimesSrcAlpha
+                                                                 << color_target_index)),
+                const_uint_0_),
+            min_max_alpha, const_float_1);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_color_factor);
+        id_vector_temp_.push_back(min_max_alpha_factor);
+        color = builder_->CreateNoContractionBinOp(
+            spv::OpFMul, type_float4, color,
+            builder_->createCompositeConstruct(type_float4, id_vector_temp_));
+      }
+
       id_vector_temp_.clear();
       id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantColorExpBias));
       id_vector_temp_.push_back(builder_->makeIntConstant(static_cast<i32>(color_target_index)));

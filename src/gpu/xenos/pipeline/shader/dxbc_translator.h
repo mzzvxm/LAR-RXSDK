@@ -175,6 +175,21 @@ class DXBCShaderTranslator : public ShaderTranslator {
      */
     kSysFlagROVDepthStencilEarlyWriteShift,
 
+    /**
+     * The Xenos applies the source blend factor in the MIN and MAX blend equations as well,
+     * Direct3D 12 ignores the factors there. With these set (host render target path), the pixel
+     * shader multiplies its colour / its alpha for that render target by its (saturated) alpha
+     * itself: the SrcAlpha source factor of a MIN / MAX blend whose destination factor is One.
+     */
+    kSysFlagMinMaxColor0TimesSrcAlphaShift,
+    kSysFlagMinMaxColor1TimesSrcAlphaShift,
+    kSysFlagMinMaxColor2TimesSrcAlphaShift,
+    kSysFlagMinMaxColor3TimesSrcAlphaShift,
+    kSysFlagMinMaxAlpha0TimesSrcAlphaShift,
+    kSysFlagMinMaxAlpha1TimesSrcAlphaShift,
+    kSysFlagMinMaxAlpha2TimesSrcAlphaShift,
+    kSysFlagMinMaxAlpha3TimesSrcAlphaShift,
+
     kSysFlagCount,
 
     kSysFlagSharedMemoryIsUAV = 1u << kSysFlagSharedMemoryIsUAVShift,
@@ -198,6 +213,8 @@ class DXBCShaderTranslator : public ShaderTranslator {
     kSysFlagROVDepthWrite = 1u << kSysFlagROVDepthWriteShift,
     kSysFlagROVStencilTest = 1u << kSysFlagROVStencilTestShift,
     kSysFlagROVDepthStencilEarlyWrite = 1u << kSysFlagROVDepthStencilEarlyWriteShift,
+    kSysFlagMinMaxColor0TimesSrcAlpha = 1u << kSysFlagMinMaxColor0TimesSrcAlphaShift,
+    kSysFlagMinMaxAlpha0TimesSrcAlpha = 1u << kSysFlagMinMaxAlpha0TimesSrcAlphaShift,
   };
   static_assert(kSysFlagCount <= 32, "Too many flags in the system constants");
 

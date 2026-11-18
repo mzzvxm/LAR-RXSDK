@@ -883,6 +883,33 @@ void DXBCShaderTranslator::CompletePixelShaderWriteToRTVs() {
       continue;
     }
     u32 system_temp_color = system_temps_color_[i];
+    // MIN / MAX blending with the SrcAlpha source factor: the host ignores blend factors in those
+    // equations, the Xenos does not (see kSysFlagMinMaxColor0TimesSrcAlphaShift).
+    // gamma_temp.y = the alpha as the blender takes it, saturated.
+    a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
+             dxbc::Src::LU((kSysFlagMinMaxColor0TimesSrcAlpha | kSysFlagMinMaxAlpha0TimesSrcAlpha)
+                           << i));
+    a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
+    {
+      a_.OpMax(dxbc::Dest::R(gamma_temp, 0b0010), dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW),
+               dxbc::Src::LF(0.0f));
+      a_.OpMin(dxbc::Dest::R(gamma_temp, 0b0010), dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY),
+               dxbc::Src::LF(1.0f));
+      a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
+               dxbc::Src::LU(kSysFlagMinMaxColor0TimesSrcAlpha << i));
+      a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
+      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b0111), dxbc::Src::R(system_temp_color),
+               dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY));
+      a_.OpEndIf();
+      a_.OpAnd(dxbc::Dest::R(gamma_temp, 0b0001), LoadFlagsSystemConstant(),
+               dxbc::Src::LU(kSysFlagMinMaxAlpha0TimesSrcAlpha << i));
+      a_.OpIf(true, dxbc::Src::R(gamma_temp, dxbc::Src::kXXXX));
+      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b1000),
+               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW),
+               dxbc::Src::R(gamma_temp, dxbc::Src::kYYYY));
+      a_.OpEndIf();
+    }
+    a_.OpEndIf();
     a_.OpMul(dxbc::Dest::R(system_temp_color), dxbc::Src::R(system_temp_color),
              LoadSystemConstant(SystemConstants::Index::kColorExpBias,
                                 offsetof(SystemConstants, color_exp_bias) + sizeof(f32) * i,

@@ -3487,6 +3487,30 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
       }
     }
   }
+  // MIN / MAX blending with factors. On the Xenos the source factor still applies in those
+  // equations, the host blender ignores factors there. Midnight Club: Los Angeles draws the light
+  // glows of its cars' environment map with max(source * SrcAlpha, dest), a constant colour with a
+  // round alpha falloff, which came out as solid squares that the car paint then mirrored (white
+  // bodies with a bloom halo at night). The shader multiplies by alpha itself where the
+  // destination factor is One (the only case the host can do).
+  if (!edram_rov_used) {
+    for (u32 i = 0; i < 4; ++i) {
+      auto blend_control =
+          regs.Get<xenos::reg::RB_BLENDCONTROL>(xenos::reg::RB_BLENDCONTROL::kRTRegisterIndices[i]);
+      if ((blend_control.color_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.color_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.color_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.color_destblend == xenos::BlendFactor::kOne) {
+        flags |= DXBCShaderTranslator::kSysFlagMinMaxColor0TimesSrcAlpha << i;
+      }
+      if ((blend_control.alpha_comb_fcn == xenos::BlendOp::kMin ||
+           blend_control.alpha_comb_fcn == xenos::BlendOp::kMax) &&
+          blend_control.alpha_srcblend == xenos::BlendFactor::kSrcAlpha &&
+          blend_control.alpha_destblend == xenos::BlendFactor::kOne) {
+        flags |= DXBCShaderTranslator::kSysFlagMinMaxAlpha0TimesSrcAlpha << i;
+      }
+    }
+  }
   if (edram_rov_used && depth_stencil_enabled) {
     flags |= DXBCShaderTranslator::kSysFlagROVDepthStencil;
     if (normalized_depth_control.z_enable) {
