@@ -211,6 +211,9 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
 
   std::vector<PipelineStoredDescription> pipeline_stored_descriptions;
+  // The descriptions in the file before the first corrupted one, including those this device
+  // can't create (skipped at load, but kept in the file for devices that can).
+  size_t pipeline_storage_valid_count = 0;
   std::set<std::pair<u64, u64>> shader_translations_needed;
   auto pipeline_storage_file_path =
       shader_storage_shareable_root /
@@ -282,6 +285,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         }
       }
       pipeline_stored_descriptions.resize(pipeline_storage_kept_count);
+      pipeline_storage_valid_count = pipeline_storage_read_count;
       if (pipeline_storage_skipped_unsupported_count || pipeline_storage_skipped_corrupted_count) {
         REXGPU_INFO(
             "VulkanPipelineCache: Pipeline storage filtering kept {} descriptions (skipped {} "
@@ -475,11 +479,14 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     }
   }
 
+  // Truncate to the last valid description when some were corrupted or the file has excess bytes
+  // at the end. Not to the number of descriptions loaded: the unsupported ones skipped above stay
+  // in the file, and counting only the loaded ones would cut valid descriptions off its end.
   platform::ResetStorageFile(
       storage_.pipeline_file, storage_.pipeline_file_path,
       static_cast<u64>(sizeof(pipeline_storage_file_header) +
-                       sizeof(PipelineStoredDescription) * pipeline_stored_descriptions.size()));
-  if (pipeline_stored_descriptions.empty()) {
+                       sizeof(PipelineStoredDescription) * pipeline_storage_valid_count));
+  if (!pipeline_storage_valid_count) {
     platform::ResetStorageFile(storage_.pipeline_file, storage_.pipeline_file_path, 0);
     pipeline_storage_file_header.magic = pipeline_storage_magic;
     pipeline_storage_file_header.magic_api = pipeline_storage_magic_api;
