@@ -3275,7 +3275,9 @@ void VulkanPipelineCache::StorageWriteThread() {
         storage_.write_flush_pipelines = false;
         flush_pipelines = true;
       }
-      if (!shader && !write_pipeline) {
+      // A flush taken from the request flags runs at the top of the loop. Waiting first would
+      // leave the written data in the file stream's buffer until the next storage request.
+      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
         storage_.write_request_cond.wait(lock);
         continue;
       }
