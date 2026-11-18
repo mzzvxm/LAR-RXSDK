@@ -44,12 +44,16 @@ namespace {
 
 [[maybe_unused]] const bool kTagNamed = (memory::SetTagName(kCodegen, "Codegen"), true);
 
+/** Revision of the emitted code, part of the module fingerprint. */
+constexpr u32 kEmitterRevision = 6;
+
 /**
- * Revision of the emitted code, part of the module fingerprint. 7 is LARecomp's: dcbz clears
- * 128 bytes, the GPR/LR save and restore stubs are inlined, interrupt-disabled atomic regions take
- * no lock. Bump it in any commit that changes what is emitted for unchanged inputs.
+ * Revision of what the LARecomp branch changes in the emitted code on top of kEmitterRevision: dcbz
+ * clears the 128-byte line, the GPR/LR save and restore stubs are expanded at their call sites, a
+ * mid function hook may take r1. A counter of its own, so a bump of upstream's merges cleanly. Bump
+ * it in any commit of this branch that changes what is emitted for unchanged inputs.
  */
-constexpr u32 kEmitterRevision = 8;
+constexpr u32 kLarecompEmitterRevision = 1;
 
 std::string DeriveTargetNameFromFilePath(const std::string& file_path) {
   std::filesystem::path p(file_path);
@@ -86,7 +90,7 @@ std::string FingerprintModule(const RecompilerConfig& cfg,
                               std::string_view sdk_version) {
   const auto& vm = cfg.vector_math;
   std::vector<std::string> flags{
-      std::format("emitter={}", kEmitterRevision),
+      std::format("emitter={}.{}", kEmitterRevision, kLarecompEmitterRevision),
       std::format("templates={}", GetEmbeddedTemplatesHash()),
       std::format("vector_math={}{}{}{}{}{}{}{}{}", static_cast<u32>(vm.vmaddfp),
                   static_cast<u32>(vm.vnmsubfp), static_cast<u32>(vm.vmsum3fp128),
