@@ -32,7 +32,7 @@ namespace rex::hid {
  */
 class InputModule final : public IModule {
  public:
-  REX_MODULE_SERVES(::rex::hid::IInputSystem)
+  REX_MODULE_SERVES(::rex::hid::IInputSystem, ::rex::hid::IInputDeviceList)
 
   std::string_view GetName() const override { return "rexhid"; }
   std::span<const InterfaceType> GetRequiredInterfaces() const override;

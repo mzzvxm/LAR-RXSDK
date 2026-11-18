@@ -45,6 +45,13 @@ struct ConnectionEvent {
   bool connected;
 };
 
+/** A pad of the list DeviceGeneration counts, with the device it came from. */
+struct ListedPad {
+  DeviceKey key;
+  InputDeviceInfo info;
+  friend bool operator==(const ListedPad&, const ListedPad&) = default;
+};
+
 }  // namespace
 
 struct InputSystem::State {
@@ -71,6 +78,8 @@ struct InputSystem::State {
   bool stale = true;
   std::vector<detail::Device> devices;
   std::array<std::vector<detail::DeviceKey>, detail::kMaxUsers> users;
+  std::vector<ListedPad> listed;
+  u32 generation = 0;
   detail::ActiveDeviceTracker active;
   std::array<detail::KeystrokeSynth, detail::kMaxUsers> synth;
   std::array<bool, detail::kMaxUsers> connected{};
@@ -105,6 +114,7 @@ struct InputSystem::State {
   }
 
   void RefreshDevicesLocked(std::vector<ConnectionEvent>& events);
+  void UpdateDeviceListLocked();
   const detail::Device* FindDeviceLocked(const detail::DeviceKey& key) const;
   bool ChooseDeviceLocked(u32 user, detail::DeviceKey& out) const;
   Result<rex::hid::PadState> ReadRawLocked(u32 user);
@@ -169,7 +179,38 @@ void InputSystem::State::RefreshDevicesLocked(std::vector<ConnectionEvent>& even
   }
   devices = std::move(seen);
   users = detail::AssignUsers(devices, owner.GetSettings().shared_pads.Get());
+  UpdateDeviceListLocked();
   UpdateConnectionsLocked(events);
+}
+
+// Rebuilds the pads of IInputDeviceList from the merged devices and moves the generation when the
+// result differs from the last one. A driver revision that leaves the pads alone, such as a
+// keyboard and mouse mode change, moves nothing. A second pad that joins a user is a new entry,
+// which UpdateConnectionsLocked does not report because the user was connected already.
+void InputSystem::State::UpdateDeviceListLocked() {
+  std::vector<ListedPad> now;
+  for (const detail::Device& device : devices) {
+    if (device.synthetic) {
+      continue;
+    }
+    ListedPad pad;
+    pad.key = device.key;
+    pad.info.name = device.pad.name;
+    pad.info.vendor_id = device.pad.info.vendor;
+    pad.info.product_id = device.pad.info.product;
+    pad.info.pad_kind = ClassifyPad(device.pad.info.vendor, device.pad.info.type);
+    for (u32 user = 0; user < detail::kMaxUsers; ++user) {
+      if (std::ranges::find(users[user], device.key) != users[user].end()) {
+        pad.info.user = user;
+        break;
+      }
+    }
+    now.push_back(std::move(pad));
+  }
+  if (now != listed) {
+    listed = std::move(now);
+    ++generation;
+  }
 }
 
 void InputSystem::State::UpdateConnectionsLocked(std::vector<ConnectionEvent>& events) {
@@ -365,6 +406,10 @@ void InputSystem::Stop() {
   state.sources.clear();
   state.devices.clear();
   state.users = {};
+  if (!state.listed.empty()) {
+    state.listed.clear();
+    ++state.generation;
+  }
   state.revisions.clear();
   state.connected = {};
   state.started = false;
@@ -520,6 +565,39 @@ Result<rex::hid::PadInfo> InputSystem::GetPadInfo(u32 user) {
   }
   state.Fire(events);
   return result;
+}
+
+u32 InputSystem::DeviceGeneration() {
+  State& state = *state_;
+  std::vector<ConnectionEvent> events;
+  u32 generation = 0;
+  {
+    std::lock_guard lock(state.mutex);
+    if (state.started) {
+      state.RefreshDevicesLocked(events);
+    }
+    generation = state.generation;
+  }
+  state.Fire(events);
+  return generation;
+}
+
+std::vector<InputDeviceInfo> InputSystem::Devices() {
+  State& state = *state_;
+  std::vector<ConnectionEvent> events;
+  std::vector<InputDeviceInfo> pads;
+  {
+    std::lock_guard lock(state.mutex);
+    if (state.started) {
+      state.RefreshDevicesLocked(events);
+      pads.reserve(state.listed.size());
+      for (const ListedPad& listed : state.listed) {
+        pads.push_back(listed.info);
+      }
+    }
+  }
+  state.Fire(events);
+  return pads;
 }
 
 ScopeGuard InputSystem::OnConnectionChange(MoveOnlyFunction<void(u32 user, bool connected)> fn) {

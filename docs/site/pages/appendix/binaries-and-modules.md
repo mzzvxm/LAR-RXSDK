@@ -51,7 +51,7 @@ The eight libraries that an `App` loads, in load order. A module can only connec
 | Library | Serves | Requires |
 |---|---|---|
 | `rexfilesystem` | `IFileSystemFactory` | `ILogger` |
-| `rexhid` | `IInputSystem` | `IDriverContext`, `IAppInfo`, `ISettingsRegistry`, `ILogger` |
+| `rexhid` | `IInputSystem`, `IInputDeviceList` | `IDriverContext`, `IAppInfo`, `ISettingsRegistry`, `ILogger` |
 | `rexapu` | `IAudioSystem` | `IDriverContext`, `IAppInfo`, `ISettingsRegistry`, `ILogger` |
 | `rexui` | `IUISystem`, `IUIControl` | `IDriverContext`, `IAppInfo`, `ISettingsRegistry`, `ILogger` |
 | `rexgpu` | `IGraphicsSystem`, `IGraphicsControl` | `IDriverContext`, `IAppInfo`, `ISettingsRegistry`, `ILogger` |

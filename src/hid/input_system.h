@@ -12,7 +12,9 @@
 
 #include <memory>
 #include <span>
+#include <vector>
 
+#include <rex/hid/input_device_list.h>
 #include <rex/hid/input_driver.h>
 #include <rex/hid/pad.h>
 #include <rex/hid/input_system.h>
@@ -26,7 +28,7 @@ REXLOG_TABLE(kInputLog, hid)
 namespace rex::hid {
 
 /** Merges the pads of the selected drivers. The app starts and stops it. */
-class InputSystem final : public rex::hid::IInputSystem {
+class InputSystem final : public rex::hid::IInputSystem, public rex::hid::IInputDeviceList {
  public:
   InputSystem();
   ~InputSystem() override;
@@ -65,6 +67,9 @@ class InputSystem final : public rex::hid::IInputSystem {
   [[nodiscard]] std::string VirtualKeyToString(VirtualKey key) const override;
   [[nodiscard]] Result<InputSource> ParseInputSource(std::string_view text) const override;
   [[nodiscard]] std::string InputSourceToString(const InputSource& source) const override;
+
+  [[nodiscard]] u32 DeviceGeneration() override;
+  [[nodiscard]] std::vector<InputDeviceInfo> Devices() override;
 
   void OnInputEvent(InputEvent& event) override;
   void SetInputCaptured(bool captured) override;

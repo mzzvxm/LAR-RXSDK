@@ -98,6 +98,16 @@ Other code can watch the same changes. `IInputSystem::OnConnectionChange` regist
 - The input system finds a change when it reads the devices, which happens when the game or other code reads input, not when a device is plugged in.
 - The keyboard and mouse pad counts as connected with `hid.mnk_mode` on, unless `hid.mnk_passthrough` is on as well.
 
+### Device List
+
+Code that shows pad names or button glyphs needs the pads themselves, which `IInputSystem::OnConnectionChange` does not give: it reports a user, and it stays silent when a second pad joins a user that already has one. `IInputDeviceList` from `rex/hid/input_device_list.h` is served by `rexhid` beside `IInputSystem`. Find it with `REX_INTERFACE(rex::hid::IInputDeviceList)`.
+
+- `DeviceGeneration` returns a counter that moves when the list changes: a pad connects or disconnects, or a pad takes another user. It moves when a second pad joins user 0 with `hid.shared_pads` on. Input, the keyboard and mouse pad and a driver event that leaves the list as it was do not move it.
+- `Devices` returns the connected pads in connection order. Each has the name the driver reports, the USB vendor and product, the family and the user it feeds, or `InputDeviceInfo::kNoUser` for a fifth pad. The keyboard and mouse pad and the idle pad are not listed.
+- The family is a `PadKind`: `kXbox`, `kPlayStation`, `kNintendo`, `kSteamDeck` or `kGeneric`. The USB vendor decides first, and the pad type the driver recognised settles pads of other vendors, such as a DualShock clone. `ClassifyPad` is the rule.
+- To follow the list, read `DeviceGeneration` and then `Devices`, and read `Devices` again when the counter differs from the one you kept.
+- Nothing polls. The counter moves on the connect and disconnect events of the drivers, and a call finds a change the way every input call does.
+
 ### UI Block
 
 While a XAM dialog, the console overlay or a prompt is open, the game must not react to the controller that the player uses for it. These call `IInputSystem::AcquireUIBlock` while they are open, and calls nest. During a block:

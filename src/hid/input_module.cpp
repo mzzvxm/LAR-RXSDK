@@ -98,7 +98,8 @@ void InputModule::Shutdown() {
 }
 
 IInterface* InputModule::QueryInterface(std::string_view name, u32 version) {
-  return FindModuleInterface<rex::hid::IInputSystem>(GetOrCreateSystem(), name, version);
+  return FindModuleInterface<rex::hid::IInputSystem, rex::hid::IInputDeviceList>(
+      GetOrCreateSystem(), name, version);
 }
 
 }  // namespace rex::hid
