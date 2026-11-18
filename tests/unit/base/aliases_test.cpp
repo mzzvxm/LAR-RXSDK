@@ -20,15 +20,11 @@
 #include <rex/setting.h>
 #include <rex/settings_registry.h>
 
-#include <rex/kernel/kernel_settings.h>
-#include <rex/ui/ui_system.h>
-
 #include "base/app_harness.h"
 #include "app/command_line.h"
 #include "gpu/xenos/host/d3d12/d3d12_settings.h"
 #include "gpu/xenos/host/vulkan/vulkan_settings.h"
 #include "gpu/xenos/xenos_settings.h"
-#include "xam/mcla_online.h"
 
 namespace {
 
@@ -491,19 +487,25 @@ REX_TEST_CASE("a flat name that is no alias stays an unknown option", "[base][al
   app.Finish();
 }
 
+namespace {
+
+// The setting a name reaches. The default modules are loaded, so the kernel, the UI and the XAM
+// module have registered theirs before the test body runs; a test must not register a second
+// owner of the same names.
+rex::SettingBase& RegisteredSetting(std::string_view name) {
+  auto found = REX_SETTINGS().Find(name);
+  REQUIRE(found);
+  return **found;
+}
+
+}  // namespace
+
 // The names a larecomp.toml written by a 0.10 based build carries: the profile name, the window
 // theme and the online relay client's settings were flat there.
-// CHECK: OnlineSettings is the owner in src/xam/mcla_online.h (scope mcla_online); this follows it.
 REX_TEST_CASE("the profile name, the window theme and the online names keep their flat names",
               "[base][aliases]") {
-  rex::kernel::KernelSettings kernel_owner;
-  rex::ui::UISettings ui_owner;
-  rex::xam::OnlineSettings online_owner;
   HarnessApp app;
   app.configure = [&](rex::SettingsRegistry& settings) -> rex::Result<void> {
-    REX_TRY_VOID(settings.Register(kernel_owner));
-    REX_TRY_VOID(settings.Register(ui_owner));
-    REX_TRY_VOID(settings.Register(online_owner));
     CHECK(settings.SetText(SettingLayer::kFile, "user_name", "Player One"));
     CHECK(settings.SetText(SettingLayer::kFile, "window_theme", "dark"));
     CHECK(settings.SetText(SettingLayer::kFile, "mcla_online_enable", "true"));
@@ -511,15 +513,23 @@ REX_TEST_CASE("the profile name, the window theme and the online names keep thei
     CHECK(settings.SetText(SettingLayer::kFile, "mcla_online_port", "31001"));
     CHECK(settings.SetText(SettingLayer::kFile, "mcla_online_connect_timeout_ms", "5000"));
 
-    CHECK(kernel_owner.user_name.Get() == "Player One");
-    CHECK(kernel_owner.user_name.GetLayer() == SettingLayer::kFile);
-    CHECK(ui_owner.window_theme.Get() == "dark");
-    CHECK(ui_owner.window_theme.GetLayer() == SettingLayer::kFile);
-    CHECK(online_owner.enable.Get());
-    CHECK(online_owner.enable.GetLayer() == SettingLayer::kFile);
-    CHECK(online_owner.server.Get() == "relay.example.org");
-    CHECK(online_owner.port.Get() == 31001);
-    CHECK(online_owner.connect_timeout_ms.Get() == 5000);
+    const struct {
+      std::string_view name;
+      std::string_view text;
+    } expected[] = {
+        {"kernel.user_name", "Player One"},
+        {"ui.window_theme", "dark"},
+        {"mcla_online.enable", "true"},
+        {"mcla_online.server", "relay.example.org"},
+        {"mcla_online.port", "31001"},
+        {"mcla_online.connect_timeout_ms", "5000"},
+    };
+    for (const auto& entry : expected) {
+      INFO(entry.name);
+      rex::SettingBase& setting = RegisteredSetting(entry.name);
+      CHECK(setting.GetText() == entry.text);
+      CHECK(setting.GetLayer() == SettingLayer::kFile);
+    }
     return rex::Ok();
   };
   REQUIRE(app.Start());
@@ -528,20 +538,25 @@ REX_TEST_CASE("the profile name, the window theme and the online names keep thei
 
 REX_TEST_CASE("the old flat profile name and online names work on the command line",
               "[base][aliases]") {
-  rex::kernel::KernelSettings kernel_owner;
-  rex::xam::OnlineSettings online_owner;
   HarnessApp app;
-  app.configure = [&](rex::SettingsRegistry& settings) -> rex::Result<void> {
-    REX_TRY_VOID(settings.Register(kernel_owner));
-    REX_TRY_VOID(settings.Register(online_owner));
+  app.configure = [&](rex::SettingsRegistry&) -> rex::Result<void> {
     const std::vector<std::string> args = {"--user_name=Player", "--mcla_online_enable",
                                            "--mcla_online_port=31002"};
     CHECK(rex::app::detail::ParseCommandLine(rex::CLIArgList::Parse(args)));
-    CHECK(kernel_owner.user_name.Get() == "Player");
-    CHECK(kernel_owner.user_name.GetLayer() == SettingLayer::kCommandLine);
-    CHECK(online_owner.enable.Get());
-    CHECK(online_owner.enable.GetLayer() == SettingLayer::kCommandLine);
-    CHECK(online_owner.port.Get() == 31002);
+    const struct {
+      std::string_view name;
+      std::string_view text;
+    } expected[] = {
+        {"kernel.user_name", "Player"},
+        {"mcla_online.enable", "true"},
+        {"mcla_online.port", "31002"},
+    };
+    for (const auto& entry : expected) {
+      INFO(entry.name);
+      rex::SettingBase& setting = RegisteredSetting(entry.name);
+      CHECK(setting.GetText() == entry.text);
+      CHECK(setting.GetLayer() == SettingLayer::kCommandLine);
+    }
     return rex::Ok();
   };
   REQUIRE(app.Start());
