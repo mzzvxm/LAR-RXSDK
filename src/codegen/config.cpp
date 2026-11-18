@@ -680,15 +680,6 @@ RecompilerConfig::ValidationResult RecompilerConfig::Validate() const {
   }
 
   for (const auto& [addr, hook] : mid_asm_hooks) {
-    if (std::ranges::contains(hook.registers, "r1")) {
-      result.errors.push_back(std::format(
-          "midasm hook '{}' at 0x{:08X} takes r1, which the hook call moves under the red zone",
-          hook.name, addr));
-      result.valid = false;
-    }
-  }
-
-  for (const auto& [addr, hook] : mid_asm_hooks) {
     for (const std::string& reg : hook.registers) {
       if (reg != "r1" && rex::ppc::detail::ParseMidAsmRegister(reg) ==
                              rex::ppc::detail::MidAsmRegisterType::kInvalid) {

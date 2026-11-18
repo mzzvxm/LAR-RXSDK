@@ -448,6 +448,19 @@ void BuilderContext::EmitMidAsmHook() {
                       mid_asm_hook->second.jump_address_on_true != 0;
 
   const std::string r1 = R(1);
+  // A hook that takes r1 gets the function's own stack pointer: a copy made before the call below
+  // moves r1 under the red zone (a hook reads the function's stack variables through it). The copy
+  // lives in a block of its own, so no goto of the function jumps past its initialisation; a hook
+  // that writes r1 writes the copy.
+  const auto& hook_registers = mid_asm_hook->second.registers;
+  const bool takes_r1 = std::find(hook_registers.begin(), hook_registers.end(), "r1") != hook_registers.end();
+  const auto hook_register = [&](const std::string& reg) {
+    return reg == "r1" ? std::string("mid_asm_r1") : R(RegisterIndex(reg, 1));
+  };
+  if (takes_r1) {
+    Println("\t{{");
+    Println("\tPPCRegister mid_asm_r1 = {};", r1);
+  }
   Println("\t{}.u64 -= rex::ppc::kRedZone;", r1);
   Print("\t");
   if (returns_bool)
@@ -466,7 +479,7 @@ void BuilderContext::EmitMidAsmHook() {
         const bool mapped = parameter != "void*";
         out +=
             std::format("rex::ppc::ArgTranslator::Get{}Value<{}>({}.u64, base)",
-                        mapped ? "MappedPointer" : "Pointer", parameter, R(RegisterIndex(reg, 1)));
+                        mapped ? "MappedPointer" : "Pointer", parameter, hook_register(reg));
         continue;
       }
       if (parameter == "u32")
@@ -495,7 +508,7 @@ void BuilderContext::EmitMidAsmHook() {
         if (reg == "reserved")
           out += Reserved();
         else
-          out += R(RegisterIndex(reg, 1));
+          out += hook_register(reg);
         break;
       case 'f':
         if (reg == "fpscr")
@@ -540,6 +553,9 @@ void BuilderContext::EmitMidAsmHook() {
       Println("\treturn;");
     else if (mid_asm_hook->second.jump_address != 0)
       Println("\tgoto loc_{:X};", mid_asm_hook->second.jump_address);
+  }
+  if (takes_r1) {
+    Println("\t}}");
   }
 }
 

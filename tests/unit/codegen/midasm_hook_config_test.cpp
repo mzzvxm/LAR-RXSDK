@@ -36,11 +36,11 @@ RecompilerConfig HookConfig(std::vector<std::string> registers) {
 
 }  // namespace
 
-REX_TEST_CASE("A mid function hook cannot take r1", "[codegen][midasm]") {
+// The hook gets the function's own stack pointer (a copy made before the red zone skip): see
+// midasm_hook_emit_test.cpp.
+REX_TEST_CASE("A mid function hook may take r1", "[codegen][midasm]") {
   auto result = HookConfig({"r3", "r1"}).Validate();
-  CHECK_FALSE(result.valid);
-  CHECK(HasError(result, "TestHook"));
-  CHECK(HasError(result, "r1"));
+  CHECK(result.valid);
 }
 
 REX_TEST_CASE("A mid function hook may take other registers", "[codegen][midasm]") {

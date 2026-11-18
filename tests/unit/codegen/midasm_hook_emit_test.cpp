@@ -116,6 +116,20 @@ REX_TEST_CASE("A mid function hook that jumps restores r1 before the jump",
   CHECK(Count(body, kRestore) == 1);
 }
 
+REX_TEST_CASE("A mid function hook that takes r1 gets the stack pointer from before the red zone skip",
+              "[codegen][midasm][redzone]") {
+  const auto body = GenerateWithHook("name = \"StackHook\"\nregisters = [\"r3\", \"r1\"]");
+  const auto copy = body.find("PPCRegister mid_asm_r1 = ctx.r1;");
+  const auto skip = body.find(kSkip);
+  const auto call = body.find("StackHook(");
+  REQUIRE(copy != std::string::npos);
+  REQUIRE(skip != std::string::npos);
+  REQUIRE(call != std::string::npos);
+  CHECK(copy < skip);
+  CHECK(skip < call);
+  CHECK(body.find("mid_asm_r1", call) < body.find(';', call));
+}
+
 REX_TEST_CASE("A mid function hook with a condition restores r1 on both exits",
               "[codegen][midasm][redzone]") {
   const auto body = GenerateWithHook(

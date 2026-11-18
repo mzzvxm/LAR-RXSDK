@@ -49,7 +49,7 @@ namespace {
  * 128 bytes, the GPR/LR save and restore stubs are inlined, interrupt-disabled atomic regions take
  * no lock. Bump it in any commit that changes what is emitted for unchanged inputs.
  */
-constexpr u32 kEmitterRevision = 7;
+constexpr u32 kEmitterRevision = 8;
 
 std::string DeriveTargetNameFromFilePath(const std::string& file_path) {
   std::filesystem::path p(file_path);
