@@ -46,9 +46,10 @@ class REX_APP_API TitleApp : public App {
    * The launch phase. Runs TitleRuntime::Load, OnTitleLaunch, then TitleRuntime::Launch. Call on
    * the UI thread after Init. Returns Ok and does nothing once shutdown is requested.
    *
-   * With a window and an empty kernel.user_name, it first asks the player for a profile name,
-   * running the frame loop until the player answers, and saves the name to the config file. After
-   * Load it installs the content in a DLC folder next to the executable. A title that starts
+   * A program that turns on AsksForUserName, with a window and an empty kernel.user_name, first
+   * asks the player for a profile name, running the frame loop until the player answers, and saves
+   * the name to the config file. Other programs never wait on that prompt. After Load it installs
+   * the content in a DLC folder next to the executable. A title that starts
    * itself again through XamLoaderLaunchTitle makes the app start its process again (OnTitleExit
    * with TitleExitReason::kRelaunch), and the next launch gives the title its launch data back.
    *
@@ -69,6 +70,15 @@ class REX_APP_API TitleApp : public App {
    * Requires the Xenos graphics family, audio, input and UI.
    */
   AppSysRequirements GetRequirements() const override;
+
+  /**
+   * Whether LaunchTitle asks the player for a profile name when kernel.user_name is empty. The
+   * prompt waits for an answer, so only a program that draws the UI overlays while no title runs
+   * (the program's own renderer, or the graphics system once it is attached) can turn it on. The
+   * default is false. Even when true, the prompt is skipped when the app is headless or has no
+   * window.
+   */
+  virtual bool AsksForUserName() const;
 
   /**
    * Runs after TitleRuntime::Load and before the guest starts.

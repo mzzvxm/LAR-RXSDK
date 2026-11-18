@@ -352,6 +352,60 @@ REX_TEST_CASE("A title that exits on its own ends Run and unloads on the UI thre
 
 namespace {
 
+// A program that turned the first-launch profile name prompt on.
+class NamingApp : public FooApp {
+ public:
+  using FooApp::FooApp;
+
+ protected:
+  bool AsksForUserName() const override { return true; }
+};
+
+}  // namespace
+
+// Nobody can type a name in a test, so the prompt is cancelled from the UI thread until
+// LaunchTitle gives up. A cancelled prompt launches nothing. The same app without the prompt
+// turned on is every other test here: its LaunchTitle never waits.
+REX_TEST_CASE("LaunchTitle asks for a profile name when the app turns the prompt on",
+              "[ui][title_app]") {
+  rex::test::g_entry.Reset();
+  const rex::test::TempFolder folder("rex_title_app_name_");
+  rex::test::WriteTitle(folder.path);
+  NamingApp app(true, rex::test::MakeTitleImage(rex::test::kReturningEntry));
+  app.game_root = folder.path;
+  REQUIRE(Open(app));
+  Watchdog watchdog(10s);
+  std::jthread canceller([&app](const std::stop_token& stop) {
+    while (!stop.stop_requested()) {
+      app.GetUI().PostTask([&app] { app.GetUI().CancelPrompts(); });
+      std::this_thread::sleep_for(5ms);
+    }
+  });
+  REQUIRE(app.LaunchTitle());
+  canceller.request_stop();
+  canceller.join();
+  CHECK(rex::test::g_entry.entered == 0);
+  CHECK(app.GetPhase() == rex::app::AppPhase::kRunning);
+  CHECK(app.Shutdown() == 0);
+}
+
+REX_TEST_CASE("LaunchTitle does not ask for a profile name when the app has no window",
+              "[ui][title_app]") {
+  rex::test::g_entry.Reset();
+  const rex::test::TempFolder folder("rex_title_app_noname_");
+  rex::test::WriteTitle(folder.path);
+  NamingApp app(false, rex::test::MakeTitleImage(rex::test::kReturningEntry));
+  app.game_root = folder.path;
+  REQUIRE(Open(app));
+  Watchdog watchdog(10s);
+  REQUIRE(app.LaunchTitle());
+  app.Run();
+  CHECK(rex::test::g_entry.finished == 1);
+  CHECK(app.Shutdown() == 0);
+}
+
+namespace {
+
 std::atomic<rex::i32> g_relaunch_calls{0};
 
 [[nodiscard]] rex::Result<void> CountRelaunch(std::span<const std::string>) {

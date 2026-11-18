@@ -110,8 +110,10 @@ struct NamePrompt {
 };
 
 /**
- * CHECK: not run. The prompt is drawn only if the graphics system, or the program's own renderer
- * when the program needs no driver, draws the overlays while no title runs (the kRunning phase).
+ * CHECK: not run with a real window. Only an app that turns AsksForUserName on gets here, because
+ * the prompt waits for an answer. It is drawn only if the graphics system, or the program's own
+ * renderer when the program needs no driver, draws the overlays while no title runs (the kRunning
+ * phase).
  *
  * First launch: asks for the profile name that the title sees and that names the save folder. It
  * runs before the title loads, because loading creates the profile and its content folders. Every
@@ -224,7 +226,7 @@ Result<void> TitleApp::LaunchTitle() {
     return failure(std::format("--game_data_root {} does not exist", game_root.string()));
   }
 
-  if (!AskForUserName(*this, title)) {
+  if (AsksForUserName() && !AskForUserName(*this, title)) {
     return Ok();
   }
 
@@ -275,6 +277,10 @@ void TitleApp::RestartTitle() {
   if (!LaunchTitle()) {
     ::rex::app::RequestShutdown(1);
   }
+}
+
+bool TitleApp::AsksForUserName() const {
+  return false;
 }
 
 Result<void> TitleApp::OnTitleLaunch(rex::kernel::TitleRuntime&) {
