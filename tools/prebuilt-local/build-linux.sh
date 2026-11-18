@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # NOTE (2026-11-08): the GitHub workflow this was first written to copy (.github/workflows/prebuilt-sdk.yaml) was removed; nothing runs on
 # Actions. Where a comment says "the workflow", read: the job this step stands for. The pins here are the source of truth.
+# NOTE (2026-11-18, upstream rexglue-sdk v0.11.0): adapted to the v0.11 library and module set (about 18 shared libraries), to the
+# Vulkan headers and VMA that v0.11 takes from the PC instead of from submodules (VULKAN_INCLUDE_DIR below), to SDL being a shared
+# library there, and to the options v0.11 renamed or dropped. NOT RUN: nothing here has been built against v0.11 (see
+# docs/prebuilt-sdk.md, CHECK). Upstream builds Linux with libstdc++ 13; this script still builds with the kit's libc++ (kit revision
+# 5), which is unverified for v0.11.
 # build-linux.sh <commit> <outdir>
 #
 # Builds the prebuilt Linux SDK of one commit on this PC (in WSL), as the "linux" job of
@@ -35,6 +40,12 @@
 #   SUBMODULE_DONOR    a checkout of the SDK with its submodules (git folders under .git/modules) whose objects are
 #                      borrowed so that the submodules are not downloaded again (default /mnt/c/mcv/base/sdk-src when
 #                      it exists; set it empty to turn this off)
+#   VULKAN_INCLUDE_DIR the folder that holds vulkan/vulkan_core.h (1.4.313 or newer, v0.11's minimum) and vma/vk_mem_alloc.h: a Vulkan
+#                      SDK's include folder. Default: the newest /mnt/c/VulkanSDK/<version>/Include of the Windows PC (the headers do
+#                      not depend on the platform), else ${KIT}/vulkan-include. The kit's own sysroot is Ubuntu 22.04's (Vulkan 1.3.204
+#                      headers), too old for v0.11. Only headers are used by the build.
+#   VULKAN_LIBRARY     optional: a libvulkan.so for CMake's find_package(Vulkan), which wants one to exist although nothing links it
+#                      (the build uses Vulkan::Headers only). Default: the one in the kit's sysroot, if it has it.
 #   JOBS               compiler jobs (cmake --parallel); default Ninja's own choice. The WSL VM has half the PC's RAM
 #                      by default: if the build runs out of memory, set a lower number.
 #   CLEAN=1            delete the work folder of this commit first (without it a finished checkout is reused)
@@ -77,7 +88,7 @@ KIT_SYSROOT_SIZE=44213084
 # The repository that owns the release, and the strings the workflow writes into the bundle.
 SDK_REPO=mzzvxm/LAR-RXSDK
 BUNDLE_WHAT="LAR-RXSDK install built with the Linux kit"
-BUNDLE_OPTIONS="REXGLUE_USE_VULKAN=ON REXGLUE_ENABLE_TRACY=OFF (FidelityFX off, its default), Release"
+BUNDLE_OPTIONS="REXGLUE_ENABLE_TRACY=OFF REXGLUE_BUILD_TESTS=OFF (Vulkan is always built), Release"
 CFG_COMMENT="# Written by the prebuilt-sdk workflow as the LARecomp launcher writes it (clang-config-2). Do not edit."
 ASSET_TEMPLATE='lar-rxsdk-prebuilt-${SHORT}-linux-x86_64-${toolchain}.tar.br'   # as written in the workflow (literal)
 
@@ -90,6 +101,8 @@ SUBMODULE_DONOR=${SUBMODULE_DONOR-/mnt/c/mcv/base/sdk-src}
 CLEAN=${CLEAN:-0}
 SKIP_START_CHECK=${SKIP_START_CHECK:-0}
 JOBS=${JOBS:-}
+VULKAN_INCLUDE_DIR=${VULKAN_INCLUDE_DIR-}
+VULKAN_LIBRARY=${VULKAN_LIBRARY-}
 
 err() { echo "error: $*" >&2; }
 die() { err "$*"; exit 1; }
@@ -366,6 +379,36 @@ if [ -n "${JOBS}" ]; then jobs_args=(--parallel "${JOBS}"); fi
 # workflow's runner (ubuntu-22.04) runs it fine, so nothing is passed there. When it does not run, the host's own scanner
 # (Ubuntu package libwayland-bin) generates SDL's protocol sources instead: its output compiles against the kit's wayland 1.20
 # headers. Neither runs: stop here, an SDK without the Wayland driver must not be built (the checks of step 6 would stop it too).
+# Vulkan headers: v0.11 compiles its Vulkan driver against the Vulkan SDK's headers and VMA (thirdparty/CMakeLists.txt:
+# find_package(Vulkan 1.4.313 REQUIRED), VMA from the same include folder). It has no Vulkan submodules any more, and the kit's sysroot
+# is Ubuntu 22.04's, whose Vulkan headers are 1.3.204. The headers are the same on every platform, so a Windows Vulkan SDK's Include
+# folder does. Nothing of them is installed or shipped.
+echo "--- Vulkan headers"
+if [ -z "${VULKAN_INCLUDE_DIR}" ]; then
+  newest=$(ls -d /mnt/c/VulkanSDK/*/Include 2> /dev/null | sort -V | tail -n 1 || true)
+  if [ -n "${newest}" ]; then
+    VULKAN_INCLUDE_DIR=${newest}
+  elif [ -d "${KIT}/vulkan-include" ]; then
+    VULKAN_INCLUDE_DIR=${KIT}/vulkan-include
+  fi
+fi
+[ -n "${VULKAN_INCLUDE_DIR}" ] || die "no Vulkan headers: set VULKAN_INCLUDE_DIR to a folder with vulkan/vulkan_core.h (1.4.313 or newer) and vma/vk_mem_alloc.h (a Vulkan SDK's include folder)."
+[ -f "${VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h" ] || die "${VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h is missing."
+[ -f "${VULKAN_INCLUDE_DIR}/vma/vk_mem_alloc.h" ] || die "${VULKAN_INCLUDE_DIR}/vma/vk_mem_alloc.h is missing (VMA is part of the Vulkan SDK's include folder)."
+vk_patch=$(sed -n 's/^#define VK_HEADER_VERSION \([0-9][0-9]*\)[[:space:]]*$/\1/p' "${VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h" | head -n 1)
+vk_minor=$(sed -n 's/.*VK_HEADER_VERSION_COMPLETE VK_MAKE_API_VERSION(0, *\([0-9][0-9]*\), *\([0-9][0-9]*\), *VK_HEADER_VERSION).*/\1.\2/p' "${VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h" | head -n 1)
+[ -n "${vk_patch}" ] && [ -n "${vk_minor}" ] || die "could not read the Vulkan header version from ${VULKAN_INCLUDE_DIR}/vulkan/vulkan_core.h."
+vk_version="${vk_minor}.${vk_patch}"
+[ "$(printf '%s\n' "${vk_version}" "1.4.313" | sort -V | head -n 1)" = "1.4.313" ] || die "the Vulkan headers in ${VULKAN_INCLUDE_DIR} are ${vk_version}; v0.11 needs 1.4.313 or newer."
+echo "Vulkan headers: ${VULKAN_INCLUDE_DIR} (${vk_version})"
+# CHECK: find_package(Vulkan REQUIRED) fails when it finds no libvulkan. The sysroot may or may not have libvulkan-dev; when it has
+# none and VULKAN_LIBRARY is not set, the configure says so and VULKAN_LIBRARY (any libvulkan.so, it is not linked) fixes it.
+vk_args=(-DVulkan_INCLUDE_DIR="${VULKAN_INCLUDE_DIR}")
+if [ -n "${VULKAN_LIBRARY}" ]; then
+  [ -f "${VULKAN_LIBRARY}" ] || die "VULKAN_LIBRARY ${VULKAN_LIBRARY} is not a file."
+  vk_args+=(-DVulkan_LIBRARY="${VULKAN_LIBRARY}")
+fi
+
 echo "--- wayland-scanner"
 wl_args=()
 kit_scanner="${KIT}/sysroot/hostbin/wayland-scanner"
@@ -395,8 +438,10 @@ echo "--- Configure"
 cmake --preset linux-amd64 \
   -B "${BUILD}" \
   -DCMAKE_INSTALL_PREFIX="${SDK}" \
-  -DREXGLUE_USE_VULKAN=ON \
   -DREXGLUE_ENABLE_TRACY=OFF \
+  -DREXGLUE_BUILD_TESTS=OFF \
+  -DREXGLUE_REGISTER_PACKAGE=OFF \
+  "${vk_args[@]}" \
   -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON \
   -DCMAKE_C_COMPILER="${KIT}/llvm/bin/clang" \
   -DCMAKE_CXX_COMPILER="${KIT}/llvm/bin/clang++" \
@@ -415,8 +460,8 @@ cmake --preset linux-amd64 \
 echo "--- Build"
 cmake --build "${BUILD}" --config Release ${jobs_args[@]+"${jobs_args[@]}"}
 
-# The install registers itself in $HOME/.cmake/packages/rexglue; HOME points at a throwaway folder for it
-# (the launcher does the same), so nothing is left in the user's home.
+# Before v0.11 the install registered itself in $HOME/.cmake/packages/rexglue; now that is opt-in (REXGLUE_REGISTER_PACKAGE, off
+# above). HOME still points at a throwaway folder for the install (the launcher does the same), so nothing is left in the user's home.
 echo "--- Install"
 rm -rf "${SDK}"   # no file of an earlier try may end up in the archive
 mkdir -p "${TMPROOT}/cmake-home"
@@ -445,11 +490,26 @@ sys.stdout.write("\n")
 ' > "${SDK}/lar-sdk-bundle.json"
 cat "${SDK}/lar-sdk-bundle.json"
 
-# The files the launcher's SDK step requires with the kit (LinuxBuild.SdkRequiredFiles).
-for needed in bin/rexglue lib/librexruntime.so lib/librexgpu-xenos.so lib/cmake/rexglue/rexglueConfig.cmake lar-sdk-bundle.json \
-              lib/libc++.so.1 lib/libc++abi.so.1 lib/libatomic.so.1; do
+# The files the launcher's SDK step requires with the kit (LinuxBuild.SdkRequiredFiles): since v0.11 the codegen tool, the shared
+# libraries a program links, the provider modules the runtime loads by name (all in lib/ on Linux), the package files and the C++
+# runtime (cmake/rexglue_export_targets.cmake: REXGLUE_INSTALL_TARGETS and REXGLUE_MODULE_TARGETS; Linux has no rexhid-xinput and no
+# D3D12 module).
+SDK_LIBRARIES="rexbase rexppc rexkernel rexxam rexxbdm rexapp"
+SDK_MODULES="rexfilesystem rexapu rexhid rexui rexgpu rexui-sdl3 rexapu-sdl3 rexhid-sdl3 rexgpu-xenos-null rexgpu-xenos-vulkan"
+for needed in bin/rexglue lib/cmake/rexglue/rexglueConfig.cmake lib/cmake/rexglue/rexglueTargets.cmake \
+              lib/cmake/rexglue/rexglueModules-Release.cmake lib/cmake/rexglue/rexglue_project.cmake include/rex/version.h \
+              lar-sdk-bundle.json lib/libc++.so.1 lib/libc++abi.so.1 lib/libatomic.so.1; do
   [ -e "${SDK}/${needed}" ] || die "The install has no ${needed}."
 done
+# A shared library may be installed under its soname (libfoo.so.1) or as libfoo.so; the glob finds either.
+for name in ${SDK_LIBRARIES} ${SDK_MODULES}; do
+  compgen -G "${SDK}/lib/lib${name}.so*" > /dev/null || die "The install has no lib/lib${name}.so."
+done
+# CHECK: SDL3's own install names. A consumer's find_package(rexglue) needs its package file (rexglueConfig.cmake runs
+# find_dependency(SDL3 CONFIG)), so a miss is a build that is wrong; it is a warning here only because the names are read from SDL's
+# CMake files, not from an install.
+compgen -G "${SDK}/lib/libSDL3.so*" > /dev/null || echo "warning: the install has no lib/libSDL3.so (expected)." >&2
+[ -e "${SDK}/lib/cmake/SDL3/SDL3Config.cmake" ] || echo "warning: the install has no lib/cmake/SDL3/SDL3Config.cmake (expected)." >&2
 # and none of libunwind (a program with LLVM's unwinder next to glibc's hangs at exit in pthread_exit)
 if compgen -G "${SDK}/lib/libunwind*" > /dev/null; then
   die "The install has a libunwind: the kit's one unwinder is libgcc_s.so.1."
@@ -470,16 +530,14 @@ done < <(find "${SDK}" -type l -print0)
 
 # CHECK: SDL's Wayland driver is in the build. SDL's configure leaves the driver out without an error when it cannot run
 # wayland-scanner (see the step before the configure) and a Linux SDK with X11 only cannot start the game on a Wayland
-# desktop, so a build that lost it is not packed. Every fact below has to hold (no switch turns this off):
+# desktop, so a build that lost it is not packed. Every fact below has to hold (no switch turns this off). Since v0.11 SDL is
+# a shared library (thirdparty/CMakeLists.txt: SDL_SHARED ON, SDL_STATIC OFF), installed as lib/libSDL3.so*, so there is no libSDL3.a
+# and no librexruntime.so to look into:
 #   - every SDL_build_config.h of this build defines SDL_VIDEO_DRIVER_WAYLAND (SDL's own configure result);
-#   - the installed libSDL3.a holds the driver's objects: every SDL_wayland*.c of the SDL sources, one generated
-#     <protocol>-protocol.c per wayland-protocols/*.xml, and Wayland_bootstrap (the driver's entry in SDL's video driver
-#     list), with X11_bootstrap still there;
-#   - librexruntime.so, which carries SDL for the game, names wl_display_connect (its dlopen table, or an undefined
-#     symbol in a build that links wayland-client): the call that opens the Wayland socket.
+#   - the build has one generated <protocol>-protocol.c.o per wayland-protocols/*.xml and the SDL_wayland*.c objects;
+#   - the installed libSDL3.so* names wl_display_connect (SDL's table of the Wayland client calls it loads at run time: the call
+#     that opens the Wayland socket) and still names XOpenDisplay (the X11 driver).
 sdl_dir="${SRC}/thirdparty/sdl3"
-sdl_lib="${SDK}/lib/libSDL3.a"
-sdl_runtime="${SDK}/lib/librexruntime.so"
 sdl_bad=0
 sdl_fail() { err "SDL Wayland check: $*"; sdl_bad=1; }
 sdl_configs=0
@@ -490,31 +548,25 @@ while IFS= read -r -d '' cfg_h; do
   fi
 done < <(find "${BUILD}/thirdparty/sdl3" -name SDL_build_config.h -print0)
 [ "${sdl_configs}" -gt 0 ] || sdl_fail "no SDL_build_config.h under ${BUILD}/thirdparty/sdl3 (the layout of the build changed: fix this check, do not skip it)."
-n_wl_obj=0; n_wl_src=0; n_wl_proto=0; n_wl_xml=0
-if [ -f "${sdl_lib}" ]; then
-  sdl_members=$("${KIT}/llvm/bin/llvm-ar" t "${sdl_lib}")
-  n_wl_obj=$(grep -c '^SDL_wayland.*\.c\.o$' <<< "${sdl_members}" || true)
-  n_wl_proto=$(grep -c -- '-protocol\.c\.o$' <<< "${sdl_members}" || true)
-  n_wl_src=$(find "${sdl_dir}/src/video/wayland" -maxdepth 1 -name 'SDL_wayland*.c' | wc -l)
-  n_wl_xml=$(find "${sdl_dir}/wayland-protocols" -maxdepth 1 -name '*.xml' | wc -l)
-  [ "${n_wl_src}" -gt 0 ] && [ "${n_wl_xml}" -gt 0 ] || sdl_fail "found no SDL Wayland sources or protocol files under ${sdl_dir} (the layout changed: fix this check, do not skip it)."
-  [ "${n_wl_obj}" -ge "${n_wl_src}" ] || sdl_fail "libSDL3.a has ${n_wl_obj} SDL_wayland*.c.o objects, the SDL sources have ${n_wl_src}."
-  [ "${n_wl_proto}" -ge "${n_wl_xml}" ] || sdl_fail "libSDL3.a has ${n_wl_proto} generated protocol objects (*-protocol.c.o), SDL has ${n_wl_xml} protocol files."
-  grep -qx 'SDL_waylandvideo.c.o' <<< "${sdl_members}" || sdl_fail "libSDL3.a has no SDL_waylandvideo.c.o."
-  grep -qx 'SDL_waylandwindow.c.o' <<< "${sdl_members}" || sdl_fail "libSDL3.a has no SDL_waylandwindow.c.o."
-  sdl_symbols=$("${KIT}/llvm/bin/llvm-nm" --defined-only "${sdl_lib}" 2> /dev/null || true)
-  grep -Eq '[[:space:]][DdRr][[:space:]]+Wayland_bootstrap$' <<< "${sdl_symbols}" || sdl_fail "libSDL3.a does not define Wayland_bootstrap."
-  grep -Eq '[[:space:]][DdRr][[:space:]]+X11_bootstrap$' <<< "${sdl_symbols}" || sdl_fail "libSDL3.a lost X11_bootstrap (the X11 driver)."
+n_wl_obj=$(find "${BUILD}/thirdparty/sdl3" -name 'SDL_wayland*.c.o' | wc -l)
+n_wl_proto=$(find "${BUILD}/thirdparty/sdl3" -name '*-protocol.c.o' | wc -l)
+n_wl_src=$(find "${sdl_dir}/src/video/wayland" -maxdepth 1 -name 'SDL_wayland*.c' | wc -l)
+n_wl_xml=$(find "${sdl_dir}/wayland-protocols" -maxdepth 1 -name '*.xml' | wc -l)
+[ "${n_wl_src}" -gt 0 ] && [ "${n_wl_xml}" -gt 0 ] || sdl_fail "found no SDL Wayland sources or protocol files under ${sdl_dir} (the layout changed: fix this check, do not skip it)."
+[ "${n_wl_obj}" -ge "${n_wl_src}" ] || sdl_fail "the build has ${n_wl_obj} SDL_wayland*.c.o objects, the SDL sources have ${n_wl_src}."
+[ "${n_wl_proto}" -ge "${n_wl_xml}" ] || sdl_fail "the build has ${n_wl_proto} generated protocol objects (*-protocol.c.o), SDL has ${n_wl_xml} protocol files."
+sdl_shared=""
+for candidate in "${SDK}"/lib/libSDL3.so*; do
+  if [ -f "${candidate}" ] && [ ! -L "${candidate}" ]; then sdl_shared=${candidate}; break; fi
+done
+if [ -n "${sdl_shared}" ]; then
+  grep -aqF 'wl_display_connect' "${sdl_shared}" || sdl_fail "${sdl_shared##*/} does not name wl_display_connect: its SDL has no Wayland driver."
+  grep -aqF 'XOpenDisplay' "${sdl_shared}" || sdl_fail "${sdl_shared##*/} does not name XOpenDisplay (the X11 driver is gone)."
 else
-  sdl_fail "${sdl_lib} is not installed."
-fi
-if [ -f "${sdl_runtime}" ]; then
-  grep -aqF 'wl_display_connect' "${sdl_runtime}" || sdl_fail "librexruntime.so does not name wl_display_connect: its SDL has no Wayland driver."
-else
-  sdl_fail "${sdl_runtime} is not installed."
+  sdl_fail "no lib/libSDL3.so* file is installed."
 fi
 [ "${sdl_bad}" = 0 ] || die "SDL was built without its Wayland driver (wayland-scanner used: ${WAYLAND_SCANNER_USED}); nothing is packed. See the configure output above (cmake's 'Failed to get wayland-scanner version')."
-echo "SDL Wayland driver: ok (${sdl_configs} SDL_build_config.h define SDL_VIDEO_DRIVER_WAYLAND; libSDL3.a: ${n_wl_obj}/${n_wl_src} SDL_wayland*.c.o, ${n_wl_proto}/${n_wl_xml} protocol objects, Wayland_bootstrap and X11_bootstrap; wl_display_connect in librexruntime.so; wayland-scanner ${WAYLAND_SCANNER_USED})"
+echo "SDL Wayland driver: ok (${sdl_configs} SDL_build_config.h define SDL_VIDEO_DRIVER_WAYLAND; build objects: ${n_wl_obj}/${n_wl_src} SDL_wayland*.c.o, ${n_wl_proto}/${n_wl_xml} protocol objects; wl_display_connect and XOpenDisplay in ${sdl_shared##*/}; wayland-scanner ${WAYLAND_SCANNER_USED})"
 
 echo "install: $(find "${SDK}" -type f | wc -l) files, $(du -sh "${SDK}" | cut -f1)"
 

@@ -6,6 +6,13 @@ workflow (the `prebuilt-sdk.yaml` they were first written to copy was removed on
 account's Actions). Where a comment in them says "the workflow", it means the job that step stands for; the pins in the
 scripts are the source of truth.
 
+**These scripts are written for the SDK built on upstream rexglue-sdk v0.11.0 (2026-11-18) and have not been run against it.**
+What changed from the v0.10 scripts: the install is about 19 DLLs (6 linked libraries, 12 provider modules, SDL3) instead of
+`rexruntime.dll` and `rexgpu-xenos.dll`; the Vulkan headers and VMA come from a Vulkan SDK on the build PC (1.4.313 or newer;
+there are no Vulkan submodules any more); `REXGLUE_USE_VULKAN` is gone and the options are `REXGLUE_ENABLE_TRACY=OFF`,
+`REXGLUE_BUILD_TESTS=OFF` and `REXGLUE_REGISTER_PACKAGE=OFF`; SDL3 is a shared library. The CHECK list at the end says what
+is open.
+
 **The workflow is the source of truth.** The scripts repeat its steps (same pins, same edits, same configure line, same
 checks, same file names, same json). If you change one, change the other. Each build script compares its pins and the
 texts that end up in the bundle with the workflow file at the start and stops when they differ. What the workflow in turn
@@ -13,7 +20,7 @@ repeats from the launcher (`tools.json`, `tools-linux.json`, `SdkStep`, `LinuxBu
 
 | File | What it does | Runs on |
 |---|---|---|
-| `build-windows.ps1 -Commit <sha> -Out <dir> [-Tools <dir>]` | the workflow's `windows` job: llvm-mingw build, `.zip`, `.sha256` | Windows PowerShell 5.1 |
+| `build-windows.ps1 -Commit <sha> -Out <dir> [-Tools <dir>] [-VulkanSdk <dir>]` | the workflow's `windows` job: llvm-mingw build, `.zip`, `.sha256` | Windows PowerShell 5.1 |
 | `build-linux.sh <sha> <outdir>` | the workflow's `linux` job: the launcher's kit, `.tar.br`, `.sha256` | WSL (Ubuntu 26.04 here) |
 | `manifest.py <sha> <outdir>` | the workflow's `manifest` job: `sdk-prebuilt-<12>.json` | Python 3, either side |
 | `upload.ps1 -Commit <sha> -Out <dir> [-DryRun]` | makes the release if needed, uploads the files, the json last | Windows, needs `gh` signed in |
@@ -34,8 +41,11 @@ GitHub, and the release's tag is made on it. Use one short output folder for eve
 
    `-Tools` defaults to `C:\mcv\base\tools` (llvm-mingw 20250709, CMake 4.4.4, Ninja 1.13.2 are there and are used when their
    folder name and `--version` match the pins; otherwise the pinned file is downloaded and its SHA-256 checked).
-   `-Clean` starts from nothing, `-Jobs N` limits the compilers, `-SubmoduleDonor ''` stops it borrowing the submodule
-   objects of `C:\mcv\base\sdk-src`.
+   `-VulkanSdk` defaults to `VULKAN_SDK`, else the newest `C:\VulkanSDK\<version>` (1.4.363.0 is on this PC); it needs
+   `Include\vulkan`, `Include\vma`, `Lib\vulkan-1.lib` and headers 1.4.313 or newer. Only the headers are used, nothing of it is
+   shipped. `-Clean` starts from nothing, `-Jobs N` limits the compilers, `-SubmoduleDonor ''` stops it borrowing the submodule
+   objects of `C:\mcv\base\sdk-src` (v0.10's checkout: v0.11's new submodules, excrypt and tlsf, and its newer sdl3 are fetched
+   from the network; `C:\mcv\base\sdk-src-011` from `make-sdk-tree-011.ps1 -Stage base` is a better donor).
 
 2. **Linux SDK**, after the Windows build has finished:
 
@@ -46,7 +56,8 @@ GitHub, and the release's tag is made on it. Use one short output folder for eve
    The kit pieces (LLVM, sysroot, CMake, Ninja) are taken from `~/kit/out` when their SHA-256 and size are the pinned ones
    (they are, as of 2026-11-08, so nothing is downloaded and the not yet public `linux-kit-5` release is not needed for
    this), else downloaded from the pinned URLs. Settings are environment variables, listed at the top of the script
-   (`JOBS`, `KIT`, `WORK_BASE`, `CLEAN=1`).
+   (`JOBS`, `KIT`, `WORK_BASE`, `CLEAN=1`, `VULKAN_INCLUDE_DIR`, `VULKAN_LIBRARY`). The Vulkan headers default to the newest
+   `/mnt/c/VulkanSDK/<version>/Include` of the Windows PC: the kit's own sysroot has Vulkan 1.3.204 headers, too old for v0.11.
 
 3. **The json**, from either side:
 
@@ -103,15 +114,31 @@ The WSL VM gets half of the PC's RAM by default; if the Linux build runs out of 
   needs `libxml2.so.2`; Ubuntu 26.04 has only `libxml2.so.16`, so it does not run, and SDL then drops its Wayland driver
   without an error (the game on a Wayland desktop: "wayland not available"). `build-linux.sh` tests the kit's scanner
   before the configure and passes `-DWAYLAND_SCANNER=/usr/bin/wayland-scanner` (package `libwayland-bin`) when it does not
-  run, and stops when neither runs. Step 6 refuses to pack an SDK whose `libSDL3.a` has no Wayland objects, whose
-  `SDL_build_config.h` lacks `SDL_VIDEO_DRIVER_WAYLAND`, or whose `librexruntime.so` does not name `wl_display_connect`.
+  run, and stops when neither runs. Step 6 refuses to pack an SDK whose build has no Wayland objects, whose
+  `SDL_build_config.h` lacks `SDL_VIDEO_DRIVER_WAYLAND`, or whose `libSDL3.so*` (a shared library since v0.11) does not name
+  `wl_display_connect`.
 - **The Linux json** is written with `python3` (the WSL distro has no `jq`), the same keys in the same order.
 - **Version number**: the SDK's version comes from `git describe` over the tags; the public repository has no tags, so the
   workflow's `fetch-tags` finds none and the launcher's own clone finds none either. These scripts clone the public
-  repository too, so the number is the same (`...-dev.unknown`). A build from the local clone `C:\mcv\larecomp\sdk\LAR-RXSDK`
-  would show `v0.10.0-87-g...` because that clone also has the upstream tags: that is why the scripts do not use it.
+  repository too, so the number is the same (v0.11: `cmake/rex_version.cmake` gives `0.11.0.0-dev.unknown` with a warning, and
+  the modules log it as their build identity). A build from the local clone `C:\mcv\larecomp\sdk\LAR-RXSDK` would show
+  `0.11.0.<n>-dev.g...` because that clone also has the upstream tags: that is why the scripts do not use it.
 
 ## CHECK (not verified; no build was run)
+
+- **Everything against v0.11**: no build of the v0.11 SDK with llvm-mingw or with the Linux kit has been run. The library and module
+  lists in both scripts are read from `cmake/rexglue_export_targets.cmake` and `cmake/rexglue_install.cmake`; a name that is wrong
+  stops a script after the build, naming the file it missed.
+- Windows: that v0.11 builds with llvm-mingw at all. The `MINGW` lines of the top `CMakeLists.txt`,
+  `cmake/rexglue_target.cmake` (`-municode` on a windowed host) and `cmake/rexglue_recomp_options.cmake` (no `-fasync-exceptions`)
+  are the only SDK support for it; `-Werror` is off there. Also: that the `.rc` version resources compile with llvm-windres; that the
+  kernel's `__imp__*` entry points are exported by their `__declspec(dllexport)` without the old `.def` workaround (dropped with
+  `cmake/mingw_imp_exports.cmake`); and that replacing `operator new/delete` in every binary (`cmake/rexglue_host_alloc_stub.cpp`)
+  agrees with the shared `libc++.dll` (blocks that libc++.dll allocates itself, freed by the replaced `delete`).
+- Linux: upstream builds with libstdc++ 13; the kit builds with libc++ (revision 5). Whether v0.11 compiles and runs with the kit is
+  not known. A libstdc++ 13 kit (with `-DREXGLUE_GCC_INSTALL_DIR`) would be revision 6, and the launcher's pins move with it.
+- Both: that the launcher can provide the Vulkan headers and VMA when it builds the SDK on a player's PC (a prebuilt SDK needs
+  none): see `docs/prebuilt-sdk.md`.
 
 - Windows: that `rexglue.exe --version` starts with only Windows' folders on `PATH` (the workflow has the same check and
   the same doubt), and that a blobless clone plus `--filter` checkout fetches what the build needs (the launcher clones

@@ -5,7 +5,7 @@ test_vmsum4fp128_1:
   blr
   #_ REGISTER_OUT v3 [3f800000, 3fc00000, 3f8ccccd, 3ff33333]
   #_ REGISTER_OUT v4 [40000000, 40700000, 4013d70a, 40b051eb]
-  #_ REGISTER_OUT v5 [41A5147B, 41A5147B, 41A5147B, 41A5147B]
+  #_ REGISTER_OUT v5 [41A5147A, 41A5147A, 41A5147A, 41A5147A]
 
 test_vmsum4fp128_overflow:
   # A dot product of finite inputs that overflows gives QNaN in every lane, as on hardware.

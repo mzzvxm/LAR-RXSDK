@@ -1,5 +1,8 @@
 # NOTE (2026-11-08): the GitHub workflow this was first written to copy (.github/workflows/prebuilt-sdk.yaml) was removed; nothing runs on
 # Actions. Where a comment says "the workflow", read: the job this step stands for. The pins here are the source of truth.
+# NOTE (2026-11-18, upstream rexglue-sdk v0.11.0): adapted to the v0.11 library and module set (about 20 DLLs: rexbase, rexppc, rexkernel,
+# rexxam, rexxbdm, rexapp and 12 provider modules, plus SDL3), the Vulkan SDK that v0.11 takes from the PC instead of from submodules, and
+# the options that v0.11 renamed or dropped. NOT RUN: nothing here has been built against v0.11 (see docs/prebuilt-sdk.md, CHECK).
 <#
 .SYNOPSIS
     Builds the prebuilt Windows SDK of one commit on this PC: the "windows" job of
@@ -16,13 +19,15 @@
       1. checks its own pins against ../../.github/workflows/prebuilt-sdk.yaml
       2. the toolchain: llvm-mingw 20250709 (UCRT), CMake 4.4.4, Ninja 1.13.2. The copies in -Tools are used when
          their folder name and `--version` match the pins; otherwise the pinned file is downloaded and its SHA-256
-         checked, as the workflow does
+         checked, as the workflow does. Also the Vulkan SDK of this PC (-VulkanSdk): v0.11 compiles its Vulkan
+         driver against the SDK's headers and VMA (it has no Vulkan submodules any more), 1.4.313 or newer
       3. a clean checkout of the commit (a blobless clone of the repository, detached at the commit, with all
          submodules filled recursively, like actions/checkout with fetch-depth 0 and submodules: recursive)
       4. the two edits of the launcher's SDK step: FFmpeg's config.h and libmspack's symlink stand-ins
-      5. configure (cmake --preset win-amd64 ...), build, install (the registry write turned into an echo),
-         libc++.dll and libunwind.dll beside the binaries
-      6. lar-sdk-bundle.json, the file check, the check for DLLs that are not shipped, and rexglue.exe --version
+      5. configure (cmake --preset win-amd64 ...), build, install (a registry write, if the install has one, turned
+         into an echo), libc++.dll and libunwind.dll beside the binaries
+      6. lar-sdk-bundle.json, the file check (the v0.11 libraries and modules), the check for DLLs that are not
+         shipped, and rexglue.exe --version
       7. lar-rxsdk-prebuilt-<12>-windows-x86_64-llvm-mingw-20250709.zip, its .sha256 and fragment-windows.json
 
     Everything is written under -Out: work\ (source, build, install; delete it when done, it is several GB),
@@ -38,6 +43,13 @@
 
 .PARAMETER Tools
     The folder that holds llvm-mingw-20250709-ucrt-x86_64, cmake-4.4.4-windows-x86_64 and ninja-1.13.2.
+
+.PARAMETER VulkanSdk
+    The LunarG Vulkan SDK folder (the one that holds Include\vulkan, Include\vma and Lib\vulkan-1.lib), 1.4.313 or
+    newer. Default: the VULKAN_SDK environment variable, else the newest C:\VulkanSDK\<version>. The SDK's CMake
+    (thirdparty/CMakeLists.txt) runs find_package(Vulkan 1.4.313 REQUIRED) and takes VMA from the same folder.
+    Only the headers end up in the build: nothing of the Vulkan SDK is installed or shipped (the loader, vulkan-1.dll,
+    is loaded at run time from the player's driver).
 
 .PARAMETER Source
     Where the repository is cloned from. The default is the public repository, like the workflow. Do not point it
@@ -69,6 +81,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Commit,
     [Parameter(Mandatory = $true)][string]$Out,
     [string]$Tools = 'C:\mcv\base\tools',
+    [string]$VulkanSdk = '',
     [string]$Source = 'https://github.com/mzzvxm/LAR-RXSDK.git',
     [string]$SubmoduleDonor = 'C:\mcv\base\sdk-src',
     [int]$Jobs = 0,
@@ -101,8 +114,18 @@ $NinjaVersion = [regex]::Match($Pins['NINJA_URL'], '/v([0-9][0-9.]*)/').Groups[1
 # The repository that owns the release, and the strings the workflow writes into the bundle and the asset name.
 $SdkRepo = 'mzzvxm/LAR-RXSDK'
 $BundleWhat = 'LAR-RXSDK install built with llvm-mingw'
-$BundleOptions = 'REXGLUE_USE_VULKAN=ON REXGLUE_ENABLE_TRACY=OFF (FidelityFX off, its default), Release'
+$BundleOptions = 'REXGLUE_ENABLE_TRACY=OFF REXGLUE_BUILD_TESTS=OFF (Vulkan and Direct3D 12 are always built), Release'
 $AssetTemplate = 'lar-rxsdk-prebuilt-$env:SHORT-windows-x86_64-$toolchain.zip'   # as written in the workflow (literal)
+
+# What v0.11 installs (cmake/rexglue_export_targets.cmake: REXGLUE_INSTALL_TARGETS and REXGLUE_MODULE_TARGETS; the install rules are
+# cmake/rexglue_install.cmake). With llvm-mingw the SDK's CMakeLists.txt sets an empty library prefix, so the names have no 'lib'.
+#  - libraries a program links: bin\<name>.dll and the import library lib\<name>.dll.a
+#  - modules: loaded by name at run time (rex::Init), only bin\<name>.dll is installed
+$SdkLibraries = @('rexbase', 'rexppc', 'rexkernel', 'rexxam', 'rexxbdm', 'rexapp')
+$SdkModules = @('rexfilesystem', 'rexapu', 'rexhid', 'rexui', 'rexgpu', 'rexui-sdl3', 'rexapu-sdl3', 'rexhid-sdl3',
+                'rexgpu-xenos-null', 'rexgpu-xenos-vulkan', 'rexgpu-xenos-d3d12', 'rexhid-xinput')
+# The Vulkan SDK that v0.11 needs (thirdparty/CMakeLists.txt REXGLUE_VULKAN_MIN_VERSION, the x86-64 value).
+$VulkanMinimum = [version]'1.4.313'
 
 $script:PhaseLines = New-Object 'System.Collections.Generic.List[string]'
 $script:PhaseName = ''
@@ -222,6 +245,41 @@ function Assert-WorkflowAgrees {
     Write-Host 'Pins: the ones in this script.'
 }
 
+# The Vulkan SDK folder for the configure: the -VulkanSdk argument, else VULKAN_SDK, else the newest C:\VulkanSDK\<version>.
+# It must have what thirdparty/CMakeLists.txt asks for: Vulkan 1.4.313+ headers, VMA's header, and the loader's import library
+# (find_package(Vulkan) wants a library to exist; the build links only the headers).
+function Find-VulkanSdk([string]$Requested, [version]$Minimum) {
+    $candidates = @()
+    if ($Requested -ne '') { $candidates += $Requested }
+    elseif ($env:VULKAN_SDK) { $candidates += $env:VULKAN_SDK }
+    else {
+        $installed = @(Get-ChildItem -LiteralPath 'C:\VulkanSDK' -Directory -ErrorAction SilentlyContinue | Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending)
+        foreach ($sdkFolder in $installed) { $candidates += $sdkFolder.FullName }
+    }
+    foreach ($candidate in $candidates) {
+        $root = $candidate.TrimEnd('\')
+        $coreHeader = "$root\Include\vulkan\vulkan_core.h"
+        $vmaHeader = "$root\Include\vma\vk_mem_alloc.h"
+        $loaderLib = "$root\Lib\vulkan-1.lib"
+        $missing = @($coreHeader, $vmaHeader, $loaderLib | Where-Object { -not (Test-Path -LiteralPath $_) })
+        if ($missing.Count -gt 0) {
+            if ($Requested -ne '') { throw "The Vulkan SDK folder $root is missing: $($missing -join ', ')" }
+            continue
+        }
+        $headerText = [IO.File]::ReadAllText($coreHeader)
+        $patchMatch = [regex]::Match($headerText, '#define\s+VK_HEADER_VERSION\s+(\d+)')
+        $completeMatch = [regex]::Match($headerText, 'VK_HEADER_VERSION_COMPLETE\s+VK_MAKE_API_VERSION\(\s*\d+\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*VK_HEADER_VERSION\s*\)')
+        if (-not $patchMatch.Success -or -not $completeMatch.Success) { throw "Could not read the Vulkan header version from $coreHeader." }
+        $found = [version]('{0}.{1}.{2}' -f $completeMatch.Groups[1].Value, $completeMatch.Groups[2].Value, $patchMatch.Groups[1].Value)
+        if ($found -lt $Minimum) {
+            if ($Requested -ne '') { throw "The Vulkan SDK at $root has headers $found; v0.11 needs $Minimum or newer." }
+            continue
+        }
+        return [pscustomobject]@{ Root = $root; Include = "$root\Include"; Library = $loaderLib; Version = $found }
+    }
+    throw "No Vulkan SDK $Minimum or newer with Include\vulkan, Include\vma and Lib\vulkan-1.lib was found (use -VulkanSdk <folder>, or set VULKAN_SDK; the LunarG installer puts it in C:\VulkanSDK\<version>)."
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------------------------------------------
@@ -337,6 +395,10 @@ try {
         $env:PATH = (Split-Path -Parent $git) + ';' + $env:PATH
     }
     Write-Host ('git: ' + $git + '  ' + (Get-VersionLine $git '--version'))
+
+    # v0.11 has no Vulkan submodules: the Vulkan driver is compiled against the Vulkan SDK on the build PC.
+    $vulkan = Find-VulkanSdk $VulkanSdk $VulkanMinimum
+    Write-Host ('Vulkan SDK: {0}  (headers {1})' -f $vulkan.Root, $vulkan.Version)
 
     # -------------------------------------------------------------------------------------------------------
     # The workflow's "Allow long paths" + actions/checkout (fetch-depth 0, fetch-tags, submodules: recursive).
@@ -456,7 +518,9 @@ try {
         throw "FFmpeg config.h is not as expected: the text to change is there $oldCount times."
     }
 
-    # Git on Windows without symlinks checks libmspack's links out as small text files holding the target path.
+    # Git on Windows without symlinks checks libmspack's links out as small text files holding the target path. (v0.11 compiles
+    # libmspack's real sources, thirdparty/libmspack/libmspack/mspack, so this is no longer needed; it is harmless and kept as the
+    # launcher's step still does it.)
     $libmspackRoot = [IO.Path]::GetFullPath((Join-Path $SrcDir 'thirdparty\libmspack')).TrimEnd('\')
     $mspackFolder = Join-Path $libmspackRoot 'cabextract\mspack'
     if (-not (Test-Path -LiteralPath $mspackFolder)) { throw "$mspackFolder is missing (the libmspack submodule is not checked out)." }
@@ -488,16 +552,24 @@ try {
     $cxx = Fwd "$mingwRoot\bin\clang++.exe"
     $rc = Fwd "$mingwRoot\bin\x86_64-w64-mingw32-windres.exe"
     $prefix = Fwd $InstallDir
+    $vulkanInclude = Fwd $vulkan.Include
+    $vulkanLibrary = Fwd $vulkan.Library
+    $env:VULKAN_SDK = $vulkan.Root
 
     Push-Location $SrcDir
     try {
+        # v0.11: no REXGLUE_USE_VULKAN (Vulkan is always built, and D3D12 always on Windows); the tests are on by default for a top-level
+        # build and are not wanted here; the registry write of the install is opt-in (REXGLUE_REGISTER_PACKAGE) and is turned off.
         Write-Host '--- Configure'
         Invoke-Native -Exe $cmake -What 'cmake configure' -Arguments @(
             '--preset', 'win-amd64',
             '-B', $BuildDir,
             "-DCMAKE_INSTALL_PREFIX=$prefix",
-            '-DREXGLUE_USE_VULKAN=ON',
             '-DREXGLUE_ENABLE_TRACY=OFF',
+            '-DREXGLUE_BUILD_TESTS=OFF',
+            '-DREXGLUE_REGISTER_PACKAGE=OFF',
+            "-DVulkan_INCLUDE_DIR=$vulkanInclude",
+            "-DVulkan_LIBRARY=$vulkanLibrary",
             "-DCMAKE_C_COMPILER=$cc",
             "-DCMAKE_CXX_COMPILER=$cxx",
             "-DCMAKE_RC_COMPILER=$rc",
@@ -508,8 +580,9 @@ try {
         Write-Host '--- Build'
         Invoke-Native -Exe $cmake -What 'cmake build' -Arguments @('--build', $BuildDir, '--config', 'Release')
 
-        # The install writes a value into the CMake package registry with `reg add` (cmake/rexglue_install.cmake).
-        # The launcher turns that command into an echo, and so does this: the same install, nothing outside it.
+        # Before v0.11 the install always wrote a value into the CMake package registry with `reg add`; now only when
+        # REXGLUE_REGISTER_PACKAGE is ON (cmake/rexglue_install.cmake). Off here, so the command should not be there; if it is
+        # (an older commit), it is turned into an echo as the launcher does: the same install, nothing outside it.
         Write-Host '--- Install'
         $installScript = Join-Path $BuildDir 'cmake_install.cmake'
         $installText = [IO.File]::ReadAllText($installScript)
@@ -539,20 +612,39 @@ try {
     }
     [IO.File]::WriteAllText("$InstallDir\lar-sdk-bundle.json", ($info | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 
-    # The files the launcher's SDK step requires (SdkStep.WindowsFiles).
-    foreach ($needed in @(
-            'bin\rexglue.exe', 'bin\rexruntime.dll', 'bin\rexgpu-xenos.dll', 'bin\libc++.dll', 'bin\libunwind.dll',
-            'lib\rexruntime.dll.a', 'lib\cmake\rexglue\rexglueConfig.cmake', 'lar-sdk-bundle.json')) {
+    # The files the launcher's SDK step requires (SdkStep.WindowsFiles): since v0.11 the SDK is the codegen tool, 6 linked libraries
+    # (a DLL and an import library each), 12 provider modules (a DLL each; the runtime loads them by name), the package files and
+    # the C++ runtime. $SdkLibraries and $SdkModules come from cmake/rexglue_export_targets.cmake.
+    $requiredFiles = @('bin\rexglue.exe', 'bin\libc++.dll', 'bin\libunwind.dll',
+                       'lib\cmake\rexglue\rexglueConfig.cmake', 'lib\cmake\rexglue\rexglueTargets.cmake',
+                       'lib\cmake\rexglue\rexglueModules-Release.cmake', 'lib\cmake\rexglue\rexglue_project.cmake',
+                       'include\rex\version.h', 'lar-sdk-bundle.json')
+    foreach ($library in $SdkLibraries) { $requiredFiles += @("bin\$library.dll", "lib\$library.dll.a") }
+    foreach ($module in $SdkModules) { $requiredFiles += "bin\$module.dll" }
+    foreach ($needed in $requiredFiles) {
         if (-not (Test-Path -LiteralPath "$InstallDir\$needed")) { throw "The install has no $needed." }
     }
+    # CHECK: the names below follow from how SDL3's and the static rexxenos' install rules name files under llvm-mingw; a miss is a
+    # warning, not a stop, because it is the build that is wrong here, not the bundle. A consumer's find_package(rexglue) needs
+    # SDL3's package file (rexglueConfig.cmake: find_dependency(SDL3 CONFIG)), so check what a miss means before shipping.
+    foreach ($expected in @('bin\SDL3.dll', 'lib\cmake\SDL3\SDL3Config.cmake', 'lib\librexxenos.a')) {
+        if (-not (Test-Path -LiteralPath "$InstallDir\$expected")) { Write-Warning "The install has no $expected (expected, see the CHECK above)." }
+    }
 
+    # Every DLL and EXE of the install must find what it imports: a Windows DLL, an API-set stub, or a DLL of this install.
     # A DLL of the gcc runtime would be missing on the player's PC (the launcher ships libc++ and libunwind only).
     $objdump = "$mingwRoot\bin\llvm-objdump.exe"
+    $installedDlls = @(Get-ChildItem -LiteralPath "$InstallDir\bin" -File -Filter '*.dll' | ForEach-Object { $_.Name.ToLowerInvariant() })
     $badImports = @()
     foreach ($file in Get-ChildItem -LiteralPath "$InstallDir\bin" -File | Where-Object { $_.Extension -in '.dll', '.exe' }) {
         foreach ($line in (Get-NativeText -Exe $objdump -Arguments @('-p', $file.FullName)).Output | Select-String 'DLL Name:') {
             $importedDll = ($line.Line -split ':', 2)[1].Trim()
-            if ($importedDll -match '^(libwinpthread|libgcc_s|libstdc\+\+|libssp)') { $badImports += "$($file.Name) imports $importedDll" }
+            $importedLower = $importedDll.ToLowerInvariant()
+            if ($importedDll -match '^(libwinpthread|libgcc_s|libstdc\+\+|libssp)') { $badImports += "$($file.Name) imports $importedDll"; continue }
+            if ($importedLower -match '^(api-ms-|ext-ms-)') { continue }
+            if ($installedDlls -contains $importedLower) { continue }
+            if (Test-Path -LiteralPath (Join-Path "$env:SystemRoot\System32" $importedDll)) { continue }
+            $badImports += "$($file.Name) imports $importedDll, which is neither in the install nor in System32"
         }
     }
     if ($badImports.Count -gt 0) { throw "The binaries need a DLL that is not shipped: $($badImports -join '; ')" }

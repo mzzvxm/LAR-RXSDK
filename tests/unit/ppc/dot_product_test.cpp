@@ -1,12 +1,5 @@
 /**
- * @file        ppc/dot_product_test.cpp
- * @brief       Tests for vmsum3fp128 / vmsum4fp128 (rex::ppc::Vmsum3fp128 / Vmsum4fp128)
- *
- * A dot product of finite inputs that overflows float32 is a QNaN on the console, where DPPS gives
- * an infinity. Everything else stays what DPPS gives: finite results bit for bit, infinities and
- * NaNs that come from the inputs, and the element vmsum3fp128 leaves out.
- *
- * Vectors are written in host lane order: lane 0 is the element vmsum3fp128 leaves out.
+ * @file        tests/unit/ppc/dot_product_test.cpp
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -15,186 +8,155 @@
  *              See LICENSE file in the project root for full license text.
  */
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <array>
-#include <bit>
-#include <cstdint>
+#include <span>
 
-#include <rex/ppc/dot_product.h>
+#include "rex_test.h"
+
+#include <rex/ppc/fpu.h>
+
+#include "dot_product_cases.h"
+#include "dot_product_nj0_cases.h"
 
 namespace {
 
-using Lanes = std::array<uint32_t, 4>;
+using DotFunction = simde__m128 (*)(simde__m128, simde__m128);
 
-constexpr uint32_t kQNaN = 0x7FC00000u;
-constexpr uint32_t kPlusInf = 0x7F800000u;
-constexpr uint32_t kMinusInf = 0xFF800000u;
-constexpr uint32_t kMaxFloat = 0x7F7FFFFFu;  // FLT_MAX
-constexpr uint32_t kMinusMax = 0xFF7FFFFFu;  // -FLT_MAX
-constexpr uint32_t kTwoPow64 = 0x5F800000u;  // 2^64
-constexpr uint32_t kTwoPow63 = 0x5F000000u;  // 2^63
-constexpr uint32_t kOne = 0x3F800000u;
-constexpr uint32_t kTwo = 0x40000000u;
-
-simde__m128 Load(const Lanes& lanes) {
-  return simde_mm_castsi128_ps(
-      simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(lanes.data())));
-}
-
-Lanes Store(simde__m128 v) {
-  Lanes lanes{};
-  simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(lanes.data()), simde_mm_castps_si128(v));
-  return lanes;
-}
-
-Lanes Splat(uint32_t bits) {
-  return {bits, bits, bits, bits};
-}
-
-bool IsNaNBits(uint32_t bits) {
-  return (bits & 0x7FFFFFFFu) > kPlusInf;
-}
-
-float AsFloat(uint32_t bits) {
-  return std::bit_cast<float>(bits);
-}
-
-uint32_t Bits(float f) {
-  return std::bit_cast<uint32_t>(f);
-}
-
-// What the generator wrote before: the plain dot product
-Lanes Plain3(const Lanes& a, const Lanes& b) {
-  return Store(simde_mm_dp_ps(Load(a), Load(b), 0xEF));
-}
-Lanes Plain4(const Lanes& a, const Lanes& b) {
-  return Store(simde_mm_dp_ps(Load(a), Load(b), 0xFF));
-}
-
-Lanes Vmsum3(const Lanes& a, const Lanes& b) {
-  return Store(rex::ppc::Vmsum3fp128(Load(a), Load(b)));
-}
-Lanes Vmsum4(const Lanes& a, const Lanes& b) {
-  return Store(rex::ppc::Vmsum4fp128(Load(a), Load(b)));
-}
-
-}  // namespace
-
-TEST_CASE("vmsum: a finite result is what the plain dot product gives, bit for bit",
-          "[ppc][vmsum]") {
-  const std::array<Lanes, 8> values = {{
-      {Bits(1.0f), Bits(1.5f), Bits(1.1f), Bits(1.9f)},
-      {Bits(-3.25f), Bits(0.0f), Bits(7.0f), Bits(-0.0f)},
-      {Bits(1.0e-30f), Bits(2.0e-30f), Bits(-3.0e-30f), Bits(4.0e-30f)},
-      {Bits(1.0e18f), Bits(-2.0e18f), Bits(3.0e18f), Bits(4.0e18f)},
-      {kMaxFloat, 0u, 0u, 0u},
-      {0u, kMaxFloat, 0u, kMinusMax},
-      {Bits(123456.789f), Bits(-0.001f), Bits(42.0f), Bits(1.0f)},
-      {kTwoPow63, kTwoPow63, kOne, kTwo},
-  }};
-  for (const Lanes& a : values) {
-    for (const Lanes& b : values) {
-      const Lanes plain3 = Plain3(a, b);
-      const Lanes plain4 = Plain4(a, b);
-      // The fixture only checks the rule where the plain result is finite; anything else is the
-      // subject of the cases below.
-      if (!IsNaNBits(plain3[0]) && (plain3[0] & 0x7F800000u) != kPlusInf) {
-        CHECK(Vmsum3(a, b) == plain3);
-      }
-      if (!IsNaNBits(plain4[0]) && (plain4[0] & 0x7F800000u) != kPlusInf) {
-        CHECK(Vmsum4(a, b) == plain4);
-      }
+void CheckCases(DotFunction dot, std::span<const DotProductCase> cases) {
+  for (const DotProductCase& expected : cases) {
+    alignas(16) std::array<u32, 4> a;
+    alignas(16) std::array<u32, 4> b;
+    alignas(16) std::array<u32, 4> out;
+    for (size_t i = 0; i < 4; ++i) {
+      a[3 - i] = expected.a[i];
+      b[3 - i] = expected.b[i];
+    }
+    simde_mm_store_si128(
+        reinterpret_cast<simde__m128i*>(out.data()),
+        simde_mm_castps_si128(dot(simde_mm_castsi128_ps(simde_mm_load_si128(
+                                      reinterpret_cast<const simde__m128i*>(a.data()))),
+                                  simde_mm_castsi128_ps(simde_mm_load_si128(
+                                      reinterpret_cast<const simde__m128i*>(b.data()))))));
+    CAPTURE(expected.a[0], expected.a[1], expected.a[2], expected.a[3], expected.b[0],
+            expected.b[1], expected.b[2], expected.b[3]);
+    for (const u32 lane : out) {
+      CHECK(lane == expected.out);
     }
   }
 }
 
-TEST_CASE("vmsum3fp128: overflow of finite inputs is a QNaN in every lane", "[ppc][vmsum]") {
-  // upstream rexglue issue 491: v = [-FLT_MAX x3, 0], v . v
-  const Lanes v = {0u, kMinusMax, kMinusMax, kMinusMax};
-  REQUIRE(Plain3(v, v) == Splat(kPlusInf));  // what DPPS gave
-  CHECK(Vmsum3(v, v) == Splat(kQNaN));
+}  // namespace
+
+REX_TEST_CASE("DotProduct3 matches the sampled results", "[ppc][dot_product]") {
+  CheckCases(rex::ppc::simd::DotProduct3, kDotProduct3Cases);
 }
 
-TEST_CASE("vmsum3fp128: overflow towards minus infinity is the same QNaN", "[ppc][vmsum]") {
-  const Lanes a = {0u, kMinusMax, kMinusMax, kOne};
-  const Lanes b = {0u, kMaxFloat, kMaxFloat, kOne};
-  REQUIRE(Plain3(a, b)[0] == kMinusInf);
-  CHECK(Vmsum3(a, b) == Splat(kQNaN));
+REX_TEST_CASE("DotProduct4 matches the sampled results", "[ppc][dot_product]") {
+  CheckCases(rex::ppc::simd::DotProduct4, kDotProduct4Cases);
 }
 
-TEST_CASE("vmsum3fp128: three finite products whose sum overflows", "[ppc][vmsum]") {
-  // 2^64 * 2^63 = 2^127 three times: every product is finite, the sum (1.5 * 2^128) is not
-  const Lanes a = Splat(kTwoPow64);
-  const Lanes b = Splat(kTwoPow63);
-  REQUIRE(Plain3(a, b) == Splat(kPlusInf));
-  CHECK(Vmsum3(a, b) == Splat(kQNaN));
+namespace {
+
+class SplitMix {
+ public:
+  explicit SplitMix(u64 initial_state) : state_(initial_state) {}
+
+  u64 operator()() {
+    u64 z = (state_ += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  }
+
+ private:
+  u64 state_;
+};
+
+/** Draws ordinary values, zeros, denormals, infinities and NaNs. */
+u32 RandomOperand(SplitMix& rng) {
+  const u32 sign = static_cast<u32>(rng() & 1) << 31;
+  const u32 mantissa = static_cast<u32>(rng()) & 0x7FFFFFu;
+  switch (rng() % 16) {
+    case 0:
+      return sign;
+    case 1:
+      return sign | mantissa;
+    case 2:
+      return sign | 0x7F800000u;
+    case 3:
+      return sign | 0x7F800000u | mantissa;
+    case 4:
+    case 5:
+      return sign | ((124u + static_cast<u32>(rng() % 5)) << 23) | mantissa;
+    default:
+      return sign | ((1u + static_cast<u32>(rng() % 254)) << 23) | mantissa;
+  }
 }
 
-TEST_CASE("vmsum3fp128: products that overflow but cancel give the finite sum", "[ppc][vmsum]") {
-  // [FLT_MAX, -FLT_MAX, 1, (unused)] . [2, 2, 0, (unused)]: the float32 products are +inf and
-  // -inf, the exact sum is 0
-  const Lanes a = {0u, kMaxFloat, kMinusMax, kOne};
-  const Lanes b = {0u, kTwo, kTwo, 0u};
-  CHECK(Vmsum3(a, b) == Splat(0u));
+template <u32 Terms>
+void CheckAgainstReference(DotFunction dot) {
+  SplitMix rng(2024);
+  for (u32 iteration = 0; iteration < 200000; ++iteration) {
+    alignas(16) std::array<u32, 4> a;
+    alignas(16) std::array<u32, 4> b;
+    for (u32 i = 0; i < 4; ++i) {
+      a[i] = RandomOperand(rng);
+      b[i] = RandomOperand(rng);
+    }
+    std::array<u32, Terms> terms_a;
+    std::array<u32, Terms> terms_b;
+    for (u32 i = 0; i < Terms; ++i) {
+      terms_a[i] = a[3 - i];
+      terms_b[i] = b[3 - i];
+    }
+    alignas(16) std::array<u32, 4> out;
+    simde_mm_store_si128(
+        reinterpret_cast<simde__m128i*>(out.data()),
+        simde_mm_castps_si128(dot(simde_mm_castsi128_ps(simde_mm_load_si128(
+                                      reinterpret_cast<const simde__m128i*>(a.data()))),
+                                  simde_mm_castsi128_ps(simde_mm_load_si128(
+                                      reinterpret_cast<const simde__m128i*>(b.data()))))));
+    const u32 expected = rex::ppc::simd::detail::DotProductReference<Terms>(terms_a, terms_b);
+    if (out[0] != expected || out[3] != expected) {
+      CAPTURE(a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+      REQUIRE(out[0] == expected);
+      REQUIRE(out[3] == expected);
+    }
+  }
 }
 
-TEST_CASE("vmsum3fp128: an infinity from the inputs passes through", "[ppc][vmsum]") {
-  const Lanes a = {0u, kPlusInf, kOne, kOne};
-  const Lanes b = {0u, kOne, kOne, kOne};
-  REQUIRE(Plain3(a, b) == Splat(kPlusInf));
-  CHECK(Vmsum3(a, b) == Splat(kPlusInf));
+}  // namespace
 
-  const Lanes negative = {0u, kMinusInf, kOne, kOne};
-  CHECK(Vmsum3(negative, b) == Splat(kMinusInf));
+REX_TEST_CASE("DotProduct3 matches the scalar reference on random operands", "[ppc][dot_product]") {
+  CheckAgainstReference<3>(rex::ppc::simd::DotProduct3);
 }
 
-TEST_CASE("vmsum3fp128: a NaN or infinity times zero from the inputs stays a NaN", "[ppc][vmsum]") {
-  const Lanes nan_in = {0u, 0x7FC11111u, kOne, kOne};
-  const Lanes ones = {0u, kOne, kOne, kOne};
-  for (uint32_t lane : Vmsum3(nan_in, ones))
-    CHECK(IsNaNBits(lane));
-
-  const Lanes inf_times_zero_a = {0u, kPlusInf, kOne, kOne};
-  const Lanes inf_times_zero_b = {0u, 0u, kOne, kOne};
-  for (uint32_t lane : Vmsum3(inf_times_zero_a, inf_times_zero_b))
-    CHECK(IsNaNBits(lane));
+REX_TEST_CASE("DotProduct4 matches the scalar reference on random operands", "[ppc][dot_product]") {
+  CheckAgainstReference<4>(rex::ppc::simd::DotProduct4);
 }
 
-TEST_CASE("vmsum3fp128: the element it leaves out does not count", "[ppc][vmsum]") {
-  // lane 0 holds a NaN, and then an overflowing product: neither reaches the result
-  const Lanes a = {0x7FC12345u, kOne, kOne, kOne};
-  const Lanes b = {kOne, kOne, kOne, kOne};
-  CHECK(Vmsum3(a, b) == Splat(Bits(3.0f)));
-
-  const Lanes big_a = {kMaxFloat, kOne, kOne, kOne};
-  const Lanes big_b = {kMaxFloat, kOne, kOne, kOne};
-  CHECK(Vmsum3(big_a, big_b) == Splat(Bits(3.0f)));
-}
-
-TEST_CASE("vmsum4fp128: all four elements count", "[ppc][vmsum]") {
-  const Lanes v = {kMinusMax, kMinusMax, kMinusMax, kMinusMax};
-  REQUIRE(Plain4(v, v) == Splat(kPlusInf));
-  CHECK(Vmsum4(v, v) == Splat(kQNaN));
-
-  // The same overflow in the element vmsum3fp128 leaves out does count here
-  const Lanes big = {kMaxFloat, 0u, 0u, 0u};
-  CHECK(Vmsum4(big, big) == Splat(kQNaN));
-  CHECK(Vmsum3(big, big) == Splat(0u));
-
-  const Lanes a = {kOne, kOne, kOne, kOne};
-  const Lanes b = {kTwo, kTwo, kTwo, kTwo};
-  CHECK(Vmsum4(a, b) == Splat(Bits(8.0f)));
-  CHECK(AsFloat(Vmsum4(a, b)[0]) == 8.0f);
-}
-
-TEST_CASE("vmsum4fp128: an infinity from the inputs passes through, a NaN stays one",
-          "[ppc][vmsum]") {
-  const Lanes a = {kOne, kOne, kOne, kMinusInf};
-  const Lanes b = {kOne, kOne, kOne, kOne};
-  CHECK(Vmsum4(a, b) == Splat(kMinusInf));
-
-  const Lanes nan_in = {kOne, 0x7FC00001u, kOne, kOne};
-  for (uint32_t lane : Vmsum4(nan_in, b))
-    CHECK(IsNaNBits(lane));
+REX_TEST_CASE(
+    "DotProduct3 and DotProduct4 take a denormal operand at its value when VSCR NJ is clear",
+    "[ppc][dot_product]") {
+  const auto load = [](const std::array<u32, 4>& words) {
+    alignas(16) std::array<u32, 4> host;
+    for (size_t i = 0; i < 4; ++i) {
+      host[3 - i] = words[i];
+    }
+    return simde_mm_castsi128_ps(
+        simde_mm_load_si128(reinterpret_cast<const simde__m128i*>(host.data())));
+  };
+  for (const DotProductNJ0Case& expected : kDotProductNJ0Cases) {
+    const simde__m128 result =
+        expected.terms == 3
+            ? rex::ppc::simd::DotProduct3(load(expected.a), load(expected.b), false)
+            : rex::ppc::simd::DotProduct4(load(expected.a), load(expected.b), false);
+    alignas(16) std::array<u32, 4> host;
+    simde_mm_store_si128(reinterpret_cast<simde__m128i*>(host.data()),
+                         simde_mm_castps_si128(result));
+    CAPTURE(expected.terms, expected.a[0], expected.a[1], expected.a[2], expected.a[3],
+            expected.b[0], expected.b[1], expected.b[2], expected.b[3]);
+    CHECK(host[0] == expected.out);
+    CHECK(host[3] == expected.out);
+  }
 }
