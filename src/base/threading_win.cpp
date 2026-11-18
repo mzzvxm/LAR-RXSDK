@@ -659,28 +659,13 @@ class Win32Thread : public Win32Handle<Thread> {
 
 thread_local std::unique_ptr<Win32Thread> g_current_thread = nullptr;
 
-// ::GetCurrentThread() returns a pseudo-handle that always means "the thread that uses it". A
-// Thread built on it would send QueueUserAPC (and anything else done through the handle) to the
-// thread that calls it, not to the thread it stands for, so a callback queued from another thread
-// would never reach the waiting one. Use a real handle to the calling thread instead.
-static HANDLE DuplicateCurrentThreadHandle() {
-  HANDLE process = ::GetCurrentProcess();
-  HANDLE handle = nullptr;
-  if (!DuplicateHandle(process, ::GetCurrentThread(), process, &handle, 0, FALSE,
-                       DUPLICATE_SAME_ACCESS)) {
-    REX_LOG_LAST_ERROR();
-    return nullptr;
-  }
-  return handle;
-}
-
 struct ThreadStartData {
   rex::MoveOnlyFunction<void()> start_routine;
 };
 DWORD WINAPI ThreadStartRoutine(LPVOID parameter) {
   detail::RegisterCurrentThread();
   PrepareThreadForCrash();
-  Thread::GetCallingThread();
+  g_current_thread = std::make_unique<Win32Thread>(::GetCurrentThread());
 
   std::unique_ptr<ThreadStartData> start_data(static_cast<ThreadStartData*>(parameter));
   start_data->start_routine();
@@ -706,8 +691,8 @@ Thread* Thread::GetCallingThread() {
     return g_current_thread.get();
   }
 
-  HANDLE handle = DuplicateCurrentThreadHandle();
-  if (!handle) {
+  HANDLE handle = ::GetCurrentThread();
+  if (handle == INVALID_HANDLE_VALUE) {
     return nullptr;
   }
 
