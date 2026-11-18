@@ -28,6 +28,8 @@ namespace {
 
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
 constexpr u32 kDefaultQueuedFrames = 8;
+/** How long the worker rests after a failed wait before it tries again. */
+constexpr std::chrono::milliseconds kWaitFailedBackoff{10};
 
 }  // namespace
 
@@ -69,12 +71,24 @@ Result<void> APU::Setup() {
 }
 
 void APU::WorkerMain() {
+  // A failed wait (an invalid or unsupported handle) does not fix itself and returns at once, so
+  // trying again straight away spins a core and logs on every pass. Rest between tries, log the
+  // first failure and count the rest.
+  u64 wait_failures = 0;
   while (worker_running_) {
     auto result = platform::WaitAny(wait_handles_.data(), wait_handles_.size(), true,
                                     std::chrono::milliseconds(500));
     if (result.first == platform::WaitResult::kFailed) {
-      REXAPU_WARN("Audio worker: WaitAny failed");
+      if (wait_failures++ == 0) {
+        REXAPU_WARN("Audio worker: WaitAny failed, retrying every {} ms, repeats are not logged",
+                    kWaitFailedBackoff.count());
+      }
+      platform::SleepFor(kWaitFailedBackoff);
       continue;
+    }
+    if (wait_failures) {
+      REXAPU_INFO("Audio worker: WaitAny works again after {} failed waits", wait_failures);
+      wait_failures = 0;
     }
 
     if (result.first == platform::WaitResult::kSuccess && result.second == kMaxClients) {
