@@ -45,21 +45,7 @@ std::unique_ptr<D3D12Provider> D3D12Provider::Create(i32 adapter_index,
   return provider;
 }
 
-bool D3D12Provider::QueryVideoMemory(uint64_t& usage_out, uint64_t& budget_out) const {
-  if (!dxgi_adapter3_) {
-    return false;
-  }
-  DXGI_QUERY_VIDEO_MEMORY_INFO local = {};
-  if (FAILED(dxgi_adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
-    return false;
-  }
-  usage_out = local.CurrentUsage;
-  budget_out = local.Budget;
-  return true;
-}
-
 D3D12Provider::~D3D12Provider() {
-  dxgi_adapter3_.Reset();
   if (graphics_analysis_ != nullptr) {
     graphics_analysis_->Release();
   }
@@ -239,7 +225,7 @@ bool D3D12Provider::Initialize(i32 adapter_index_wanted) {
   while (dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
     DXGI_ADAPTER_DESC1 adapter_desc;
     if (SUCCEEDED(adapter->GetDesc1(&adapter_desc))) {
-      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device),
                                              nullptr))) {
         if (adapter_index_wanted >= 0) {
           if (adapter_index == static_cast<u32>(adapter_index_wanted)) {
@@ -293,8 +279,6 @@ bool D3D12Provider::Initialize(i32 adapter_index_wanted) {
     dxgi_factory->Release();
     return false;
   }
-  // For the video memory in use and its budget (QueryVideoMemory).
-  adapter->QueryInterface(IID_PPV_ARGS(&dxgi_adapter3_));
   adapter->Release();
 
   ID3D12InfoQueue* d3d12_info_queue;
