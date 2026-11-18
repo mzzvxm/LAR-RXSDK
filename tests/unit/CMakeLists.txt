@@ -157,6 +157,7 @@ add_executable(
   base/relaunch_test.cpp
   base/posix_wait_test.cpp
   base/thread_redirect_test.cpp
+  base/thread_priority_test.cpp
   ppc/dot_product_test.cpp
   ppc/estimate_test.cpp
   ppc/fpscr_flush_test.cpp
