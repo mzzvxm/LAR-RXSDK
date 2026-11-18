@@ -1087,6 +1087,24 @@ dxbc::Src DXBCShaderTranslator::LoadOperand(const InstructionOperand& operand,
         index.index = float_constant_index;
       } else {
         REX_ASSERT(constant_register_map.float_dynamic_addressing);
+        // The index (a0 or aL plus the offset) clamped to the 256 float constants. a0 is -256 to
+        // 255, so the sum can be outside them, and the constants are bound as a root descriptor,
+        // which has no bounds check: such a read hung the GPU (a motion blur pass of Midnight
+        // Club: Los Angeles takes a0 from a texture). Vulkan's robustBufferAccess makes the same
+        // read safe there.
+        u32 index_temp = PushSystemTemp();
+        temp_pushed_out = true;
+        bool address_register = operand.storage_addressing_mode ==
+                                InstructionStorageAddressingMode::kAddressRegisterRelative;
+        a_.OpIAdd(dxbc::Dest::R(index_temp, 0b0001),
+                  dxbc::Src::R(address_register ? system_temp_ps_pc_p0_a0_ : system_temp_al_)
+                      .Select(address_register ? 3 : 0),
+                  dxbc::Src::LI(static_cast<i32>(operand.storage_index)));
+        a_.OpIMax(dxbc::Dest::R(index_temp, 0b0001), dxbc::Src::R(index_temp, dxbc::Src::kXXXX),
+                  dxbc::Src::LI(0));
+        a_.OpIMin(dxbc::Dest::R(index_temp, 0b0001), dxbc::Src::R(index_temp, dxbc::Src::kXXXX),
+                  dxbc::Src::LI(255));
+        index = dxbc::Index(index_temp, 0);
       }
       src = dxbc::Src::CB(cbuffer_index_float_constants_,
                           std::to_underlying(CbufferRegister::kFloatConstants), index);
