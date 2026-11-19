@@ -217,6 +217,7 @@ These settings exist while a Xenos driver is initialized, with any host API. Dec
 | `gpu.xenos.snorm16_render_target_full_range` | `bool` | `true` | live | Use the full range for SNORM16 render targets. |
 | `gpu.xenos.direct_host_resolve` | `bool` | `true` | live | Resolve from host render targets to shared memory when possible. |
 | `gpu.xenos.texture_3d_to_2d` | `bool` | `true` | live | Sample 3D textures as 2D textures. |
+| `gpu.xenos.texture_load_direct_unscaled` | `bool` | `true` | restart | At native resolution, load single-level 2D textures over memory that a resolve has written straight into the host texture in one compute pass, not into a buffer first and then copied. At a scaled resolution such textures are always loaded straight in where the host allows it. Off keeps the buffer and the copy, to compare. Hidden from the settings overlay outside debug builds. |
 
 ### gpu.vulkan
 
@@ -238,6 +239,7 @@ These settings exist while the Vulkan driver is initialized. Declared by `Vulkan
 | `gpu.vulkan.render_target_path` | `string` | `""` | startup only | The render target implementation path. |
 | `gpu.vulkan.sparse_shared_memory` | `bool` | `true` | restart | Use sparse shared memory. |
 | `gpu.vulkan.cube_map_edge_filtering_off` | `bool` | `false` | live | Sample cube maps without filtering across the edges of faces. |
+| `gpu.vulkan.texture_load_storage_copy` | `string` | `"auto"` | restart | Copy loaded single-level textures into their images with a compute shader, not `vkCmdCopyBufferToImage`. `auto` does it with NVIDIA's driver, where the copy command was slow, `on` and `off` decide. It also lets resolved textures be loaded straight into their images at a scaled resolution. `auto`, `on` or `off`. |
 | `gpu.vulkan.require_geometry_shader` | `bool` | `true` | startup only | Require geometryShader support. Turn it off to allow the fallback primitive emulation paths. |
 | `gpu.vulkan.require_fill_mode_non_solid` | `bool` | `true` | startup only | Require fillModeNonSolid support. Turn it off to fall back to solid fill for line and point polygon modes. |
 | `gpu.vulkan.log_debug_messages` | `bool` | `true` | live | Log Vulkan debug messages. |
