@@ -255,7 +255,8 @@ void BuilderContext::EmitCallToFunction(const FunctionNode& target_fn) {
     const MillicodeEntry& millicode = *target_fn.GetMillicode();
     const bool save = millicode.type == MillicodeType::kGPRSave;
     if ((save || millicode.type == MillicodeType::kGPRRestore) && millicode.reg >= 14 &&
-        millicode.reg <= 31 && !target_fn.IsRegisterSharing()) {
+        millicode.reg <= 31 && !target_fn.IsRegisterSharing() &&
+        !GetConfig().no_inline_gpr_stubs) {
       emit_ctx.Reference(name);
       Println("\t{}<{}>(ctx, base, {});", save ? "rex_savegprlr" : "rex_restgprlr", millicode.reg,
               name);

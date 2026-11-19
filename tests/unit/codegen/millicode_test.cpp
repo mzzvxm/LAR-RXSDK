@@ -273,6 +273,21 @@ REX_TEST_CASE("A call to a restore helper is expanded in place too", "[codegen][
   CHECK_FALSE(Has(tree, "__restgprlr_14(ctx, base)"));
 }
 
+REX_TEST_CASE("no_inline_gpr_stubs keeps the calls to the GPR and LR stubs", "[codegen][millicode]") {
+  // The key is for measuring what the expansion gains: with it the calls read as the compiler
+  // wrote them, and the helpers stay in the header, unused.
+  for (const Run run : {Run::kGPRSave, Run::kGPRRestore}) {
+    const bool save = run == Run::kGPRSave;
+    const auto tree = Generate(WithRun({run}, {BranchLink(0, kHelperIndex), kBlr}),
+                               "no_inline_gpr_stubs = true\n");
+    const std::string name = save ? "__savegprlr_14" : "__restgprlr_14";
+    INFO(name);
+    CHECK(Has(tree, name + "(ctx, base);"));
+    CHECK_FALSE(Has(tree, save ? InlineSave(14) : InlineRestore(14)));
+    CHECK(Has(tree, save ? "inline void rex_savegprlr(" : "inline void rex_restgprlr("));
+  }
+}
+
 REX_TEST_CASE("A helper body keeps its registers in ctx under non_volatile_as_local",
               "[codegen][millicode]") {
   struct Case {

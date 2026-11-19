@@ -143,6 +143,8 @@ bool ApplyTOML(const toml::table& root, RecompilerConfig& cfg, const std::string
             "non_volatile_as_local");
   MergeBool(cfg.forward_stack_stores, root["forward_stack_stores"].value_or(false),
             has_bool("forward_stack_stores"), "forward_stack_stores");
+  MergeBool(cfg.no_inline_gpr_stubs, root["no_inline_gpr_stubs"].value_or(false),
+            has_bool("no_inline_gpr_stubs"), "no_inline_gpr_stubs");
   MergeBool(cfg.generate_exception_handlers, root["generate_exception_handlers"].value_or(false),
             has_bool("generate_exception_handlers"), "generate_exception_handlers");
   if (has_bool("is_dll")) {

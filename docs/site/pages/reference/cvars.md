@@ -313,6 +313,7 @@ These settings exist while the `rexkernel` module is connected. Declared by `Ker
 | `kernel.user_country` | `u32` | `103` | until launch | Country code. |
 | `kernel.license_mask` | `u32` | `0` | until launch | Content license mask. |
 | `kernel.command_line` | `string` | `""` | until launch | Arguments after `default.xex`. |
+| `kernel.count_critical_section_spins` | `bool` | `false` | live | Debug. Counts the critical section enters that spin (a spin count above 0) and logs the totals when the title ends. |
 
 ### title
 

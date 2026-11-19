@@ -79,6 +79,7 @@ constexpr Expected kSettings[] = {
     {"kernel.user_country", "103"},
     {"kernel.license_mask", "0"},
     {"kernel.command_line", ""},
+    {"kernel.count_critical_section_spins", "false"},
     {"log.level", "info"},
     {"log.flush_level", "warn"},
     {"log.flush_interval", "1"},

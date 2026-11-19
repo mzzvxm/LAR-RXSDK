@@ -29,6 +29,8 @@
 #include <rex/platform/thread.h>
 #include "kernel/stub_log.h"
 #include "kernel/title_state.h"
+#include "kernel/xboxkrnl/critical_section_counter.h"
+#include <rex/kernel/kernel_settings.h>
 #include "kernel/kernel.h"
 #include <rex/kernel/types/xex.h>
 
@@ -395,6 +397,32 @@ bool TryAcquireLockCount(X_RTL_CRITICAL_SECTION& cs) {
   return LockCount(cs).compare_exchange_strong(expected, 0);
 }
 
+// kernel.count_critical_section_spins: the enters that reach the spin loop. Read only when the
+// section's spin count is not 0, so an enter of a section without one (every section of MCLA, by
+// the audit's reading) costs the same as before.
+std::atomic<u64> g_spinning_enters{0};
+std::atomic<u64> g_spin_acquired{0};
+std::atomic<u32> g_spin_units_max{0};
+std::atomic<bool> g_spin_first_logged{false};
+
+bool CountsSpinningEnters() {
+  return kernel::GetCurrentState().GetKernelSettings().count_critical_section_spins.Get();
+}
+
+void NoteSpinningEnter(u32 cs_address, u32 spin_units) {
+  g_spinning_enters.fetch_add(1, std::memory_order_relaxed);
+  u32 seen = g_spin_units_max.load(std::memory_order_relaxed);
+  while (spin_units > seen &&
+         !g_spin_units_max.compare_exchange_weak(seen, spin_units, std::memory_order_relaxed)) {
+  }
+  if (!g_spin_first_logged.exchange(true, std::memory_order_relaxed)) {
+    REXKRNL_INFO(
+        "critical section spins: first enter with a spin count, section {:#010x}, spin count {} "
+        "(x 256)",
+        cs_address, spin_units);
+  }
+}
+
 }  // namespace
 
 void RtlInitializeCriticalSection(X_RTL_CRITICAL_SECTION* cs) {
@@ -435,6 +463,20 @@ u32 RtlInitializeCriticalSectionAndSpinCount_entry(GuestPtrT<X_RTL_CRITICAL_SECT
   return RtlInitializeCriticalSectionAndSpinCount(cs, spin_count);
 }
 
+void LogCriticalSectionSpinCounts(bool enabled) {
+  const u64 enters = g_spinning_enters.exchange(0, std::memory_order_relaxed);
+  const u64 acquired = g_spin_acquired.exchange(0, std::memory_order_relaxed);
+  const u32 units_max = g_spin_units_max.exchange(0, std::memory_order_relaxed);
+  g_spin_first_logged.store(false, std::memory_order_relaxed);
+  if (!enabled && enters == 0) {
+    return;
+  }
+  REXKRNL_INFO(
+      "critical section spins: {} enters with a spin count above 0, {} of them took the section "
+      "while spinning, largest spin count {} (x 256)",
+      enters, acquired, units_max);
+}
+
 void RtlEnterCriticalSection_entry(GuestPtrT<X_RTL_CRITICAL_SECTION> cs) {
   u32 cur_thread = KernelThread::GetCallingThread()->GetGuestObject();
   u32 spin_count = cs->header.absolute * 256;
@@ -445,8 +487,16 @@ void RtlEnterCriticalSection_entry(GuestPtrT<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
+  const bool counting = spin_count != 0 && CountsSpinningEnters();
+  if (counting) {
+    NoteSpinningEnter(cs.GetGuestAddress(), cs->header.absolute);
+  }
+
   while (spin_count--) {
     if (TryAcquireLockCount(*cs)) {
+      if (counting) {
+        g_spin_acquired.fetch_add(1, std::memory_order_relaxed);
+      }
       cs->owning_thread = cur_thread;
       cs->recursion_count = 1;
       return;

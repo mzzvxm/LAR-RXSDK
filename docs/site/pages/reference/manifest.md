@@ -67,6 +67,7 @@ Each flag is a boolean and defaults to `false`. See [Optimizations](../codegen/c
 | `non_argument_as_local` | Keeps `r0`, `r11`, `r12`, `f0` and `v32` to `v63` in locals. |
 | `non_volatile_as_local` | Keeps `r14` to `r31`, `f14` to `f31`, `v14` to `v31` and `v64` to `v127` in locals, except in the functions listed under [Restore Exits](../codegen/codegen-pipeline.md#restore-exits-and-millicode). |
 | `forward_stack_stores` | Makes a load through `r1` reuse the value of an earlier write in the same basic block to the same `r1` offset with the same width, instead of reading guest memory. |
+| `no_inline_gpr_stubs` | Keeps a call to the compiler's `__savegprlr_N` or `__restgprlr_N` stub (N = 14 to 31) as a call to the stub, instead of expanding it in place as `rex_savegprlr<N>` or `rex_restgprlr<N>`. For measuring what the expansion gains. |
 | `generate_exception_handlers` | Wraps functions that have SEH scopes in exception handlers. See [Exception Scopes](../codegen/generated-code.md#exception-scopes). |
 
 ### `[analysis]`
