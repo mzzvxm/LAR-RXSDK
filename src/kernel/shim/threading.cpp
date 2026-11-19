@@ -250,6 +250,17 @@ REX_SHIM_FN(DeleteFiber, void, MappedVoid lpFiber) {
 
   if (static_cast<u32>(kthread->fiber_ptr) == fiber_addr) {
     REXKRNL_DEBUG("DeleteFiber: self delete fiber={:#010x}", fiber_addr);
+#if !REX_PLATFORM_WIN32
+    // A fiber made by CreateFiber runs on a host stack of its own, and destroying the fiber frees
+    // that stack, so it cannot be done from the fiber itself (Windows ends the thread inside its
+    // DeleteFiber instead). The fiber stays registered, which is where DestroyFibers frees it when
+    // the title shuts down. The thread stops from this stack: FiberEntryPoint catches the stop and
+    // switches to the main fiber, where the stop is thrown again.
+    const auto self = runtime.GetThreadRegistry().FindFiber(fiber_addr);
+    if (self && !self->is_thread_fiber) {
+      thread->Exit(1);
+    }
+#endif
     REX_PROFILE_FIBER_LEAVE();
     ResetThreadFiber(thread);
     thread->Exit(1);

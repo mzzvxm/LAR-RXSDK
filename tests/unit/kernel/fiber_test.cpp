@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstring>
 
+#include <rex/platform.h>
 #include <rex/platform/lock_order.h>
 #include <rex/kernel/function_dispatcher.h>
 #include <rex/kernel/thread_registry.h>
@@ -179,3 +180,59 @@ REX_TEST_CASE("Teardown frees a fiber context in a physical heap without breakin
   rex::platform::SetLockOrderHandler(previous);
   CHECK(g_violations == 0);
 }
+
+#if !REX_PLATFORM_WIN32
+// Windows ends the thread inside its own DeleteFiber, so only the other hosts run this.
+namespace {
+
+std::atomic<u32> g_self_deleting_fiber{0};
+std::atomic<bool> g_delete_returned{false};
+std::atomic<bool> g_main_fiber_resumed{false};
+
+void SelfDeletingFiberBody(PPCContext& ctx, u8* base) {
+  ctx.r3.u64 = g_self_deleting_fiber;
+  rexshim_DeleteFiber(ctx, base);
+  g_delete_returned = true;
+}
+
+}  // namespace
+
+REX_TEST_CASE("fibers: a fiber that deletes itself ends its thread without freeing its own stack",
+              "[kernel][fibers]") {
+  g_self_deleting_fiber = 0;
+  g_delete_returned = false;
+  g_main_fiber_resumed = false;
+  KernelFixture fixture;
+  fixture.RunUntilGuestThreadEnds([](Caller& c) {
+    PPCContext& ctx = c.GetContext();
+    u8* base = StateOf(c.GetRuntime()).GetAddressSpace()->GetVirtualMembase();
+    ctx.r3.u64 = 0;
+    rexshim_ConvertThreadToFiber(ctx, base);
+    CHECKED_ELSE(ctx.r3.u32 != 0) {
+      FAIL_CHECK("the check above failed");
+      return;
+    }
+    const u32 body =
+        StateOf(c.GetRuntime()).GetFunctionDispatcher()->AllocateThunk(&SelfDeletingFiberBody, 0);
+    CHECKED_ELSE(body != 0) {
+      FAIL_CHECK("the check above failed");
+      return;
+    }
+    ctx.r3.u64 = 0;
+    ctx.r4.u64 = body;
+    ctx.r5.u64 = 0;
+    rexshim_CreateFiber(ctx, base);
+    g_self_deleting_fiber = ctx.r3.u32;
+    CHECKED_ELSE(g_self_deleting_fiber != 0) {
+      FAIL_CHECK("the check above failed");
+      return;
+    }
+    ctx.r3.u64 = g_self_deleting_fiber;
+    rexshim_SwitchToFiber(ctx, base);
+    // The fiber deleted itself: the thread stops when control comes back to its main fiber.
+    g_main_fiber_resumed = true;
+  });
+  CHECK_FALSE(g_delete_returned);
+  CHECK_FALSE(g_main_fiber_resumed);
+}
+#endif
