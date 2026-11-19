@@ -191,6 +191,13 @@ struct RecompilerConfig {
    * of reading guest memory.
    */
   bool forward_stack_stores = false;
+  /**
+   * TOML key `no_inline_gpr_stubs`, default false. When true, a call to the compiler's
+   * __savegprlr_N or __restgprlr_N stub (N = 14 to 31) stays a call to the stub, instead of being
+   * expanded in place as rex_savegprlr<N> or rex_restgprlr<N>. For measuring what the expansion
+   * gains.
+   */
+  bool no_inline_gpr_stubs = false;
   bool generate_exception_handlers = false;
 
   VectorMathConfig vector_math; /**< TOML table `[vector_math]`. */

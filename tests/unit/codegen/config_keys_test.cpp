@@ -101,7 +101,7 @@ REX_TEST_CASE("A table that uses only known keys has no warnings", "[codegen][co
       "setjmp_address = 0x82000004\nskip_lr = true\nskip_msr = true\nctr_as_local = true\n"
       "xer_as_local = true\nreserved_as_local = true\ncr_as_local = true\n"
       "non_argument_as_local = true\nnon_volatile_as_local = true\nforward_stack_stores = true\n"
-      "generate_exception_handlers = true\nis_dll = false\n"
+      "no_inline_gpr_stubs = true\ngenerate_exception_handlers = true\nis_dll = false\n"
       "[analysis]\n"
       "exception_handler_funcs = [0x82000020]\n"
       "[functions]\n0x82000030 = { size = 8, name = \"f\", share_registers = true }\n"
@@ -114,6 +114,12 @@ REX_TEST_CASE("A table that uses only known keys has no warnings", "[codegen][co
       "vmsum4fp128 = \"exact\"\nvrefp = \"fast\"\nvrsqrtefp = \"fast\"\nvexptefp = \"exact\"\n"
       "fres = \"fast\"\nfrsqrte = \"exact\"\n");
   CHECK(loaded.config.load_warnings.empty());
+}
+
+REX_TEST_CASE("no_inline_gpr_stubs is off unless the table sets it", "[codegen][config][keys]") {
+  CHECK_FALSE(LoadBody("").config.no_inline_gpr_stubs);
+  CHECK(LoadBody("no_inline_gpr_stubs = true\n").config.no_inline_gpr_stubs);
+  CHECK_FALSE(LoadBody("no_inline_gpr_stubs = false\n").config.no_inline_gpr_stubs);
 }
 
 REX_TEST_CASE("A vector math key set to exact applies only to its instruction",
