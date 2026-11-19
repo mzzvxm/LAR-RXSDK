@@ -187,8 +187,8 @@ bool Build<PPC_INST_VMSUM3FP128>(BuilderContext& ctx) {
   ctx.EmitSetFlushMode(true);
   if (ctx.GetConfig().vector_math.vmsum3fp128 == VectorMath::kFast) {
     ctx.Println(
-        "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
-        "simde_mm_load_ps({}.f32), 0xEF));",
+        "\tsimde_mm_store_ps({}.f32, rex::ppc::Vmsum3fp128(simde_mm_load_ps({}.f32), "
+        "simde_mm_load_ps({}.f32)));",
         ctx.V(ctx.insn.operands[0]), ctx.V(ctx.insn.operands[1]), ctx.V(ctx.insn.operands[2]));
     return true;
   }
@@ -205,8 +205,8 @@ bool Build<PPC_INST_VMSUM4FP128>(BuilderContext& ctx) {
   ctx.EmitSetFlushMode(true);
   if (ctx.GetConfig().vector_math.vmsum4fp128 == VectorMath::kFast) {
     ctx.Println(
-        "\tsimde_mm_store_ps({}.f32, simde_mm_dp_ps(simde_mm_load_ps({}.f32), "
-        "simde_mm_load_ps({}.f32), 0xFF));",
+        "\tsimde_mm_store_ps({}.f32, rex::ppc::Vmsum4fp128(simde_mm_load_ps({}.f32), "
+        "simde_mm_load_ps({}.f32)));",
         ctx.V(ctx.insn.operands[0]), ctx.V(ctx.insn.operands[1]), ctx.V(ctx.insn.operands[2]));
     return true;
   }

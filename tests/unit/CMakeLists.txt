@@ -159,6 +159,7 @@ add_executable(
   base/thread_redirect_test.cpp
   base/thread_priority_test.cpp
   ppc/dot_product_test.cpp
+  ppc/dot_product_overflow_test.cpp
   ppc/estimate_test.cpp
   ppc/fpscr_flush_test.cpp
   ppc/vscr_register_test.cpp

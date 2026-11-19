@@ -50,10 +50,11 @@ constexpr u32 kEmitterRevision = 6;
 /**
  * Revision of what the LARecomp branch changes in the emitted code on top of kEmitterRevision: dcbz
  * clears the 128-byte line, the GPR/LR save and restore stubs are expanded at their call sites, a
- * mid function hook may take r1. A counter of its own, so a bump of upstream's merges cleanly. Bump
+ * mid function hook may take r1, the "fast" vmsum3fp128/vmsum4fp128 give a QNaN on overflow (2). A
+ * counter of its own, so a bump of upstream's merges cleanly. Bump
  * it in any commit of this branch that changes what is emitted for unchanged inputs.
  */
-constexpr u32 kLarecompEmitterRevision = 1;
+constexpr u32 kLarecompEmitterRevision = 2;
 
 std::string DeriveTargetNameFromFilePath(const std::string& file_path) {
   std::filesystem::path p(file_path);

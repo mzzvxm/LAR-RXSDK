@@ -27,6 +27,7 @@
 #include <simde/x86/sse4.1.h>
 
 #include <rex/ppc/context.h>
+#include <rex/ppc/dot_product.h>
 #include <rex/types.h>
 
 namespace rex::ppc::simd {
