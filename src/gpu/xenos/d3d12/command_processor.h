@@ -16,6 +16,7 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -101,6 +102,9 @@ class D3D12CommandProcessor : public CommandProcessor {
    */
   ID3D12RootSignature* GetRootSignature(const DXBCShader* vertex_shader,
                                         const DXBCShader* pixel_shader, bool tessellated);
+
+  /** Draws in an occlusion query aren't left out for a pipeline being created. */
+  bool IsOcclusionQueryActive() const { return HostOcclusionQueryRecording(); }
 
   gpu::d3d12::D3D12UploadBufferPool& GetConstantBufferPool() const {
     return *constant_buffer_pool_;
@@ -351,9 +355,17 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool EndSubmission(bool is_swap);
   /**
    * Reports whether ending the submission now costs no more delay than it saves, as unfinished
-   * pipeline creation requests must complete before submitting.
+   * pipeline creation requests must complete before submitting. With async shader compilation,
+   * pipelines being created by draws don't hold a submission.
    */
   bool CanEndSubmissionImmediately() const;
+  /**
+   * For a draw whose pipeline is still being created asynchronously, waits for it within what is
+   * left of the frame's async_pipeline_wait_budget_ms.
+   *
+   * @return True when the creation has finished.
+   */
+  bool AwaitAsyncPipeline(void* pipeline_handle);
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionFence(submission_current_);
     return submission_completed_ + 1 >= submission_current_;
@@ -478,6 +490,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool queue_operations_done_since_submission_signal_ = false;
 
   bool frame_open_ = false;
+  /** Time this frame's draws have waited for pipelines being created asynchronously. */
+  u64 frame_async_pipeline_wait_us_ = 0;
   /** Title frame index, updated at the start of a frame. */
   u64 frame_current_ = 1;
   u64 frame_completed_ = 0;
@@ -569,6 +583,7 @@ class D3D12CommandProcessor : public CommandProcessor {
   std::unordered_map<u32, u32> texture_cache_bindless_sampler_map_;
 
   std::unordered_map<u32, ID3D12RootSignature*> root_signatures_bindful_;
+  std::mutex root_signatures_bindful_mutex_;
   ID3D12RootSignature* root_signature_bindless_vs_ = nullptr;
   ID3D12RootSignature* root_signature_bindless_ds_ = nullptr;
 

@@ -104,6 +104,22 @@ class VulkanPipelineCache {
   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                     const IPipelineLayoutProvider*& pipeline_layout_out,
                                     bool* is_placeholder_out = nullptr) const;
+  /**
+   * Waits up to timeout_us for a pipeline queued by a draw for asynchronous creation (one that
+   * GetPipelineAndLayoutByHandle reports as a placeholder).
+   *
+   * @return True when its creation has finished (it may have failed: check
+   *         HasAsyncPipelineCreationFailed).
+   */
+  bool AwaitAsyncPipelineCreation(void* handle, u64 timeout_us);
+  /**
+   * Whether a pipeline queued for asynchronous creation failed to be created (its draws stay left
+   * out).
+   */
+  bool HasAsyncPipelineCreationFailed(void* handle) const {
+    return reinterpret_cast<const Pipeline*>(handle)->async_creation_failed.load(
+        std::memory_order_acquire);
+  }
 
  private:
   REX_PACKED_STRUCT(ShaderStoredHeader, {
@@ -244,13 +260,16 @@ class VulkanPipelineCache {
     /** Owned by VulkanCommandProcessor, which must keep it alive while the cache is active. */
     std::atomic<const IPipelineLayoutProvider*> pipeline_layout{nullptr};
     std::atomic<bool> is_placeholder{false};
+    /** Queued for asynchronous creation, and the creation failed: draws with it stay left out. */
+    std::atomic<bool> async_creation_failed{false};
     Pipeline() = default;
     Pipeline(const IPipelineLayoutProvider* pipeline_layout_provider)
         : pipeline_layout(pipeline_layout_provider) {}
     Pipeline(const Pipeline& other)
         : pipeline(other.pipeline.load(std::memory_order_acquire)),
           pipeline_layout(other.pipeline_layout.load(std::memory_order_acquire)),
-          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)) {}
+          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)),
+          async_creation_failed(other.async_creation_failed.load(std::memory_order_acquire)) {}
     Pipeline& operator=(const Pipeline& other) {
       if (this == &other) {
         return *this;
@@ -260,6 +279,8 @@ class VulkanPipelineCache {
                             std::memory_order_release);
       is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
                            std::memory_order_release);
+      async_creation_failed.store(other.async_creation_failed.load(std::memory_order_acquire),
+                                  std::memory_order_release);
       return *this;
     }
   };
@@ -418,6 +439,11 @@ class VulkanPipelineCache {
 
   mutable std::mutex creation_request_lock_;
   std::condition_variable creation_request_cond_;
+  /**
+   * Notified (after creation_request_lock_ has been taken and released) when a creation thread has
+   * finished a pipeline.
+   */
+  std::condition_variable async_creation_done_cond_;
   std::priority_queue<PipelineCreationArguments, std::vector<PipelineCreationArguments>,
                       PipelineCreationArgumentsPriorityComparator>
       creation_queue_;

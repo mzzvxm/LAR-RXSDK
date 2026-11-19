@@ -42,6 +42,7 @@ add_executable(
   gpu/shader_interpreter_test.cpp
   gpu/shader_translation_test.cpp
   gpu/tessellation_glsl_test.cpp
+  gpu/async_pipeline_policy_test.cpp
   kernel/be_ptr_test.cpp
   kernel/exit_title_test.cpp
   kernel/xam_input_test.cpp

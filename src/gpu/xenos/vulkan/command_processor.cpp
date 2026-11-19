@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -31,6 +32,7 @@
 #include <rex/bit.h>
 #include <rex/logging/log_category.h>
 #include <rex/math.h>
+#include "gpu/xenos/async_pipeline_policy.h"
 #include "gpu/xenos/draw_state.h"
 #include "gpu/xenos/pipeline/shader/shader.h"
 #include "gpu/xenos/pipeline/shader/spirv_translator.h"
@@ -2090,10 +2092,13 @@ void VulkanCommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32
     FlushUnscaledResolveCopies();
   }
 
-  bool skip_present_due_async_placeholder =
+  bool skip_present_due_async_placeholder = async_pipeline::ShouldSkipPresent(
       GetXenosSettings().async_shader_compilation.Get() &&
-      GetVulkanSettings().async_skip_incomplete_frames.Get() &&
-      frame_used_async_placeholder_pipeline_;
+          GetVulkanSettings().async_skip_incomplete_frames.Get() &&
+          frame_used_async_placeholder_pipeline_,
+      std::chrono::steady_clock::now(),
+      GetVulkanSettings().async_skip_incomplete_frames_max_ms.Get(),
+      incomplete_frames_skipped_since_);
   if (skip_present_due_async_placeholder) {
     static bool skipped_incomplete_frame_logged = false;
     if (!skipped_incomplete_frame_logged) {
@@ -3585,8 +3590,20 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, u32 index
   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
                                                 &pipeline_is_placeholder);
   if (GetXenosSettings().async_shader_compilation.Get() && pipeline_is_placeholder) {
-    frame_used_async_placeholder_pipeline_ = true;
-    return true;
+    // Left out until the real pipeline is ready, unless it's ready within the
+    // frame's waiting budget.
+    if (AwaitAsyncPipeline(pipeline_handle)) {
+      pipeline_cache_->GetPipelineAndLayoutByHandle(
+          pipeline_handle, pipeline, pipeline_layout_provider, &pipeline_is_placeholder);
+    }
+    if (pipeline_is_placeholder) {
+      // A pipeline that failed to be created stays left out, but the frame
+      // isn't incomplete for it - it would never be complete again.
+      if (!pipeline_cache_->HasAsyncPipelineCreationFailed(pipeline_handle)) {
+        frame_used_async_placeholder_pipeline_ = true;
+      }
+      return true;
+    }
   }
   if (pipeline == VK_NULL_HANDLE || pipeline_layout_provider == nullptr) {
     return draw_fail("pipeline_lookup");
@@ -5008,7 +5025,32 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(u64 await_submiss
 }
 
 bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
-  return !submission_open_ || (!scratch_buffer_used_ && !pipeline_cache_->IsCreatingPipelines());
+  // Pending pipelines of asynchronous creation don't hold a submission: the end
+  // of one doesn't wait for them.
+  return !submission_open_ ||
+         (!scratch_buffer_used_ && (GetXenosSettings().async_shader_compilation.Get() ||
+                                    !pipeline_cache_->IsCreatingPipelines()));
+}
+
+bool VulkanCommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
+  // A draw in an occlusion query whose pipeline an earlier draw queued waits (outside the budget)
+  // rather than being left out, which the query would count as hidden.
+  if (IsOcclusionQueryActive()) {
+    return pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle,
+                                                       async_pipeline::kOcclusionQueryWaitUs);
+  }
+  const u64 timeout_us = async_pipeline::GetBudgetedWaitUs(
+      GetXenosSettings().async_pipeline_wait_budget_ms.Get(), frame_async_pipeline_wait_us_);
+  if (!timeout_us) {
+    return false;
+  }
+  auto wait_start = std::chrono::steady_clock::now();
+  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
+  frame_async_pipeline_wait_us_ +=
+      static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - wait_start)
+                           .count());
+  return created;
 }
 
 bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
@@ -5078,6 +5120,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
     frame_used_async_placeholder_pipeline_ = false;
+    frame_async_pipeline_wait_us_ = 0;
 
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
     std::memset(current_float_constant_map_pixel_, 0, sizeof(current_float_constant_map_pixel_));

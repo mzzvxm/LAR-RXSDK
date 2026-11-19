@@ -17,6 +17,7 @@
 #include <xxhash.h>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -534,6 +535,12 @@ void VulkanPipelineCache::EndSubmission() {
     }
     if (startup_loading) {
       creation_request_cond_.notify_one();
+    } else if (command_processor_.GetXenosSettings().async_shader_compilation.Get()) {
+      // A draw whose pipeline is still pending is left out without recording
+      // anything that refers to it, so nothing submitted needs the pending
+      // ones: let the creation threads finish them while the next frames are
+      // recorded instead of holding this one.
+      creation_request_cond_.notify_one();
     } else {
       CreateQueuedPipelinesOnProcessorThread();
       bool await_creation_completion_event;
@@ -862,9 +869,12 @@ bool VulkanPipelineCache::ConfigurePipeline(
     }
   }
 
+  // Depth-only pipelines are created asynchronously too, unless the vertex shader exports to
+  // memory, which the guest may read. A draw in an occlusion query would be counted as hidden if it
+  // was left out, so its pipeline is created right away.
   bool use_async = command_processor_.GetXenosSettings().async_shader_compilation.Get() &&
-                   !creation_threads_.empty() && pixel_shader &&
-                   placeholder_pixel_shader_ != VK_NULL_HANDLE;
+                   !creation_threads_.empty() && !command_processor_.IsOcclusionQueryActive() &&
+                   (pixel_shader || !vertex_shader->GetShader().GetMemExportEMWritten());
   u8 async_priority = pipeline_priority::kPriorityLowest;
   if (use_async) {
     u32 bound_rts = pipeline_priority::GetBoundRTMaskFromNormalizedColorMask(normalized_color_mask);
@@ -878,7 +888,20 @@ bool VulkanPipelineCache::ConfigurePipeline(
 
   auto it = pipelines_.find(description);
   if (it != pipelines_.end()) {
+    // In the opposite order to CreatePipeline's stores.
+    bool found_is_placeholder = it->second.is_placeholder.load(std::memory_order_acquire);
     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
+    if (found_pipeline == VK_NULL_HANDLE && found_is_placeholder) {
+      // Being created asynchronously without a placeholder pipeline (or failed
+      // to be) - the draw is left out.
+      last_pipeline_ = &*it;
+      pipeline_out = VK_NULL_HANDLE;
+      pipeline_layout_out = nullptr;
+      if (pipeline_handle_out) {
+        *pipeline_handle_out = &it->second;
+      }
+      return true;
+    }
     if (found_pipeline == VK_NULL_HANDLE) {
       PipelineCreationArguments creation_arguments;
       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
@@ -908,22 +931,19 @@ bool VulkanPipelineCache::ConfigurePipeline(
 
   bool queued_async_creation = false;
   if (use_async) {
+    // Draws are left out until their pipeline is ready rather than drawn with a placeholder, so
+    // don't create one: that would compile the vertex shader here, on the GPU command thread, which
+    // takes about as long as the real pipeline when the driver doesn't have it cached. The
+    // pipeline is marked as not ready (is_placeholder with no pipeline) until the creation thread
+    // has made it.
     creation_arguments_real.priority = async_priority;
-    PipelineCreationArguments creation_arguments_placeholder;
-    if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
-                                                      creation_arguments_placeholder, true)) {
-      pipeline.second.is_placeholder.store(true, std::memory_order_release);
-      if (CreatePipeline(creation_arguments_placeholder, placeholder_pixel_shader_)) {
-        {
-          std::lock_guard<std::mutex> lock(creation_request_lock_);
-          creation_queue_.push(creation_arguments_real);
-        }
-        creation_request_cond_.notify_one();
-        queued_async_creation = true;
-      } else {
-        pipeline.second.is_placeholder.store(false, std::memory_order_release);
-      }
+    pipeline.second.is_placeholder.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(creation_request_lock_);
+      creation_queue_.push(creation_arguments_real);
     }
+    creation_request_cond_.notify_one();
+    queued_async_creation = true;
   }
 
   if (!queued_async_creation && !CreatePipeline(creation_arguments_real)) {
@@ -952,7 +972,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
   if (pipeline_handle_out) {
     *pipeline_handle_out = &pipeline.second;
   }
-  return pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr;
+  return queued_async_creation ||
+         (pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr);
 }
 
 bool VulkanPipelineCache::IsCreatingPipelines() const {
@@ -975,10 +996,12 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
     return;
   }
   const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
+  // In the opposite order to CreatePipeline's stores.
+  bool is_placeholder = pipeline->is_placeholder.load(std::memory_order_acquire);
   pipeline_out = pipeline->pipeline.load(std::memory_order_acquire);
   pipeline_layout_out = pipeline->pipeline_layout.load(std::memory_order_acquire);
   if (is_placeholder_out) {
-    *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
+    *is_placeholder_out = is_placeholder;
   }
 }
 
@@ -3107,10 +3130,13 @@ bool VulkanPipelineCache::CreatePipeline(const PipelineCreationArguments& creati
   }
   bool was_placeholder =
       creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
-  VkPipeline old_pipeline =
-      creation_arguments.pipeline->second.pipeline.exchange(pipeline, std::memory_order_acq_rel);
+  // The layout, then the pipeline, then whether it's a placeholder: other
+  // threads read them in the opposite order, so one that sees is_placeholder
+  // cleared also sees the pipeline and its layout.
   creation_arguments.pipeline->second.pipeline_layout.store(creation_arguments.pipeline_layout,
                                                             std::memory_order_release);
+  VkPipeline old_pipeline =
+      creation_arguments.pipeline->second.pipeline.exchange(pipeline, std::memory_order_acq_rel);
   if (creating_placeholder) {
     creation_arguments.pipeline->second.is_placeholder.store(true, std::memory_order_release);
   } else {
@@ -3157,6 +3183,8 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
       } else {
         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
                                                            std::memory_order_release);
+        creation_arguments.pipeline->second.async_creation_failed.store(true,
+                                                                        std::memory_order_release);
       }
     }
 
@@ -3164,7 +3192,22 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
       --creation_threads_busy_;
     }
+    async_creation_done_cond_.notify_all();
   }
+}
+
+bool VulkanPipelineCache::AwaitAsyncPipelineCreation(void* handle, u64 timeout_us) {
+  const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
+  auto created_or_failed = [pipeline]() {
+    return !pipeline->is_placeholder.load(std::memory_order_acquire) ||
+           pipeline->async_creation_failed.load(std::memory_order_acquire);
+  };
+  if (created_or_failed()) {
+    return true;
+  }
+  std::unique_lock<std::mutex> lock(creation_request_lock_);
+  return async_creation_done_cond_.wait_for(lock, std::chrono::microseconds(timeout_us),
+                                            created_or_failed);
 }
 
 void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
@@ -3190,6 +3233,8 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
       } else {
         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
                                                            std::memory_order_release);
+        creation_arguments.pipeline->second.async_creation_failed.store(true,
+                                                                        std::memory_order_release);
       }
     }
   }

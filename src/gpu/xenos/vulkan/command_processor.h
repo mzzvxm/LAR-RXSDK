@@ -12,11 +12,13 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -148,6 +150,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   }
 
   bool IsSubmissionOpen() const { return submission_open_; }
+  /** Draws in an occlusion query aren't left out for a pipeline being created. */
+  bool IsOcclusionQueryActive() const { return HostOcclusionQueryRecording(); }
   u64 GetCurrentSubmission() const {
     return submission_completed_ + static_cast<u64>(submissions_in_flight_fences_.size()) + 1;
   }
@@ -453,8 +457,18 @@ class VulkanCommandProcessor : public CommandProcessor {
     CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
     return !submission_open_ && submissions_in_flight_fences_.empty();
   }
-  /** Reports whether a submission can end immediately at the primary buffer end. */
+  /**
+   * Reports whether a submission can end immediately at the primary buffer end. With async shader
+   * compilation, pipelines being created by draws don't hold a submission.
+   */
   bool CanEndSubmissionImmediately() const;
+  /**
+   * For a draw whose pipeline is still being created asynchronously, waits for it within what is
+   * left of the frame's async_pipeline_wait_budget_ms.
+   *
+   * @return True when the creation has finished.
+   */
+  bool AwaitAsyncPipeline(void* pipeline_handle);
 
   void ClearTransientDescriptorPools();
   bool IssueCopyReadbackResolvePath();
@@ -569,6 +583,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   static constexpr u32 kMaxFramesInFlight = 3;
   bool frame_open_ = false;
   bool frame_used_async_placeholder_pipeline_ = false;
+  /** Time this frame's draws have waited for pipelines being created asynchronously. */
+  u64 frame_async_pipeline_wait_us_ = 0;
+  /** When the presents being skipped for placeholder pipelines started, or none. */
+  std::optional<std::chrono::steady_clock::time_point> incomplete_frames_skipped_since_;
   u64 frame_current_ = 1;
   u64 frame_completed_ = 0;
   u64 closed_frame_submissions_[kMaxFramesInFlight] = {};
