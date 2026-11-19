@@ -17,6 +17,7 @@ add_executable(
   hid/key_chord_test.cpp
   hid/virtual_key_test.cpp
   hid/joystick_update_gate_test.cpp
+  hid/input_refresh_test.cpp
   kernel/heap_allocation_test.cpp
   kernel/access_violation_test.cpp
   kernel/memory_budget_test.cpp

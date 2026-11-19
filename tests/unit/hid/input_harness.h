@@ -44,6 +44,7 @@ struct FakeState {
   std::vector<rex::hid::PadDevice> devices;
   std::map<u64, rex::hid::PadState> states;
   u64 revision = 1;
+  u32 enumerations = 0; /**< How often InputSystem called EnumerateDevices. */
   std::vector<rex::hid::PadVibration> vibrations;
 };
 
@@ -64,7 +65,10 @@ class FakeDriver final : public rex::hid::IInputDriver {
   rex::Result<void> Initialize(rex::IDriverContext&) override { return {}; }
   void Shutdown() override {}
   u64 GetDeviceRevision() const override { return g_fake[N].revision; }
-  void EnumerateDevices(std::vector<rex::hid::PadDevice>& out) override { out = g_fake[N].devices; }
+  void EnumerateDevices(std::vector<rex::hid::PadDevice>& out) override {
+    ++g_fake[N].enumerations;
+    out = g_fake[N].devices;
+  }
   rex::Result<rex::hid::PadState> GetDeviceState(rex::hid::PadDeviceID id) override {
     auto found = g_fake[N].states.find(id.value);
     if (found == g_fake[N].states.end()) {
