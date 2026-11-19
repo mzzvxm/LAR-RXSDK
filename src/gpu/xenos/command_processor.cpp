@@ -88,6 +88,7 @@ CommandProcessor::CommandProcessor(XenosGraphicsDriverBase* graphics_system, con
       guest_interrupts_(interrupts),
       graphics_system_(graphics_system),
       register_file_(graphics_system_->GetRegisterFile()),
+      readback_rules_(graphics_system->readback_resolve_rules),
       worker_running_(true),
       write_ptr_index_event_(rex::platform::Event::CreateAutoResetEvent(false)),
       write_ptr_index_(0) {
@@ -243,6 +244,39 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
   }
   return legacy_readback_resolve_enabled ? ReadbackResolveMode::kFast
                                          : ReadbackResolveMode::kDisabled;
+}
+
+bool CommandProcessor::IsResolveReadbackSelective() const {
+  return readback_rules_.HasRules();
+}
+
+ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
+    bool legacy_readback_resolve_enabled, u32 written_address, u32 written_length) const {
+  const ReadbackResolveMode mode = GetReadbackResolveMode(legacy_readback_resolve_enabled);
+  if (!readback_rules_.HasRules()) {
+    return mode;
+  }
+  const std::optional<ResolveRule> rule =
+      readback_rules_.Match(DescribeResolve(written_address, written_length));
+  return rule ? rule->mode : mode;
+}
+
+ResolveDescription CommandProcessor::DescribeResolve(u32 written_address,
+                                                     u32 written_length) const {
+  const xenos::reg::RB_COPY_CONTROL copy_control =
+      register_file_->Get<xenos::reg::RB_COPY_CONTROL>();
+  const xenos::reg::RB_COPY_DEST_INFO copy_dest_info =
+      register_file_->Get<xenos::reg::RB_COPY_DEST_INFO>();
+  const xenos::reg::RB_COPY_DEST_PITCH copy_dest_pitch =
+      register_file_->Get<xenos::reg::RB_COPY_DEST_PITCH>();
+  ResolveDescription resolve;
+  resolve.written_address = written_address;
+  resolve.written_length = written_length;
+  resolve.pitch = copy_dest_pitch.copy_dest_pitch;
+  resolve.height = copy_dest_pitch.copy_dest_height;
+  resolve.format = static_cast<u32>(copy_dest_info.copy_dest_format);
+  resolve.source = copy_control.copy_src_select;
+  return resolve;
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled() const {

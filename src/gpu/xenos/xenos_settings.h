@@ -28,6 +28,17 @@ class XenosSettings : public SettingOwner {
   REX_SETTING(std::string, readback_resolve, "none",
               "Controls CPU readback of render to texture resolve results",
               Allowed("none", "fast", "some", "full"));
+  REX_SETTING(std::string, readback_resolve_rules, "",
+              "Read back only the resolves that match a rule, whatever readback_resolve says: with "
+              "readback_resolve none and rules set, just those, synchronously, which costs "
+              "nothing for the others. Rules are separated by ';', a rule is key=value pairs "
+              "separated by ',', all of which must match: addr=LO-HI (the written memory touches "
+              "that range of guest physical addresses), len=LO-HI (bytes written), pitch=LO-HI "
+              "and height=LO-HI (the destination's, in pixels), fmt=N (its ColorFormat), src=N "
+              "(RB_COPY_CONTROL copy_src_select, 4 is depth), mode=full|fast|some (default full). "
+              "A range is N, LO-HI, LO- or -HI (inclusive; decimal or 0x hex). Empty or off: no "
+              "rules",
+              kDebugOnly);
   REX_SETTING(bool, readback_memexport, true,
               "Enable CPU readback of shader memexport writes. Keeps guest memory coherent and "
               "adds GPU and CPU sync cost");

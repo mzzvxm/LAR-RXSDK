@@ -38,6 +38,7 @@
 #include <rex/utility.h>
 #include <rex/platform/sync.h>
 #include "gpu/xenos/host/presenter.h"
+#include "gpu/xenos/resolve_rules.h"
 #include "gpu/xenos/xenos_export.h"
 
 namespace rex::gpu {
@@ -45,13 +46,6 @@ namespace rex::gpu {
 class XenosGraphicsDriverBase;
 class XenosSettings;
 class Shader;
-
-enum class ReadbackResolveMode : u8 {
-  kDisabled,
-  kFast,
-  kSome,
-  kFull,
-};
 
 struct SwapState {
   // Lock must be held when changing data in this structure.
@@ -364,6 +358,32 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
 
   ReadbackResolveMode GetReadbackResolveMode(bool legacy_readback_resolve_enabled) const;
+
+  /**
+   * Reports whether a resolve can be read back although the readback mode of the backend is
+   * disabled, because the gpu.xenos.readback_resolve_rules setting holds a rule. IssueCopy takes
+   * the path that sees what the resolve wrote only then.
+   */
+  bool IsResolveReadbackSelective() const;
+
+  /**
+   * Returns the readback mode of a resolve that has been made. It is the one of the first rule of
+   * gpu.xenos.readback_resolve_rules that the resolve matches, or the global mode. Command
+   * processor thread only.
+   *
+   * @param legacy_readback_resolve_enabled The backend's own readback_resolve setting.
+   * @param written_address Guest physical address of the first byte the resolve wrote.
+   * @param written_length Bytes the resolve wrote.
+   */
+  ReadbackResolveMode GetReadbackResolveModeFor(bool legacy_readback_resolve_enabled,
+                                                u32 written_address, u32 written_length) const;
+
+  /**
+   * Describes the resolve that has just been made, for a rule to match: what it wrote and the
+   * destination registers of the copy. Command processor thread only.
+   */
+  ResolveDescription DescribeResolve(u32 written_address, u32 written_length) const;
+
   bool IsReadbackMemexportEnabled() const;
 
   TitleInfo title_info_;
@@ -373,6 +393,9 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
   XenosGraphicsDriverBase* graphics_system_ = nullptr;
   xenos::RegisterFile* register_file_ = nullptr;
   rex::log::OncePerKey<xenos::RegisterFile::kRegisterCount> unknown_write_once_;
+
+  /** The rules of gpu.xenos.readback_resolve_rules. */
+  ResolveRuleSetting readback_rules_;
 
   std::atomic<bool> worker_running_;
   ScopeGuard worker_thread_;

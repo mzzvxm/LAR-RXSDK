@@ -9,6 +9,7 @@ set(REXGPU_XENOS_BASE_SOURCES
     draw_state.cpp
     index_conversion.cpp
     primitive_processor.cpp
+    resolve_rules.cpp
     pipeline/render_target/cache.cpp
     shared_memory.cpp
     pipeline/texture/cache.cpp

@@ -4122,7 +4122,7 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   ReadbackResolveMode readback_mode =
       GetReadbackResolveMode(GetVulkanSettings().readback_resolve.Get());
-  if (readback_mode == ReadbackResolveMode::kDisabled) {
+  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {
     u32 written_address, written_length;
     return render_target_cache_->Resolve(physical_memory_, *shared_memory_, *texture_cache_,
                                          written_address, written_length);
@@ -4150,8 +4150,9 @@ bool VulkanCommandProcessor::IssueCopyReadbackResolvePath() {
     return true;
   }
 
-  ReadbackResolveMode readback_mode =
-      GetReadbackResolveMode(GetVulkanSettings().readback_resolve.Get());
+  // The global mode, or, with readback_resolve_rules, that of the rule this resolve matches.
+  const ReadbackResolveMode readback_mode = GetReadbackResolveModeFor(
+      GetVulkanSettings().readback_resolve.Get(), written_address, written_length);
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     return true;
   }

@@ -2790,7 +2790,7 @@ bool D3D12CommandProcessor::IssueCopy() {
   }
   ReadbackResolveMode readback_mode =
       GetReadbackResolveMode(GetD3D12Settings().readback_resolve.Get());
-  if (readback_mode == ReadbackResolveMode::kDisabled) {
+  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {
     u32 written_address, written_length;
     return render_target_cache_->Resolve(physical_memory_, *shared_memory_, *texture_cache_,
                                          written_address, written_length);
@@ -2810,6 +2810,13 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
   }
 
   if (!GetPhysicalForWrite(physical_memory_, written_address, written_length)) {
+    return true;
+  }
+
+  // The global mode, or, with readback_resolve_rules, that of the rule this resolve matches.
+  const ReadbackResolveMode readback_mode = GetReadbackResolveModeFor(
+      GetD3D12Settings().readback_resolve.Get(), written_address, written_length);
+  if (readback_mode == ReadbackResolveMode::kDisabled) {
     return true;
   }
 
@@ -2986,8 +2993,6 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
                                                written_address, written_length);
   }
 
-  ReadbackResolveMode readback_mode =
-      GetReadbackResolveMode(GetD3D12Settings().readback_resolve.Get());
   bool use_delayed_sync =
       readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
   u32 read_index = write_index;
