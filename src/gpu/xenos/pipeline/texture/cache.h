@@ -335,6 +335,26 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
     kLoadShaderIndexUnknown = kLoadShaderCount,
   };
 
+  // Direct loads: shaders decoding resolution-scaled single-level 2D
+  // textures straight into the host texture through an unsigned integer view of
+  // the texel size (R32_UINT for 32bpb, R16G16B16A16_UINT for 64bpb), instead of
+  // into a buffer that is then copied to the texture.
+  enum DirectLoadShader {
+    kDirectLoadShader32bpb,
+    kDirectLoadShader64bpb,
+    kDirectLoadShaderDepthFloat,
+    kDirectLoadShaderDepthUnorm,
+
+    kDirectLoadShaderCount,
+    kDirectLoadShaderUnknown = kDirectLoadShaderCount,
+  };
+  // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
+  static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
+  // Whether a texture with the key may be loaded directly: scaled, one level,
+  // 2D, one layer, not in the packed mip tail. The host format and the
+  // shader are checked separately.
+  static bool IsDirectLoadPossible(const TextureKey& key);
+
   struct LoadShaderInfo {
     u32 source_bpe_log2; /**< Log2 of the element size in bytes of the source (guest) binding. */
     u32 dest_bpe_log2; /**< Log2 of the element size in bytes of the destination (host) binding. */

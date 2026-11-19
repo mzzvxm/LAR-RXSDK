@@ -390,6 +390,10 @@ class VulkanTextureCache final : public TextureCache {
 
   VkPipelineLayout storage_copy_pipeline_layout_ = VK_NULL_HANDLE;
   std::array<VkPipeline, kStorageCopyTexelSizeCount> storage_copy_pipelines_{};
+  // Direct loads, for textures with a storage copy view (set 0: the
+  // storage image, set 1: the source buffer, the push constants of loading).
+  VkPipelineLayout load_direct_pipeline_layout_ = VK_NULL_HANDLE;
+  std::array<VkPipeline, kDirectLoadShaderCount> load_direct_pipelines_{};
   // Whether a format can be a storage image with optimal tiling.
   std::unordered_map<VkFormat, bool> storage_image_formats_;
 

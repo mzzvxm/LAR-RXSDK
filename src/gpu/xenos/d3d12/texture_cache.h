@@ -304,6 +304,11 @@ class D3D12TextureCache final : public TextureCache {
       return old_state;
     }
 
+    // Direct loads: the unsigned integer UAV format the texture is
+    // loaded through, or DXGI_FORMAT_UNKNOWN if it's loaded through a buffer.
+    DXGI_FORMAT direct_load_uav_format() const { return direct_load_uav_format_; }
+    void SetDirectLoadUAVFormat(DXGI_FORMAT format) { direct_load_uav_format_ = format; }
+
     u32 GetSRVDescriptorIndex(SRVDescriptorKey descriptor_key) const {
       auto it = srv_descriptors_.find(descriptor_key);
       return it != srv_descriptors_.cend() ? it->second : UINT32_MAX;
@@ -321,6 +326,7 @@ class D3D12TextureCache final : public TextureCache {
     u32 heap_index_ = UINT32_MAX;
     u64 heap_offset_ = 0;
     u64 heap_size_ = 0;
+    DXGI_FORMAT direct_load_uav_format_ = DXGI_FORMAT_UNKNOWN;
 
     /** Bindful uses the non shader visible cache, bindless the global shader visible heap. */
     std::unordered_map<SRVDescriptorKey, u32, SRVDescriptorKey::Hasher> srv_descriptors_;
@@ -391,6 +397,11 @@ class D3D12TextureCache final : public TextureCache {
     return IsDecompressionNeeded(format, width, height) ? host_format.dxgi_format_uncompressed
                                                         : host_format.dxgi_format_resource;
   }
+  // Direct loads: the unsigned integer UAV format to load a texture with
+  // the key through, or DXGI_FORMAT_UNKNOWN to load it through a buffer. Changes
+  // resource_format to the typeless format the UAV can be created for.
+  DXGI_FORMAT GetDirectLoadUAVFormat(TextureKey key, DXGI_FORMAT& resource_format) const;
+
   DXGI_FORMAT GetDXGIResourceFormat(TextureKey key) const {
     return GetDXGIResourceFormat(key.format, key.GetWidth(), key.GetHeight());
   }
@@ -474,6 +485,9 @@ class D3D12TextureCache final : public TextureCache {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> load_root_signature_;
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount> load_pipelines_;
   std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kLoadShaderCount> load_pipelines_scaled_;
+  // Direct loads, null if not available.
+  std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, kDirectLoadShaderCount>
+      load_pipelines_direct_;
 
   std::vector<SRVDescriptorCachePage> srv_descriptor_cache_;
   u32 srv_descriptor_cache_allocated_;
