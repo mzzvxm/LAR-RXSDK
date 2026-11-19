@@ -5809,6 +5809,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     } else if (!cache_clear_requested_ && render_target_cache_ &&
                render_target_cache_->IsTrimDue() && AwaitAllQueueOperationsCompletion()) {
       // The GPU is done with everything submitted: render targets that hold no data can go.
+      // With threaded submission this has also waited for the submission thread
+      // (CheckSubmissionFenceAndDeviceLoss), so no command buffer it has yet to record or
+      // submit refers to the framebuffers that the trim destroys.
       render_target_cache_->TrimUnusedRenderTargets();
     }
   }

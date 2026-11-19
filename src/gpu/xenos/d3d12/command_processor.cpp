@@ -3795,6 +3795,8 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     } else if (!cache_clear_requested_ && render_target_cache_ &&
                render_target_cache_->IsTrimDue() && AwaitAllQueueOperationsCompletion()) {
       // The GPU is done with everything submitted: render targets that hold no data can go.
+      // With threaded submission this has also waited for the submission thread (its jobs signal
+      // submission_fence_ after they are in the queue), so no list in flight refers to them.
       render_target_cache_->TrimUnusedRenderTargets();
     }
   }

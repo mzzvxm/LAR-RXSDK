@@ -1361,6 +1361,12 @@ D3D12TextureCache::D3D12Texture::~D3D12Texture() {
   // Textures are only destroyed once the GPU is done with them, so the range
   // can be given to another texture right away. The resource goes first, so
   // nothing refers to the range when it's reused.
+  // With threaded submission that still holds: the completed submission comes
+  // from the submission fence, which the submission thread signals after it has
+  // put the list in the queue, so a texture used by a list that is still waiting
+  // for the thread is not destroyed. Placed textures do no direct queue
+  // operation (the tile mappings of the scaled resolve buffers, which call
+  // AwaitSubmissionsInQueue, are not touched by the heaps).
   if (heap_index_ != UINT32_MAX) {
     resource_.Reset();
     d3d12_texture_cache.FreeTextureHeapRange(heap_index_, heap_offset_, heap_size_);
