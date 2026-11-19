@@ -231,6 +231,7 @@ add_executable(
   codegen/flush_mode_test.cpp
   codegen/funclet_sync_test.cpp
   codegen/gap_fill_test.cpp
+  codegen/gpr_save_runtime_test.cpp
   codegen/instruction_comment_test.cpp
   codegen/millicode_test.cpp
   codegen/noreturn_test.cpp
@@ -286,11 +287,43 @@ if (MSVC)
   target_link_options(unit_tests PRIVATE "LINKER:/IGNORE:4217")
 endif ()
 
+# gpr_save_runtime_test.cpp runs the GPR and LR save and restore helpers of the generated pch.h.
+# Their text is cut out of the pch template here, from the first helper declaration up to the next
+# define, and written as an include for the test, so the test compiles the code a generated pch.h
+# carries and not a copy. The file is rewritten only when the text changed, and a change of the
+# template runs this step again.
+set(_gpr_template "${PROJECT_SOURCE_DIR}/resources/templates/codegen/pch_h.inja")
+set(_gpr_include_dir "${CMAKE_CURRENT_BINARY_DIR}/gpr_save_helpers")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_gpr_template}")
+file(READ "${_gpr_template}" _gpr_template_text)
+set(_gpr_first_line "using rex_gpr_member_ = PPCRegister PPCContext::*;")
+set(_gpr_next_line "#define REX_CALL_FUNC(x) x(ctx, base)")
+string(FIND "${_gpr_template_text}" "${_gpr_first_line}" _gpr_begin)
+string(FIND "${_gpr_template_text}" "${_gpr_next_line}" _gpr_end)
+if (_gpr_begin EQUAL -1 OR _gpr_end EQUAL -1 OR _gpr_end LESS _gpr_begin)
+  message(
+    FATAL_ERROR
+      "tests/unit/codegen/gpr_save_runtime_test.cpp cuts the save and restore helpers out of "
+      "${_gpr_template} between '${_gpr_first_line}' and '${_gpr_next_line}', and one of them is gone. "
+      "Update the two lines here."
+  )
+endif ()
+math(EXPR _gpr_length "${_gpr_end} - ${_gpr_begin}")
+string(SUBSTRING "${_gpr_template_text}" ${_gpr_begin} ${_gpr_length} _gpr_helpers_text)
+set(_gpr_helpers_old "")
+if (EXISTS "${_gpr_include_dir}/gpr_save_helpers.inc")
+  file(READ "${_gpr_include_dir}/gpr_save_helpers.inc" _gpr_helpers_old)
+endif ()
+if (NOT _gpr_helpers_old STREQUAL _gpr_helpers_text)
+  file(WRITE "${_gpr_include_dir}/gpr_save_helpers.inc" "${_gpr_helpers_text}")
+endif ()
+
 target_include_directories(
   unit_tests
   PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/thirdparty
           ${PROJECT_SOURCE_DIR}/thirdparty/disasm ${CMAKE_CURRENT_SOURCE_DIR}
           $<TARGET_PROPERTY:rexkernel-objects,INTERFACE_INCLUDE_DIRECTORIES>
+          ${_gpr_include_dir}
 )
 target_include_directories(
   unit_tests SYSTEM

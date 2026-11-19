@@ -261,8 +261,8 @@ template <unsigned First, size_t... I>
 __attribute__((always_inline)) inline void rex_store_gprs_(PPCContext& __restrict ctx,
                                                             volatile uint8_t* frame,
                                                             std::index_sequence<I...>) {
-  ((*(volatile u64*)(frame - 8u * (33u - (First + I))) =
-        __builtin_bswap64((ctx.*rex_gpr_members_[First + I - 14]).u64)),
+  (static_cast<void>(*(volatile u64*)(frame - 8u * (33u - (First + I))) =
+                         __builtin_bswap64((ctx.*rex_gpr_members_[First + I - 14]).u64)),
    ...);
 }
 
