@@ -111,6 +111,16 @@ class XenosSettings : public SettingOwner {
               "GPU command thread time per draw (D3D12, native, uncapped). Off: every request "
               "takes the full path, to compare",
               kDebugOnly);
+  REX_SETTING(u32, shared_memory_hot_page_faults, 0,
+              "Guest write faults on one page, within about a second, after which the page is "
+              "treated as hot: not watched, and uploaded whenever it is requested (in the Vulkan "
+              "driver only the bytes a draw asks for, in the Direct3D 12 driver the whole page). "
+              "0 never does. For hosts where a fault and the protection changes around it are "
+              "expensive: a page the guest rewrites constantly (vertex and constant data) cost "
+              "12,000 faults and 190,000 protection changes a second in a heavy view",
+              Range{0, 255});
+  REX_SETTING(u32, shared_memory_hot_page_ms, 2000,
+              "How long a hot page stays hot before it is watched again", Range{1, 3600000});
   REX_SETTING(bool, pre_mask_resolve_l2_block, true,
               "Mask scaled resolve L2 blocks to the write range before iterating");
   REX_SETTING(bool, force_convert_line_loops_to_strips, false,

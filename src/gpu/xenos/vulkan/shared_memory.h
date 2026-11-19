@@ -57,6 +57,7 @@ class VulkanSharedMemory : public SharedMemory {
   bool AllocateSparseHostGPUMemoryRange(u32 offset_allocations, u32 length_allocations) override;
 
   bool UploadRanges(const std::vector<std::pair<u32, u32>>& upload_page_ranges) override;
+  bool UploadByteRanges(const std::vector<std::pair<u32, u32>>& upload_byte_ranges) override;
 
  private:
   void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
