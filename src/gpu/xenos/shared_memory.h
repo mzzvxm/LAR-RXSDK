@@ -113,6 +113,9 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
    * then be written from the GPU (the unscaled resolve copy).
    *
    * @return True when the memory exists.
+   *
+   * CHECK: AllocateHostGPUMemory is what RequestRange allocates with in v0.11; confirm it only
+   * allocates, with a sparse (tiled) shared memory on D3D12 and Vulkan.
    */
   bool EnsureRangeAllocated(u32 start, u32 length) { return AllocateHostGPUMemory(start, length); }
 

@@ -3175,6 +3175,8 @@ void D3D12CommandProcessor::FlushUnscaledResolveCopies() {
   const bool half_pixel_offset =
       GetXenosSettings().readback_resolve_half_pixel_offset.Get() && (scale_x > 1 || scale_y > 1);
 
+  // CHECK: run with the Direct3D 12 debug layer: the states of the scaled resolve buffers after
+  // the batch (they are left in the shader resource state) and the aliasing between them.
   // One set of barriers for all the copies: the scaled data the resolves wrote is read as a shader
   // resource (the transitions commit the resolves' writes), the shared memory is written as a UAV.
   // The scaled buffer is left in the shader resource state: the next resolve into it, and the
@@ -4956,6 +4958,7 @@ bool D3D12CommandProcessor::HostOcclusionQueryRead(u32 host_index, u64 submissio
       return false;
     }
     // Only looks at the fence, never waits.
+    // CHECK: no stall from this call (the frame times of a scene with the sun glare).
     CheckSubmissionFence(0);
     if (submission_completed_ < submission) {
       return false;

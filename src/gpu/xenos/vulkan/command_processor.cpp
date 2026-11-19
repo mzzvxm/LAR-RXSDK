@@ -4455,6 +4455,8 @@ void VulkanCommandProcessor::IssueCopyUnscaledResolveCopy(u32 written_address, u
     fail("not done: no scaled resolve buffer");
     return;
   }
+  // CHECK: run with the Vulkan validation layers: the storage buffer window and the barriers of the
+  // batch.
   // The scaled data is bound from the aligned down start, and the shader skips to its own start (a
   // window, as the resolves themselves bind it: not the whole of a buffer of several gigabytes at
   // 3x).
@@ -4765,6 +4767,8 @@ bool VulkanCommandProcessor::HostOcclusionQueryBegin() {
     return false;
   }
 
+  // CHECK: run with the Vulkan validation layers: the reset, begin and end of the query, all
+  // outside a render pass, and the copy of its result.
   // Begun (and ended) outside a render pass: a query begun inside one has to end in the same
   // subpass. The draws of the render passes in between are counted all the same.
   EndRenderPass();
@@ -4832,6 +4836,7 @@ bool VulkanCommandProcessor::HostOcclusionQueryRead(u32 host_index, u64 submissi
       return false;
     }
     // Only looks at the fences, never waits.
+    // CHECK: no stall from this call (the frame times of a scene with the sun glare).
     CheckSubmissionFenceAndDeviceLoss(0);
     if (submission_completed_ < submission) {
       return false;
