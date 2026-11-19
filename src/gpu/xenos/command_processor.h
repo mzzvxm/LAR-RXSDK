@@ -14,6 +14,7 @@
 #include <atomic>
 #include <bit>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -313,13 +314,81 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
    */
   bool ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* reader, u32 packet, u32 count);
   /**
-   * Executes the occlusion query event, sent on query begin and end. A fixed passed sample count
-   * is reported.
+   * Executes the occlusion query event, sent on query begin and end. With a host occlusion query
+   * behind it (ExecuteGuestOcclusionEvent) the game is told the newest real count the host has,
+   * and a fixed passed sample count otherwise.
    *
    * @return True when the packet executed.
    */
   virtual bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, u32 packet,
                                                   u32 count);
+
+  /*
+   * Guest occlusion queries. Direct3D 9 on the console issues EVENT_WRITE_ZPD twice for a query,
+   * to the two halves of a 64 byte record: the end snapshot goes to +0x00 (with 0xFFFFFEED in its
+   * ZPass words until the GPU has written it), the begin snapshot to +0x20. The game subtracts the
+   * begin from the end. The two events are paired by their order (an event 0x20 below the open
+   * begin is its end whatever the snapshot holds: the game stores the sentinel with the CPU, which
+   * a late count written to the record could undo), and the host query between them is read back
+   * without waiting. At the end event the game is told the newest real count the host has
+   * delivered so far (the fake count before the first), a few milliseconds old (the time the host
+   * GPU needs for the submission the query is in), and the count of this very query is written to
+   * the record only if the record still holds that guess. The host side is the backends'. The
+   * defaults here have no host queries, and the game gets the fake count only.
+   */
+
+  /** Reports whether the backend can run host occlusion queries. */
+  virtual bool HostOcclusionQueriesUsable() const { return false; }
+
+  /**
+   * Starts a host query at this point of the command stream.
+   *
+   * @return False when none was started.
+   */
+  virtual bool HostOcclusionQueryBegin() { return false; }
+
+  /** Reports whether the host query is still recording (a submission ending inside it cuts it). */
+  virtual bool HostOcclusionQueryRecording() const { return false; }
+
+  /**
+   * Ends the recording host query and queues a copy of its count.
+   *
+   * @param host_index_out Receives the query's index.
+   * @param submission_out Receives the submission whose completion makes the count readable.
+   * @return False when there was no query to end.
+   */
+  virtual bool HostOcclusionQueryEnd(u32& host_index_out, u64& submission_out) {
+    (void)host_index_out;
+    (void)submission_out;
+    return false;
+  }
+
+  /** Ends the recording host query without keeping its count. */
+  virtual void HostOcclusionQueryAbandon() {}
+
+  /**
+   * Reads the count of an ended host query when the GPU has it. It never waits.
+   *
+   * @param samples_out Receives the count, normalized to the guest's 1x resolution.
+   * @return True when the count was read.
+   */
+  virtual bool HostOcclusionQueryRead(u32 host_index, u64 submission, u64& samples_out) {
+    (void)host_index;
+    (void)submission;
+    (void)samples_out;
+    return false;
+  }
+
+  /**
+   * Writes the counts of the host queries the GPU has finished to the guest. Cheap when none is
+   * pending. The command processor calls it after every chunk of the primary buffer and while it
+   * waits for work.
+   */
+  void PollOcclusionQueryResults();
+
+  /** Forgets the open guest query and the pending counts (the host side is gone or restarting). */
+  void ClearOcclusionQueryState();
+
   /**
    * Executes a draw. When viz_query_condition is not 0 the draw is conditional on a viz query.
    * Bits 0 to 5 hold the ID issued in PM4_VIZ_QUERY and bit 8 renders conditionally on the query
@@ -481,6 +550,54 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
   SwapPostEffect swap_post_effect_actual_ = SwapPostEffect::kNone;
 
   const Setting<bool>* driver_readback_memexport_ = nullptr;
+
+  /** Where a query's end event goes, 0x20 below its begin event. */
+  static constexpr u32 kOcclusionBeginOffset = sizeof(xenos::DepthSampleCounts);
+  /** A longer queue means the host GPU is far behind or lost: the oldest counts are given up. */
+  static constexpr size_t kOcclusionMaxPending = 64;
+
+  /**
+   * Runs one event of a guest occlusion query, a begin or an end.
+   *
+   * @param sample_count_address The record's half the event writes, guest physical.
+   * @param sentinel_present Whether the half holds the 0xFFFFFEED of an end.
+   * @return True when the packet executed.
+   */
+  bool ExecuteGuestOcclusionEvent(u32 sample_count_address, xenos::DepthSampleCounts& sample_counts,
+                                  bool sentinel_present);
+
+  /**
+   * Writes the counters of an end snapshot. The ZPass pair goes last and in one store, because the
+   * game takes the query as finished as soon as one of its words differs from the sentinel.
+   *
+   * @return The ZPass pair as written, A in the low word.
+   */
+  static u64 WriteOcclusionCounts(xenos::DepthSampleCounts& sample_counts, u32 samples);
+
+  /**
+   * Finds the count an end event tells the game, the newest real one (the fake count before the
+   * first).
+   *
+   * @return False when there is none to tell (a negative fake count and no real one).
+   */
+  bool OcclusionGuessSamples(u32& samples_out) const;
+
+  /** Drops the counts still on their way to a record, because the record is used again. */
+  void DropPendingOcclusionResult(u32 end_address);
+
+  struct OcclusionPending {
+    u32 end_address = 0; /**< The record's end snapshot. */
+    u32 host_index = 0;
+    u64 submission = 0;
+    u64 guess_zpass = 0; /**< The ZPass pair the record held after the end event. */
+  };
+  bool occlusion_guest_open_ = false;
+  bool occlusion_host_began_ = false;
+  u32 occlusion_begin_address_ = 0;
+  std::deque<OcclusionPending> occlusion_pending_;
+  /** The newest real count the host delivered, what an end event tells the game. */
+  bool occlusion_latest_valid_ = false;
+  u32 occlusion_latest_samples_ = 0;
 
  private:
   xenos::reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};

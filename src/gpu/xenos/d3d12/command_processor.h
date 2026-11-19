@@ -226,8 +226,6 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void WriteRegister(u32 index, u32 value) override;
   void WriteRegistersFromMem(u32 start_index, u32* base, u32 num_registers) override;
-  bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, u32 packet,
-                                          u32 count) override;
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
@@ -235,6 +233,17 @@ class D3D12CommandProcessor : public CommandProcessor {
   void IssueSwap(u32 frontbuffer_ptr, u32 frontbuffer_width, u32 frontbuffer_height) override;
 
   void OnPrimaryBufferEnd() override;
+
+  /**
+   * The host side of the guest occlusion queries, see
+   * CommandProcessor::ExecuteGuestOcclusionEvent.
+   */
+  bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
+  bool HostOcclusionQueryBegin() override;
+  bool HostOcclusionQueryRecording() const override { return active_occlusion_query_.valid; }
+  bool HostOcclusionQueryEnd(u32& host_index_out, u64& submission_out) override;
+  void HostOcclusionQueryAbandon() override;
+  bool HostOcclusionQueryRead(u32 host_index, u64 submission, u64& samples_out) override;
 
   Shader* LoadShader(xenos::ShaderType shader_type, u32 guest_address, const u32* host_address,
                      u32 dword_count) override;
@@ -447,11 +456,7 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   bool InitializeOcclusionQueryResources();
   void ShutdownOcclusionQueryResources();
-  bool BeginGuestOcclusionQuery(u32 sample_count_address);
-  bool EndGuestOcclusionQuery(xenos::DepthSampleCounts* sample_counts);
-  void DisableHostOcclusionQueries();
   u64 NormalizeOcclusionSamples(u64 samples) const;
-  void WriteGuestOcclusionResult(xenos::DepthSampleCounts* sample_counts, u64 samples);
 
   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 
@@ -669,7 +674,6 @@ class D3D12CommandProcessor : public CommandProcessor {
   u64* occlusion_query_readback_mapping_ = nullptr;
   bool occlusion_query_resources_available_ = false;
   struct ActiveOcclusionQuery {
-    u32 sample_count_address = 0;
     u32 host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;

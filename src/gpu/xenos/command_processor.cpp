@@ -347,6 +347,8 @@ void CommandProcessor::WorkerThreadMain() {
         const int wait_time_ms = 5;
         rex::platform::Wait(write_ptr_index_event_.get(), true,
                             std::chrono::milliseconds(wait_time_ms));
+        // The counts of host occlusion queries the GPU has finished, for a game that waits for one.
+        PollOcclusionQueryResults();
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && !HasPendingFns() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
@@ -672,6 +674,7 @@ u32 CommandProcessor::ExecutePrimaryBuffer(u32 read_index, u32 write_index) {
   } while (reader.GetReadCount());
 
   OnPrimaryBufferEnd();
+  PollOcclusionQueryResults();
 
   return write_index;
 }
@@ -1287,33 +1290,213 @@ void CommandProcessor::WriteSampleCounts(xenos::DepthSampleCounts& counts, u32 s
   counts.ZPass_A.Store(samples, std::memory_order_release);
 }
 
+namespace {
+
+static_assert(
+    std::endian::native == std::endian::little,
+    "The ZPass pair of a sample count record is handled as one little endian 64 bit word");
+
+u64 LoadZPassPair(const xenos::DepthSampleCounts& sample_counts) {
+  return static_cast<u64>(sample_counts.ZPass_A.Load(std::memory_order_acquire)) |
+         (static_cast<u64>(sample_counts.ZPass_B.Load(std::memory_order_acquire)) << 32);
+}
+
+// Stores the ZPass pair (A, then B: one 64 bit word) in one store when the record is aligned for
+// it, and as two 32 bit stores otherwise.
+void StoreZPassPair(xenos::DepthSampleCounts& sample_counts, u64 pair) {
+  auto* word = reinterpret_cast<u64*>(&sample_counts.ZPass_A);
+  if (std::bit_cast<uintptr_t>(word) % std::atomic_ref<u64>::required_alignment == 0) {
+    std::atomic_ref<u64>(*word).store(pair, std::memory_order_release);
+  } else {
+    sample_counts.ZPass_B.Store(static_cast<u32>(pair >> 32), std::memory_order_release);
+    sample_counts.ZPass_A.Store(static_cast<u32>(pair), std::memory_order_release);
+  }
+}
+
+// Replaces the ZPass pair of an end snapshot with the count if it still holds what was written
+// there at the end event: a record the game has armed again since (it stores the sentinel with the
+// CPU) or consumed is left alone.
+bool ReplaceOcclusionCounts(xenos::DepthSampleCounts& sample_counts, u64 expected_pair,
+                            u32 samples) {
+  auto* word = reinterpret_cast<u64*>(&sample_counts.ZPass_A);
+  if (std::bit_cast<uintptr_t>(word) % std::atomic_ref<u64>::required_alignment == 0) {
+    u64 expected = expected_pair;
+    if (!std::atomic_ref<u64>(*word).compare_exchange_strong(expected, u64{samples})) {
+      return false;
+    }
+  } else {
+    if (LoadZPassPair(sample_counts) != expected_pair) {
+      return false;
+    }
+    StoreZPassPair(sample_counts, samples);
+  }
+  sample_counts.Total_A = samples;
+  sample_counts.Total_B = 0;
+  return true;
+}
+
+}  // namespace
+
 bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                           [[maybe_unused]] u32 packet, u32 count) {
   REX_ASSERT(count == 1);
   u32 initiator = reader->ReadAndSwap<u32>();
   WriteRegister(std::to_underlying(xenos::Register::VGT_EVENT_INITIATOR), initiator & 0x3F);
 
+  const u32 sample_count_address =
+      register_file_->values[std::to_underlying(xenos::Register::RB_SAMPLE_COUNT_ADDR)];
+  auto* sample_counts = GetPhysicalForWrite<xenos::DepthSampleCounts>(
+      physical_memory_, sample_count_address, sizeof(xenos::DepthSampleCounts));
+  if (!sample_counts) {
+    return true;
+  }
+  // D3D writes 0xFFFFFEED to these locations only on D3DISSUE_END to mark a finished query. Older
+  // D3D versions check ZFail.
+  const bool sentinel_present =
+      sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished ||
+      sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
+
+  if (GetXenosSettings().occlusion_query_enable.Get() && HostOcclusionQueriesUsable()) {
+    return ExecuteGuestOcclusionEvent(sample_count_address, *sample_counts, sentinel_present);
+  }
+  if (occlusion_guest_open_) {
+    // Host queries were switched off inside a query.
+    if (HostOcclusionQueryRecording()) {
+      HostOcclusionQueryAbandon();
+    }
+    occlusion_guest_open_ = false;
+    occlusion_host_began_ = false;
+  }
+
   auto fake_sample_count = GetXenosSettings().query_occlusion_fake_sample_count.Get();
   if (fake_sample_count >= 0) {
-    auto* sample_counts = GetPhysicalForWrite<DepthSampleCounts>(
-        physical_memory_,
-        register_file_->values[std::to_underlying(xenos::Register::RB_SAMPLE_COUNT_ADDR)],
-        sizeof(DepthSampleCounts));
-    if (!sample_counts) {
-      return true;
-    }
-    // D3D writes 0xFFFFFEED to these locations only on D3DISSUE_END to mark a finished query.
-    bool is_end_via_z_pass =
-        sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished;
-    // Older D3D versions check ZFail.
-    bool is_end_via_z_fail =
-        sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
-    WriteSampleCounts(*sample_counts, is_end_via_z_pass || is_end_via_z_fail
-                                          ? static_cast<u32>(fake_sample_count)
-                                          : 0);
+    WriteSampleCounts(*sample_counts, sentinel_present ? static_cast<u32>(fake_sample_count) : 0);
   }
 
   return true;
+}
+
+u64 CommandProcessor::WriteOcclusionCounts(xenos::DepthSampleCounts& sample_counts, u32 samples) {
+  sample_counts.Total_A = samples;
+  sample_counts.Total_B = 0;
+  sample_counts.ZFail_A = 0;
+  sample_counts.ZFail_B = 0;
+  sample_counts.StencilFail_A = 0;
+  sample_counts.StencilFail_B = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  StoreZPassPair(sample_counts, samples);
+  return samples;
+}
+
+bool CommandProcessor::OcclusionGuessSamples(u32& samples_out) const {
+  // The newest real count the host has delivered (a few frames old: the depth of its GPU queue),
+  // as xenia-canary's fast mode tells the guest the last real delta before the real one lands.
+  if (occlusion_latest_valid_) {
+    samples_out = occlusion_latest_samples_;
+    return true;
+  }
+  const i32 fake_sample_count = GetXenosSettings().query_occlusion_fake_sample_count.Get();
+  if (fake_sample_count >= 0) {
+    samples_out = static_cast<u32>(fake_sample_count);
+    return true;
+  }
+  return false;
+}
+
+void CommandProcessor::DropPendingOcclusionResult(u32 end_address) {
+  std::erase_if(occlusion_pending_, [end_address](const OcclusionPending& pending) {
+    return pending.end_address == end_address;
+  });
+}
+
+bool CommandProcessor::ExecuteGuestOcclusionEvent(u32 sample_count_address,
+                                                  xenos::DepthSampleCounts& sample_counts,
+                                                  bool sentinel_present) {
+  // Which event it is. An event 0x20 below the open begin's address is that query's end, whatever
+  // the snapshot holds: the sentinel the game stores there with the CPU could be gone (a count
+  // written late over it), and an end taken for a begin would zero the snapshot and the game would
+  // read a count of 0. Anything else goes by the sentinel.
+  const bool is_end = (occlusion_guest_open_ &&
+                       sample_count_address + kOcclusionBeginOffset == occlusion_begin_address_) ||
+                      sentinel_present;
+
+  if (!is_end) {
+    // The begin snapshot starts from zero, so the end snapshot then holds the count of the query
+    // alone (the game subtracts the begin from the end).
+    WriteOcclusionCounts(sample_counts, 0);
+    if (sample_count_address >= kOcclusionBeginOffset) {
+      // A new use of the record: a count still on its way for the previous use must not land on it.
+      DropPendingOcclusionResult(sample_count_address - kOcclusionBeginOffset);
+    }
+    if (occlusion_guest_open_ && HostOcclusionQueryRecording()) {
+      // One hardware counter: Direct3D 9 does not nest occlusion queries. The earlier one is lost.
+      HostOcclusionQueryAbandon();
+    }
+    occlusion_guest_open_ = true;
+    occlusion_begin_address_ = sample_count_address;
+    occlusion_host_began_ = HostOcclusionQueryBegin();
+    return true;
+  }
+
+  const bool was_open = occlusion_guest_open_;
+  const bool host_began = occlusion_host_began_;
+  occlusion_guest_open_ = false;
+  occlusion_host_began_ = false;
+
+  if (was_open && host_began && HostOcclusionQueryRecording()) {
+    u32 host_index = 0;
+    u64 submission = 0;
+    if (HostOcclusionQueryEnd(host_index, submission)) {
+      DropPendingOcclusionResult(sample_count_address);
+      // The newest count the host has (reading never waits), then what the game is told now.
+      PollOcclusionQueryResults();
+      u32 guess = 0;
+      if (OcclusionGuessSamples(guess)) {
+        WriteOcclusionCounts(sample_counts, guess);
+      }
+      occlusion_pending_.push_back(OcclusionPending{sample_count_address, host_index, submission,
+                                                    LoadZPassPair(sample_counts)});
+      if (occlusion_pending_.size() > kOcclusionMaxPending) {
+        occlusion_pending_.pop_front();
+      }
+      return true;
+    }
+  }
+
+  // No host query behind this end (none began, or a submission end cut it): the newest real count
+  // (the fake one before the first).
+  u32 guess = 0;
+  if (OcclusionGuessSamples(guess)) {
+    WriteOcclusionCounts(sample_counts, guess);
+  }
+  return true;
+}
+
+void CommandProcessor::PollOcclusionQueryResults() {
+  while (!occlusion_pending_.empty()) {
+    const OcclusionPending pending = occlusion_pending_.front();
+    u64 samples = 0;
+    if (!HostOcclusionQueryRead(pending.host_index, pending.submission, samples)) {
+      break;
+    }
+    occlusion_pending_.pop_front();
+    const u32 clamped = samples > UINT32_MAX ? UINT32_MAX : static_cast<u32>(samples);
+    // What the next end event tells the game.
+    occlusion_latest_valid_ = true;
+    occlusion_latest_samples_ = clamped;
+    // Into the record too, if the game has not touched it since the end event (it may have read
+    // the guess already: then the count is for the next end event's guess only).
+    if (auto* sample_counts = GetPhysicalForWrite<xenos::DepthSampleCounts>(
+            physical_memory_, pending.end_address, sizeof(xenos::DepthSampleCounts))) {
+      ReplaceOcclusionCounts(*sample_counts, pending.guess_zpass, clamped);
+    }
+  }
+}
+
+void CommandProcessor::ClearOcclusionQueryState() {
+  occlusion_guest_open_ = false;
+  occlusion_host_began_ = false;
+  occlusion_pending_.clear();
 }
 
 bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader,

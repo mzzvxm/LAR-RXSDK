@@ -272,12 +272,21 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void WriteRegister(u32 index, u32 value) override;
   void WriteRegistersFromMem(u32 start_index, u32* base, u32 num_registers) override;
-  bool ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader, u32 packet,
-                                          u32 count) override;
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
   void OnPrimaryBufferEnd() override;
+
+  /**
+   * The host side of the guest occlusion queries, see
+   * CommandProcessor::ExecuteGuestOcclusionEvent.
+   */
+  bool HostOcclusionQueriesUsable() const override { return occlusion_query_resources_available_; }
+  bool HostOcclusionQueryBegin() override;
+  bool HostOcclusionQueryRecording() const override { return active_occlusion_query_.valid; }
+  bool HostOcclusionQueryEnd(u32& host_index_out, u64& submission_out) override;
+  void HostOcclusionQueryAbandon() override;
+  bool HostOcclusionQueryRead(u32 host_index, u64 submission, u64& samples_out) override;
 
   void IssueSwap(u32 frontbuffer_ptr, u32 frontbuffer_width, u32 frontbuffer_height) override;
 
@@ -481,11 +490,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   void DestroyScratchBuffer();
   bool InitializeOcclusionQueryResources();
   void ShutdownOcclusionQueryResources();
-  bool BeginGuestOcclusionQuery(u32 sample_count_address);
-  bool EndGuestOcclusionQuery(u32 sample_count_address);
-  void DisableHostOcclusionQueries();
   u64 NormalizeOcclusionSamples(u64 samples) const;
-  void WriteGuestOcclusionResult(u32 sample_count_address, u64 samples);
   struct ReadbackBuffer {
     VkBuffer buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -743,7 +748,6 @@ class VulkanCommandProcessor : public CommandProcessor {
   u8* occlusion_query_readback_mapping_ = nullptr;
   bool occlusion_query_resources_available_ = false;
   struct ActiveOcclusionQuery {
-    u32 sample_count_address = 0;
     u32 host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;
