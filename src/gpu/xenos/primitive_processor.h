@@ -132,6 +132,10 @@ class REX_GPU_XENOS_API PrimitiveProcessor : public rex::NonCopyable,
    * the shared memory may be requested.
    */
   bool Process(ProcessingResult& result_out);
+  // The shared memory range (start, length in bytes) the last Process call
+  // requested for the guest's indices because the GPU reads them from there,
+  // or a zero length.
+  std::pair<u32, u32> last_guest_index_range() const { return last_guest_index_range_; }
 
   /**
    * Invalidates the cache within the range.
@@ -397,6 +401,8 @@ class REX_GPU_XENOS_API PrimitiveProcessor : public rex::NonCopyable,
   IPhysicalMemory& physical_memory_;
   IPhysicalWriteWatch& write_watch_;
   SharedMemory& shared_memory_;
+
+  std::pair<u32, u32> last_guest_index_range_{};
 
   bool full_32bit_vertex_indices_used_ = false;
   bool convert_triangle_fans_to_lists_ = false;
