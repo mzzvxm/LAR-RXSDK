@@ -512,6 +512,9 @@ REX_TEST_CASE_METHOD(Fixture,
                      "[app][app][restart]") {
   rex::log::LogCaptureSink sink;
   auto sink_guard = REX_LOGGER().AddSink(sink);
+  // A sink that joins late gets the lines the logger kept, which include what earlier test cases
+  // of the process logged: only the lines after this point belong to this test.
+  const rex::u64 joined = sink.GetLatestSequence();
   RestartApp app(RequestIn::kConfigure);
   REQUIRE(app.Init(Args()));
   CHECK(rex::app::IsShutdownRequested());
@@ -519,7 +522,7 @@ REX_TEST_CASE_METHOD(Fixture,
   REQUIRE(app.Shutdown() == 0);
   sink_guard.Reset();
   std::vector<rex::log::CapturedMessage> entries;
-  sink.CopySince(0, entries);
+  sink.CopySince(joined, entries);
   CHECK(std::ranges::none_of(entries, [](const rex::log::CapturedMessage& entry) {
     return entry.level >= rex::log::Level::kWarn;
   }));
@@ -535,6 +538,7 @@ REX_TEST_CASE_METHOD(Fixture,
                      "[app][app][restart]") {
   rex::log::LogCaptureSink sink;
   auto sink_guard = REX_LOGGER().AddSink(sink);
+  const rex::u64 joined = sink.GetLatestSequence();
   RestartApp app(RequestIn::kAction);
   REQUIRE(app.Init(Args({"--repair"})));
   CHECK(rex::app::IsShutdownRequested());
@@ -542,7 +546,7 @@ REX_TEST_CASE_METHOD(Fixture,
   REQUIRE(app.Shutdown() == 0);
   sink_guard.Reset();
   std::vector<rex::log::CapturedMessage> entries;
-  sink.CopySince(0, entries);
+  sink.CopySince(joined, entries);
   CHECK(std::ranges::none_of(entries, [](const rex::log::CapturedMessage& entry) {
     return entry.level >= rex::log::Level::kWarn;
   }));
