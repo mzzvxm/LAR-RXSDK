@@ -189,11 +189,13 @@ class OnlineClient {
   // Session list received from server kList response.
   std::vector<mclaonline::SessionInfo> sessions_;
   std::condition_variable sessions_cv_;
-  bool sessions_ready_ = false;
+  // sessions_ready_ and run_ are used only by the Windows implementation. Elsewhere the client is
+  // a stub, and clang's -Wunused-private-field would stop a -Werror build.
+  [[maybe_unused]] bool sessions_ready_ = false;
 
   std::thread recv_thread_;
   std::thread heartbeat_thread_;
-  volatile bool run_ = false;
+  [[maybe_unused]] volatile bool run_ = false;
 };
 
 }  // namespace rex::xam
