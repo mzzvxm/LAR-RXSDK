@@ -45,7 +45,21 @@ std::unique_ptr<D3D12Provider> D3D12Provider::Create(i32 adapter_index,
   return provider;
 }
 
+bool D3D12Provider::QueryVideoMemory(u64& usage_out, u64& budget_out) const {
+  if (!dxgi_adapter3_) {
+    return false;
+  }
+  DXGI_QUERY_VIDEO_MEMORY_INFO local = {};
+  if (FAILED(dxgi_adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
+    return false;
+  }
+  usage_out = local.CurrentUsage;
+  budget_out = local.Budget;
+  return true;
+}
+
 D3D12Provider::~D3D12Provider() {
+  dxgi_adapter3_.Reset();
   if (graphics_analysis_ != nullptr) {
     graphics_analysis_->Release();
   }
@@ -279,6 +293,8 @@ bool D3D12Provider::Initialize(i32 adapter_index_wanted) {
     dxgi_factory->Release();
     return false;
   }
+  // For the video memory in use and its budget (QueryVideoMemory).
+  adapter->QueryInterface(IID_PPV_ARGS(&dxgi_adapter3_));
   adapter->Release();
 
   ID3D12InfoQueue* d3d12_info_queue;

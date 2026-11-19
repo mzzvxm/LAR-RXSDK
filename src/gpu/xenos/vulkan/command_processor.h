@@ -307,6 +307,9 @@ class VulkanCommandProcessor : public CommandProcessor {
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
 
+  bool QueryGPUMemoryInfo(GPUMemoryInfo& info_out) override;
+  void OnGPUMemoryPressure(bool pressure) override;
+
  private:
   struct CommandBuffer {
     VkCommandPool pool;

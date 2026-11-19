@@ -98,6 +98,12 @@ class XenosSettings : public SettingOwner {
               "milliseconds each (a hitch when the pause menu opens after a long time). A trim "
               "waits for the GPU to finish a frame",
               Range{0, 3600});
+  REX_SETTING(u32, memory_pressure_percent, 0,
+              "When the process uses this percentage of its video memory budget (from the OS), "
+              "give memory back: render targets that hold no data and were not used for 2 seconds "
+              "go (render_target_trim_seconds must be set) and the texture cache's limits are "
+              "halved. It ends 8 points under the threshold. 0: off",
+              Range{0, 100});
   REX_SETTING(bool, pre_mask_resolve_l2_block, true,
               "Mask scaled resolve L2 blocks to the write range before iterating");
   REX_SETTING(bool, force_convert_line_loops_to_strips, false,

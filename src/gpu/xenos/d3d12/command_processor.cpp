@@ -129,6 +129,19 @@ void D3D12CommandProcessor::ClearCaches() {
   cache_clear_requested_ = true;
 }
 
+bool D3D12CommandProcessor::QueryGPUMemoryInfo(GPUMemoryInfo& info_out) {
+  return GetD3D12Provider().QueryVideoMemory(info_out.usage_bytes, info_out.budget_bytes);
+}
+
+void D3D12CommandProcessor::OnGPUMemoryPressure(bool pressure) {
+  if (render_target_cache_) {
+    render_target_cache_->SetTrimPressure(pressure);
+  }
+  if (texture_cache_) {
+    texture_cache_->SetMemoryPressure(pressure);
+  }
+}
+
 void D3D12CommandProcessor::InvalidateGPUMemory() {
   if (shared_memory_) {
     shared_memory_->InvalidateAllPages();
@@ -3563,6 +3576,9 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     }
     frame_open_ = false;
     closed_frame_submissions_[(frame_current_++) % kQueueFrames] = submission_current_ - 1;
+
+    // gpu.xenos.memory_pressure_percent: the video memory in use, and what to do about a shortage.
+    UpdateGPUMemory();
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;

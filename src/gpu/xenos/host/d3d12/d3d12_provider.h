@@ -52,6 +52,16 @@ class D3D12Provider : public GraphicsProvider {
   ID3D12Device* GetDevice() const { return device_; }
   ID3D12CommandQueue* GetDirectQueue() const { return direct_queue_; }
 
+  /**
+   * Reports what the process uses of the adapter's video memory (the local segment group) and the
+   * budget the OS gives it right now (IDXGIAdapter3::QueryVideoMemoryInfo).
+   *
+   * @param usage_out Receives the bytes in use.
+   * @param budget_out Receives the budget in bytes.
+   * @return False if the adapter cannot say.
+   */
+  bool QueryVideoMemory(u64& usage_out, u64& budget_out) const;
+
   u32 GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const { return descriptor_sizes_[type]; }
   u32 GetViewDescriptorSize() const {
     return GetDescriptorSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -152,6 +162,7 @@ class D3D12Provider : public GraphicsProvider {
   DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
+  Microsoft::WRL::ComPtr<IDXGIAdapter3> dxgi_adapter3_;
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* direct_queue_ = nullptr;
   IDXGraphicsAnalysis* graphics_analysis_ = nullptr;

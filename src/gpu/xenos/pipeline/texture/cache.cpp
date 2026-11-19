@@ -91,6 +91,10 @@ void TextureCache::CompletedSubmissionUpdated(u64 completed_submission_index) {
   u32 limit_soft_mb = settings_.texture_cache_memory_limit_soft.Get() + limit_scaled_resolve_add_mb;
   u32 limit_hard_mb = settings_.texture_cache_memory_limit_hard.Get() + limit_scaled_resolve_add_mb;
   u32 limit_soft_lifetime = settings_.texture_cache_memory_limit_soft_lifetime.Get() * 1000;
+  if (memory_pressure_) {
+    limit_soft_mb /= 2;
+    limit_hard_mb /= 2;
+  }
   bool destroyed_any = false;
   while (texture_used_first_ != nullptr) {
     u64 total_host_memory_usage_mb =

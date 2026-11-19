@@ -599,7 +599,31 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
   bool occlusion_latest_valid_ = false;
   u32 occlusion_latest_samples_ = 0;
 
+  /** What the process uses of the video memory, and the budget the OS gives it now. */
+  struct GPUMemoryInfo {
+    u64 usage_bytes = 0;
+    u64 budget_bytes = 0;
+  };
+
+  /**
+   * Watches the video memory (gpu.xenos.memory_pressure_percent). The implementations call it at
+   * the end of each frame and answer QueryGPUMemoryInfo and OnGPUMemoryPressure.
+   */
+  void UpdateGPUMemory();
+
+  /** Returns false if the host cannot say. */
+  virtual bool QueryGPUMemoryInfo([[maybe_unused]] GPUMemoryInfo& info_out) { return false; }
+
+  /**
+   * Called when the host becomes, or stops being, short of video memory: give back what is not
+   * needed, and keep less of what is cached.
+   */
+  virtual void OnGPUMemoryPressure([[maybe_unused]] bool pressure) {}
+
  private:
+  u64 gpu_memory_next_check_ms_ = 0;
+  bool gpu_memory_pressure_ = false;
+
   xenos::reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
   xenos::reg::DC_LUT_PWL_DATA gamma_ramp_pwl_rgb_[128][3] = {};
   u32 gamma_ramp_rw_component_ = 0;

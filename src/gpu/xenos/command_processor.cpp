@@ -229,6 +229,37 @@ void CommandProcessor::CallInThreadNoWait(rex::MoveOnlyFunction<void()> fn) {
   CallInThread(std::move(fn));
 }
 
+void CommandProcessor::UpdateGPUMemory() {
+  const u32 pressure_percent = GetXenosSettings().memory_pressure_percent.Get();
+  if (!pressure_percent) {
+    if (gpu_memory_pressure_) {
+      gpu_memory_pressure_ = false;
+      OnGPUMemoryPressure(false);
+    }
+    return;
+  }
+  const u64 now_ms = rex::Clock::QueryHostUptimeMillis();
+  if (now_ms < gpu_memory_next_check_ms_) {
+    return;
+  }
+  gpu_memory_next_check_ms_ = now_ms + 250;
+  GPUMemoryInfo info;
+  if (QueryGPUMemoryInfo(info) && info.budget_bytes) {
+    const u64 percent = info.usage_bytes * 100 / info.budget_bytes;
+    const bool pressure =
+        gpu_memory_pressure_ ? percent + 8 >= pressure_percent : percent >= pressure_percent;
+    if (pressure != gpu_memory_pressure_) {
+      gpu_memory_pressure_ = pressure;
+      REXGPU_INFO("Video memory: {} ({} MB of {} MB, {}%)", pressure ? "short" : "no longer short",
+                  info.usage_bytes >> 20, info.budget_bytes >> 20, percent);
+      OnGPUMemoryPressure(pressure);
+    }
+  } else if (gpu_memory_pressure_) {
+    gpu_memory_pressure_ = false;
+    OnGPUMemoryPressure(false);
+  }
+}
+
 void CommandProcessor::ClearCaches() {}
 
 void CommandProcessor::InvalidateGPUMemory() {}

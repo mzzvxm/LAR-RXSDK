@@ -73,6 +73,12 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
 
   virtual void ClearCache();
 
+  /**
+   * While the host is short of video memory (gpu.xenos.memory_pressure_percent), the soft and the
+   * hard limit are halved: unused textures go sooner.
+   */
+  void SetMemoryPressure(bool pressure) { memory_pressure_ = pressure; }
+
   virtual void CompletedSubmissionUpdated(u64 completed_submission_index);
   virtual void BeginSubmission(u64 new_submission_index);
   virtual void BeginFrame();
@@ -516,6 +522,7 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
   std::unordered_map<TextureKey, std::unique_ptr<Texture>, TextureKey::Hasher> textures_;
 
   u64 textures_total_host_memory_usage_ = 0;
+  bool memory_pressure_ = false;
 
   Texture* texture_used_first_ = nullptr;
   Texture* texture_used_last_ = nullptr;

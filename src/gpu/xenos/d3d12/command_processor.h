@@ -252,6 +252,9 @@ class D3D12CommandProcessor : public CommandProcessor {
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
 
+  bool QueryGPUMemoryInfo(GPUMemoryInfo& info_out) override;
+  void OnGPUMemoryPressure(bool pressure) override;
+
  private:
   static constexpr u32 kQueueFrames = 3;
 
