@@ -52,6 +52,14 @@ class D3D12Settings : public SettingOwner {
   REX_SETTING(std::string, render_target_path, "", "Render target implementation path",
               kStartupOnly);
   REX_SETTING(bool, tiled_shared_memory, true, "Use tiled shared memory", kRestart);
+  REX_SETTING(bool, texture_heaps, true,
+              "Place the textures that are not render targets or depth buffers in shared 256 MB "
+              "heaps instead of making each one a committed resource of its own. Creating a "
+              "committed resource costs the GPU command thread about 0.19 ms and releasing one "
+              "0.08 ms (RTX 5080), so streaming in or evicting hundreds of textures in a frame "
+              "took over 100 ms; a placed texture takes about 0.01 ms. Off: committed resources "
+              "only, to compare",
+              kDebugOnly);
   REX_SETTING(bool, allow_tearing, true, "Allow variable refresh rate and tearing");
   REX_SETTING(bool, debug, false, "Enable Direct3D 12 and DXGI debug layer", kStartupOnly);
   REX_SETTING(bool, break_on_error, false, "Break on Direct3D 12 validation errors");
