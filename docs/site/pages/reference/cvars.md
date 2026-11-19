@@ -203,6 +203,7 @@ These settings exist while a Xenos driver is initialized, with any host API. Dec
 | `gpu.xenos.readback_resolve_half_pixel_offset` | `bool` | `false` | live | With draw resolution scaling active, sample from the center of each scaled block when a resolve readback scales down. |
 | `gpu.xenos.readback_memexport_fast` | `bool` | `true` | live | Use the fast double buffered memexport readback when possible. It falls back to the full synchronous readback. |
 | `gpu.xenos.async_shader_compilation` | `bool` | `true` | live | Compile shaders and pipelines on background threads. Brief artifacts can appear until compilation finishes. |
+| `gpu.xenos.async_pipeline_wait_budget_ms` | `i32` | `4` | live | With async shader compilation, how long a frame may wait in total for pipelines its draws need that are still being created, before those draws are left out until the pipelines are ready (so a pipeline the driver has cached is drawn in the same frame). 0 leaves them out at once, -1 waits as long as it takes. -1 to 1000. |
 | `gpu.xenos.native_2x_msaa` | `bool` | `true` | live | Use native 2x MSAA. |
 | `gpu.xenos.depth_float24_round` | `bool` | `false` | live | Round float24 depth values. |
 | `gpu.xenos.depth_float24_convert_in_pixel_shader` | `bool` | `false` | live | Convert float24 depth in the pixel shader. |
@@ -222,6 +223,7 @@ These settings exist while the Vulkan driver is initialized. Declared by `Vulkan
 | `gpu.vulkan.readback_resolve` | `bool` | `false` | live | Read render to texture results on the CPU. |
 | `gpu.vulkan.readback_memexport` | `bool` | `false` | live | Read data that shaders write with memory export on the CPU. |
 | `gpu.vulkan.async_skip_incomplete_frames` | `bool` | `true` | live | With async shader compilation, skip frames that used placeholder pipelines. |
+| `gpu.vulkan.async_skip_incomplete_frames_max_ms` | `u32` | `100` | live | With `async_skip_incomplete_frames`, present frames that used placeholder pipelines anyway once presents have been skipped for this long, so a slow pipeline creation shows as objects missing for a moment rather than a picture held still. 0 skips for as long as it takes. |
 | `gpu.vulkan.submit_on_primary_buffer_end` | `bool` | `true` | live | Submit the command buffer when a PM4 primary buffer ends. |
 | `gpu.vulkan.dynamic_rendering` | `bool` | `true` | live | Use VK_KHR_dynamic_rendering when supported. |
 | `gpu.vulkan.pipeline_creation_threads` | `i32` | `-1` | restart | Pipeline creation threads. -1 is automatic. -1 to 32. |
@@ -260,6 +262,7 @@ These settings exist while the Direct3D 12 driver is initialized, on Windows onl
 | `gpu.d3d12.dxbc_disasm` | `bool` | `false` | live | Dump the DXBC disassembly of shaders. |
 | `gpu.d3d12.dxbc_disasm_dxilconv` | `bool` | `false` | live | Dump the disassembly of the DXIL conversion. |
 | `gpu.d3d12.pipeline_creation_threads` | `i32` | `-1` | restart | Pipeline creation threads. -1 is automatic. -1 to 32. |
+| `gpu.d3d12.async_skip_incomplete_frames_max_ms` | `u32` | `100` | live | With async shader compilation, frames with draws left out because their pipelines were still being created are not presented (the previous picture stays). Once presents have been skipped for this long, such frames are presented anyway. 0 skips for as long as it takes. |
 | `gpu.d3d12.tessellation_wireframe` | `bool` | `false` | live | Render tessellation as wireframe. |
 | `gpu.d3d12.native_stencil_value_output` | `bool` | `true` | live | Use native stencil value output. |
 | `gpu.d3d12.use_fuzzy_alpha_epsilon` | `bool` | `false` | live | Compare alpha test values approximately, which prevents flickering on NVIDIA graphics cards. |
