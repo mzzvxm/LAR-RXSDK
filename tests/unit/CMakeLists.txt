@@ -205,6 +205,7 @@ add_executable(
   xam/language_test.cpp
   kernel/thread_wait_test.cpp
   kernel/kernel_time_gate_test.cpp
+  kernel/zero_delay_policy_test.cpp
   kernel/runtime_error_test.cpp
   kernel/runtime_interfaces_test.cpp
   kernel/memory_view_test.cpp

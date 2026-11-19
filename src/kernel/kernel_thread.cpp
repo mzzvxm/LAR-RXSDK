@@ -46,6 +46,7 @@
 #include "kernel/guest_stack.h"
 #include "kernel/settings_access.h"
 #include "kernel/title_state.h"
+#include "kernel/zero_delay_policy.h"
 
 namespace rex::kernel {
 
@@ -1078,7 +1079,7 @@ X_STATUS KernelThread::Delay([[maybe_unused]] u32 processor_mode, u32 alertable,
     }
   } else {
     if (duration == std::chrono::microseconds::zero()) {
-      if (priority_ <= rex::platform::ThreadPriority::kBelowNormal) {
+      if (ZeroDelaySleeps(priority_)) {
         rex::platform::SleepFor(std::chrono::microseconds(100));
       } else {
         rex::platform::MaybeYield();
