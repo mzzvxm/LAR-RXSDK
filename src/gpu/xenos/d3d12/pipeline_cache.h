@@ -127,6 +127,16 @@ class PipelineCache {
    * @return True when its creation has finished (it may have failed: check the state).
    */
   bool AwaitAsyncPipelineCreation(void* handle, u64 timeout_us);
+  /**
+   * Whether a pipeline has been through its creation without getting a pipeline state (it failed,
+   * its draws stay left out), as opposed to still being created.
+   */
+  bool HasAsyncPipelineCreationFailed(void* handle) const {
+    const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
+    // The creation thread stores the state before it clears the pending flag.
+    return !pipeline->async_creation_pending.load(std::memory_order_acquire) &&
+           pipeline->state.load(std::memory_order_acquire) == nullptr;
+  }
 
  private:
   REX_PACKED_STRUCT(ShaderStoredHeader, {

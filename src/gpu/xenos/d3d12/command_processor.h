@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -492,6 +493,14 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool frame_open_ = false;
   /** Time this frame's draws have waited for pipelines being created asynchronously. */
   u64 frame_async_pipeline_wait_us_ = 0;
+  /**
+   * Whether a draw of this frame was left out because its pipeline was still being created
+   * asynchronously (one that failed to be created doesn't count: the frame would never be
+   * complete).
+   */
+  bool frame_left_out_async_pipeline_draw_ = false;
+  /** When the presents being skipped for such frames started, or none. */
+  std::optional<std::chrono::steady_clock::time_point> incomplete_frames_skipped_since_;
   /** Title frame index, updated at the start of a frame. */
   u64 frame_current_ = 1;
   u64 frame_completed_ = 0;

@@ -1818,6 +1818,25 @@ void D3D12CommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32 
     FlushUnscaledResolveCopies();
   }
 
+  // A frame with draws left out for pipelines that weren't ready is not presented, the previous
+  // picture stays: presenting it would show the objects of those draws missing for a frame, as
+  // flashing squares and triangles.
+  if (async_pipeline::ShouldSkipPresent(
+          GetXenosSettings().async_shader_compilation.Get() && frame_left_out_async_pipeline_draw_,
+          std::chrono::steady_clock::now(),
+          GetD3D12Settings().async_skip_incomplete_frames_max_ms.Get(),
+          incomplete_frames_skipped_since_)) {
+    static bool skipped_incomplete_frame_logged = false;
+    if (!skipped_incomplete_frame_logged) {
+      skipped_incomplete_frame_logged = true;
+      REXGPU_WARN(
+          "Skipping Direct3D 12 frame presentation due to draws left out for pipelines that "
+          "weren't ready");
+    }
+    EndSubmission(true);
+    return;
+  }
+
   D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
   xenos::TextureFormat frontbuffer_format;
   u32 frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
@@ -2305,6 +2324,11 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
     if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
         (!AwaitAsyncPipeline(pipeline_handle) ||
          pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr)) {
+      // A pipeline that failed to be created stays left out, but the frame
+      // isn't incomplete for it - it would never be complete again.
+      if (!pipeline_cache_->HasAsyncPipelineCreationFailed(pipeline_handle)) {
+        frame_left_out_async_pipeline_draw_ = true;
+      }
       return true;
     }
     // A pipeline created asynchronously gets its root signature on the
@@ -3459,6 +3483,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   if (is_opening_frame) {
     frame_open_ = true;
     frame_async_pipeline_wait_us_ = 0;
+    frame_left_out_async_pipeline_draw_ = false;
 
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
     std::memset(current_float_constant_map_pixel_, 0, sizeof(current_float_constant_map_pixel_));
