@@ -115,6 +115,8 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
         return;
       }
       SDL_Gamepad_initialized_ = true;
+      // Until now EnumerateDevices() answered with an empty list.
+      device_list_generation_.fetch_add(1, std::memory_order_release);
 
       // Load custom controller mappings if available
       if (!REXCVAR_GET(hid_mappings_file).empty()) {
@@ -427,8 +429,16 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // Buffer only - no controllers_mutex_ acquisition here.
   // This breaks the lock ordering inversion between controllers_mutex_ and
   // SDL's internal joystick lock that caused deadlocks.
-  std::lock_guard<std::mutex> guard(event_queue_mutex_);
-  pending_events_.push_back(event);
+  {
+    std::lock_guard<std::mutex> guard(event_queue_mutex_);
+    pending_events_.push_back(event);
+  }
+
+  // After the push: whoever sees the new number then drains this event. InputSystem enumerates
+  // only when it moves, and the enumeration is what turns the event into a device.
+  if (event.type == SDL_EVENT_GAMEPAD_ADDED || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+    device_list_generation_.fetch_add(1, std::memory_order_release);
+  }
 }
 
 std::unique_lock<std::mutex> SDLInputDriver::DrainAndLock() {

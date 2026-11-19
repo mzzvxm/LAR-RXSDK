@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include <rex/input/device.h>
@@ -36,6 +37,13 @@ class InputDriver {
   /// Devices this driver has open, in its own arrival order. InputSystem
   /// assigns the cross-driver ordinal, so leave DeviceInfo::ordinal at zero.
   virtual void EnumerateDevices(std::vector<DeviceInfo>& out) = 0;
+
+  /// A number that moves whenever EnumerateDevices() could return a different list, so InputSystem
+  /// can skip the enumeration on every call where nothing was plugged in or out. A driver that
+  /// only finds out by asking the OS inside EnumerateDevices() keeps this default (no answer) and
+  /// is enumerated on every call, as before. Any thread; must be cheap. Bump it only after the
+  /// change is visible to EnumerateDevices().
+  virtual std::optional<uint64_t> DeviceListGeneration() const { return std::nullopt; }
 
   virtual X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) = 0;
   virtual X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,

@@ -35,6 +35,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   X_STATUS Setup() override;
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+  std::optional<uint64_t> DeviceListGeneration() const override {
+    return device_list_generation_.load(std::memory_order_acquire);
+  }
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;
@@ -97,6 +100,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   bool sdl_events_initialized_;
   bool SDL_Gamepad_initialized_;
   std::atomic<int> sdl_events_unflushed_;
+  // Moves after a gamepad arrival or removal is queued for DrainAndLock(), and when SDL finishes
+  // starting. Written on whichever thread SDL posts from.
+  std::atomic<uint64_t> device_list_generation_{0};
   std::atomic<bool> sdl_pumpevents_queued_;
   // Appended in connection order, never re-sorted, and unbounded: the
   // assignment decides how many the guest sees.
