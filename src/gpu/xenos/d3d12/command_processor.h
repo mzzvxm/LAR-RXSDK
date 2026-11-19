@@ -401,6 +401,34 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
   bool IssueCopyReadbackResolvePath();
+  /**
+   * After a resolution scaled resolve that a rule of resolve_unscaled_copy_rules matches, writes
+   * its 1x version to the shared memory (the readback path's downscale pass, with the shared memory
+   * as its destination). No wait. The resolve has just been made, so the current scaled resolve
+   * range is the one it wrote.
+   */
+  void IssueCopyUnscaledResolveCopy(u32 written_address, u32 written_length);
+  /**
+   * With resolve_unscaled_copy_batch, a copy that IssueCopyUnscaledResolveCopy has checked waits
+   * in a PendingUnscaledResolveCopy, and FlushUnscaledResolveCopies makes every copy that waits
+   * before the next draw, the swap, the end of the submission, or a resolve that is not copied.
+   * That is before anything of this command processor reads the shared memory (the CPU's writes
+   * reach it only through draws and swaps, which flush first), so the order against the other
+   * writes of the shared memory is the one of immediate copies. The scaled data is read from the
+   * buffers where the resolves wrote it; a later resolve of the same memory overwrites it first,
+   * and then the copy has that resolve's data, which is the memory's content.
+   */
+  struct PendingUnscaledResolveCopy {
+    u32 written_address;
+    u32 written_length;
+    u32 pixel_size_log2;
+    u32 tile_count;
+    ID3D12Resource* scaled_resolve_buffer;
+    u64 source_offset;
+    u32 source_length_aligned;
+  };
+  std::vector<PendingUnscaledResolveCopy> pending_unscaled_copies_;
+  void FlushUnscaledResolveCopies();
   bool IssueDrawMemexportReadbackFullPath(u32 total_size);
   bool IssueDrawMemexportReadbackFastPath(u32 total_size);
 

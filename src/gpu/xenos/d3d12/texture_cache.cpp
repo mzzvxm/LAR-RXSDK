@@ -1257,6 +1257,18 @@ void D3D12TextureCache::TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE
                                            new_state);
 }
 
+void D3D12TextureCache::TransitionScaledResolveBuffer(ID3D12Resource* resource,
+                                                      D3D12_RESOURCE_STATES new_state) {
+  REX_ASSERT(IsDrawResolutionScaled());
+  for (const std::unique_ptr<ScaledResolveVirtualBuffer>& buffer : scaled_resolve_2gb_buffers_) {
+    if (buffer && buffer->GetResource() == resource) {
+      command_processor_.PushTransitionBarrier(resource, buffer->SetResourceState(new_state),
+                                               new_state);
+      return;
+    }
+  }
+}
+
 void D3D12TextureCache::CreateCurrentScaledResolveRangeUintPow2SRV(
     D3D12_CPU_DESCRIPTOR_HANDLE handle, u32 element_size_bytes_pow2) {
   REX_ASSERT(IsDrawResolutionScaled());

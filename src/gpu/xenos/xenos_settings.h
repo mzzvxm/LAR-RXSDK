@@ -39,6 +39,26 @@ class XenosSettings : public SettingOwner {
               "A range is N, LO-HI, LO- or -HI (inclusive; decimal or 0x hex). Empty or off: no "
               "rules",
               kDebugOnly);
+  REX_SETTING(std::string, resolve_unscaled_copy_rules, "",
+              "With draw resolution scaling (gpu.resolution_scale above 1), also write the "
+              "unscaled (1x) version of the resolves that match a rule into the shared memory, on "
+              "the GPU and without waiting. A scaled resolve writes only the scaled resolve "
+              "buffer, which the GPU reads as a texture; a title that then reads the same memory "
+              "as something else on the GPU (vertex data, for instance: a particle system whose "
+              "state is rendered to a texture and fetched as vertices) saw whatever the shared "
+              "memory held. The scaled data is downscaled to the 1x layout by the pass "
+              "readback_resolve uses and written to the destination range; texture fetches are "
+              "still served from the scaled buffer. Rules are those of readback_resolve_rules "
+              "(addr, len, pitch, height, fmt, src; mode is not used). Nothing happens without "
+              "draw resolution scaling. Empty or off: no rules",
+              kDebugOnly);
+  REX_SETTING(bool, resolve_unscaled_copy_batch, true,
+              "With resolve_unscaled_copy_rules: the copies of the scaled resolves wait for the "
+              "next draw, swap or end of the submission and are made together, with one set of "
+              "barriers around them, instead of one set around each copy (the game's four copies "
+              "of a frame cost 3.4% of the GPU time at 2x on an RTX 5080 when each had its own "
+              "barriers). The result is the same. Off: each copy right after its resolve",
+              kDebugOnly);
   REX_SETTING(bool, readback_memexport, true,
               "Enable CPU readback of shader memexport writes. Keeps guest memory coherent and "
               "adds GPU and CPU sync cost");

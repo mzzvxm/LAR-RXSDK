@@ -178,6 +178,11 @@ class D3D12TextureCache final : public TextureCache {
   void CreateCurrentScaledResolveRangeUintPow2UAV(D3D12_CPU_DESCRIPTOR_HANDLE handle,
                                                   u32 element_size_bytes_pow2);
   void TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATES new_state);
+  /**
+   * Transitions a scaled resolve buffer by its resource, one that was current earlier (the batched
+   * unscaled resolve copies read it later). Does nothing when the resource is not one of them.
+   */
+  void TransitionScaledResolveBuffer(ID3D12Resource* resource, D3D12_RESOURCE_STATES new_state);
   u64 GetCurrentScaledResolveRangeStart() const {
     return scaled_resolve_current_range_start_scaled_;
   }

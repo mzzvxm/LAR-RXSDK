@@ -1874,6 +1874,9 @@ void D3D12CommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32 
     REXGPU_ERROR("IssueSwap: BeginSubmission failed");
     return;
   }
+  if (!pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
+  }
 
   D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
   xenos::TextureFormat frontbuffer_format;
@@ -2222,6 +2225,11 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
   xenos::EDRAMMode edram_mode = regs.Get<xenos::reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EDRAMMode::kCopy) {
     return IssueCopy();
+  }
+  // The copies of scaled resolves that wait (resolve_unscaled_copy_batch) go
+  // before anything that draws can read the shared memory.
+  if (!pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
   }
 
   bool surface_pitch_is_zero = regs.Get<xenos::reg::RB_SURFACE_INFO>().surface_pitch == 0;
@@ -2790,7 +2798,8 @@ bool D3D12CommandProcessor::IssueCopy() {
   }
   ReadbackResolveMode readback_mode =
       GetReadbackResolveMode(GetD3D12Settings().readback_resolve.Get());
-  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {
+  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective() &&
+      !IsUnscaledResolveCopyEnabled()) {
     u32 written_address, written_length;
     return render_target_cache_->Resolve(physical_memory_, *shared_memory_, *texture_cache_,
                                          written_address, written_length);
@@ -2811,6 +2820,12 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
 
   if (!GetPhysicalForWrite(physical_memory_, written_address, written_length)) {
     return true;
+  }
+
+  // The 1x version of a scaled resolve to the shared memory, on the GPU, if a rule of
+  // resolve_unscaled_copy_rules says so.
+  if (texture_cache_->IsDrawResolutionScaled()) {
+    IssueCopyUnscaledResolveCopy(written_address, written_length);
   }
 
   // The global mode, or, with readback_resolve_rules, that of the rule this resolve matches.
@@ -3023,6 +3038,248 @@ bool D3D12CommandProcessor::IssueCopyReadbackResolvePath() {
 
   rb.current_index = 1 - rb.current_index;
   return true;
+}
+
+void D3D12CommandProcessor::IssueCopyUnscaledResolveCopy(u32 written_address, u32 written_length) {
+  const std::optional<ResolveRule> rule =
+      MatchUnscaledResolveCopyRule(written_address, written_length);
+  if (!rule) {
+    // Not a resolve that is copied: the ones that wait go first (resolve_unscaled_copy_batch).
+    if (!pending_unscaled_copies_.empty()) {
+      FlushUnscaledResolveCopies();
+    }
+    return;
+  }
+  auto fail = [&](std::string_view reason) {
+    // The resolve that was made is a copy that is not done: the ones that wait go first
+    // (resolve_unscaled_copy_batch), as for a resolve that is not copied.
+    if (!pending_unscaled_copies_.empty()) {
+      FlushUnscaledResolveCopies();
+    }
+    LogUnscaledResolveCopy(written_address, written_length, *rule, reason, false);
+  };
+
+  if (!resolve_downscale_pipeline_ || !resolve_downscale_root_signature_) {
+    fail("not done: no downscale pipeline");
+    return;
+  }
+
+  // The downscale pass (the one readback_resolve uses) works on whole 32x32 tiles of the
+  // destination, and takes one host pixel of each block of scale_x * scale_y at the block's slot in
+  // the scaled data. Like xenia-canary's readback of a scaled resolve, only a destination that is
+  // whole tiles on a 128-byte boundary is done (tiled destinations are).
+  const xenos::reg::RB_COPY_DEST_INFO copy_dest_info =
+      register_file_->Get<xenos::reg::RB_COPY_DEST_INFO>();
+  const xenos::FormatInfo* format_info =
+      xenos::FormatInfo::Get(static_cast<u32>(copy_dest_info.copy_dest_format));
+  const u32 bits_per_pixel = format_info->bits_per_pixel;
+  if (bits_per_pixel != 8 && bits_per_pixel != 16 && bits_per_pixel != 32 && bits_per_pixel != 64) {
+    fail("not done: the destination format is not 8, 16, 32 or 64 bits");
+    return;
+  }
+  u32 pixel_size_log2;
+  if (!rex::bit_scan_forward(bits_per_pixel >> 3, &pixel_size_log2)) {
+    fail("not done: the destination format");
+    return;
+  }
+  const u32 tile_size_1x = 32 * 32 * (static_cast<u32>(1) << pixel_size_log2);
+  const u32 tile_count = written_length / tile_size_1x;
+  if (!tile_count || (written_length % tile_size_1x) != 0) {
+    fail("not done: the written range is not a whole number of 32x32 tiles");
+    return;
+  }
+  if ((written_address & 127) != 0) {
+    fail("not done: the written range does not start on a 128-byte boundary");
+    return;
+  }
+
+  // The scaled data of the written range, in the range the resolve made current.
+  const u32 scale_area =
+      texture_cache_->GetDrawResolutionScaleX() * texture_cache_->GetDrawResolutionScaleY();
+  const u64 scaled_start = static_cast<u64>(written_address) * scale_area;
+  const u64 scaled_length = static_cast<u64>(written_length) * scale_area;
+  const u64 range_start = texture_cache_->GetCurrentScaledResolveRangeStart();
+  const u64 range_length = texture_cache_->GetCurrentScaledResolveRangeLength();
+  if (!range_length || scaled_start < range_start ||
+      scaled_start + scaled_length > range_start + range_length ||
+      scaled_length > UINT32_MAX - D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT) {
+    fail("not done: the written range is not in the current scaled resolve range");
+    return;
+  }
+  ID3D12Resource* scaled_resolve_buffer = texture_cache_->GetCurrentScaledResolveBufferResource();
+  if (!scaled_resolve_buffer) {
+    fail("not done: no scaled resolve buffer");
+    return;
+  }
+  const u64 scaled_buffer_base =
+      static_cast<u64>(texture_cache_->GetCurrentScaledResolveBufferIndex()) << 30;
+  if (scaled_start < scaled_buffer_base) {
+    fail("not done: the written range is before the scaled resolve buffer");
+    return;
+  }
+  const u64 source_offset = scaled_start - scaled_buffer_base;
+  const u32 source_length_aligned = rex::RoundUpPow2(
+      static_cast<u32>(scaled_length), static_cast<u32>(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT));
+
+  // The resolve has marked the pages as written by the GPU (valid) without anything having made
+  // sure there is host memory behind them.
+  if (!shared_memory_->EnsureRangeAllocated(written_address, written_length)) {
+    fail("not done: the shared memory could not be allocated");
+    return;
+  }
+
+  ResolveDownscaleConstants constants;
+  constants.scale_x = texture_cache_->GetDrawResolutionScaleX();
+  constants.scale_y = texture_cache_->GetDrawResolutionScaleY();
+  constants.pixel_size_log2 = pixel_size_log2;
+  constants.tile_count = tile_count;
+  constants.half_pixel_offset = (GetXenosSettings().readback_resolve_half_pixel_offset.Get() &&
+                                 (constants.scale_x > 1 || constants.scale_y > 1))
+                                    ? 1u
+                                    : 0u;
+  // Always the scaled resolve layout's addressing, as in the readback path.
+  constants.unit_layout = 1u;
+
+  if (GetXenosSettings().resolve_unscaled_copy_batch.Get()) {
+    // The copy is made, with the others of its group, by FlushUnscaledResolveCopies. The scaled
+    // resolve buffers alias each other (an aliasing barrier when another one becomes current), so a
+    // copy from another buffer than the ones waiting makes them go first.
+    if (!pending_unscaled_copies_.empty() &&
+        pending_unscaled_copies_.back().scaled_resolve_buffer != scaled_resolve_buffer) {
+      FlushUnscaledResolveCopies();
+    }
+    PendingUnscaledResolveCopy pending;
+    pending.written_address = written_address;
+    pending.written_length = written_length;
+    pending.pixel_size_log2 = pixel_size_log2;
+    pending.tile_count = tile_count;
+    pending.scaled_resolve_buffer = scaled_resolve_buffer;
+    pending.source_offset = source_offset;
+    pending.source_length_aligned = source_length_aligned;
+    pending_unscaled_copies_.push_back(pending);
+    LogUnscaledResolveCopy(written_address, written_length, *rule, "done", true);
+    if (pending_unscaled_copies_.size() >= 32) {
+      FlushUnscaledResolveCopies();
+    }
+    return;
+  }
+
+  gpu::d3d12::objects::DescriptorCPUGPUHandlePair downscale_descriptors[2];
+  if (!RequestOneUseSingleViewDescriptors(2, downscale_descriptors)) {
+    fail("not done: no descriptors");
+    return;
+  }
+  const gpu::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+  gpu::d3d12::objects::CreateBufferRawSRV(device, downscale_descriptors[0].first,
+                                          scaled_resolve_buffer, source_length_aligned,
+                                          source_offset);
+  gpu::d3d12::objects::CreateBufferRawUAV(
+      device, downscale_descriptors[1].first, shared_memory_->GetBuffer(),
+      rex::RoundUpPow2(written_length, static_cast<u32>(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT)),
+      written_address);
+
+  PushUAVBarrier(scaled_resolve_buffer);
+  texture_cache_->TransitionCurrentScaledResolveRange(
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  shared_memory_->UseForWriting();
+  SubmitBarriers();
+
+  SetExternalPipeline(resolve_downscale_pipeline_.Get());
+  deferred_command_list_.D3DSetComputeRootSignature(resolve_downscale_root_signature_.Get());
+  deferred_command_list_.D3DSetComputeRoot32BitConstants(
+      static_cast<UINT>(ResolveDownscaleRootParameter::kConstants), sizeof(constants) / sizeof(u32),
+      &constants, 0);
+  deferred_command_list_.D3DSetComputeRootDescriptorTable(
+      static_cast<UINT>(ResolveDownscaleRootParameter::kSource), downscale_descriptors[0].second);
+  deferred_command_list_.D3DSetComputeRootDescriptorTable(
+      static_cast<UINT>(ResolveDownscaleRootParameter::kDestination),
+      downscale_descriptors[1].second);
+  deferred_command_list_.D3DDispatch(tile_count, 1, 1);
+
+  // Order the writes with what uses the shared memory next, and give the scaled resolve buffer back
+  // in the state the resolves write it in.
+  shared_memory_->MarkUAVWritesCommitNeeded();
+  texture_cache_->TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  SubmitBarriers();
+
+  LogUnscaledResolveCopy(written_address, written_length, *rule, "done", true);
+}
+
+void D3D12CommandProcessor::FlushUnscaledResolveCopies() {
+  if (pending_unscaled_copies_.empty()) {
+    return;
+  }
+  std::vector<PendingUnscaledResolveCopy> copies;
+  copies.swap(pending_unscaled_copies_);
+  if (!submission_open_ || !resolve_downscale_pipeline_ || !resolve_downscale_root_signature_) {
+    REXGPU_WARN("unscaled resolve copy: {} copies could not be made (no open submission or pass)",
+                copies.size());
+    return;
+  }
+  const gpu::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+  const u32 scale_x = texture_cache_->GetDrawResolutionScaleX();
+  const u32 scale_y = texture_cache_->GetDrawResolutionScaleY();
+  const bool half_pixel_offset =
+      GetXenosSettings().readback_resolve_half_pixel_offset.Get() && (scale_x > 1 || scale_y > 1);
+
+  // One set of barriers for all the copies: the scaled data the resolves wrote is read as a shader
+  // resource (the transitions commit the resolves' writes), the shared memory is written as a UAV.
+  // The scaled buffer is left in the shader resource state: the next resolve into it, and the
+  // texture loads from it, transition it themselves.
+  for (const PendingUnscaledResolveCopy& copy : copies) {
+    texture_cache_->TransitionScaledResolveBuffer(copy.scaled_resolve_buffer,
+                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  }
+  shared_memory_->UseForWriting();
+  SubmitBarriers();
+
+  constexpr size_t kCopiesPerDescriptorRequest = 16;
+  size_t made = 0;
+  for (size_t first = 0; first < copies.size(); first += kCopiesPerDescriptorRequest) {
+    const size_t count = std::min(kCopiesPerDescriptorRequest, copies.size() - first);
+    gpu::d3d12::objects::DescriptorCPUGPUHandlePair descriptors[2 * kCopiesPerDescriptorRequest];
+    if (!RequestOneUseSingleViewDescriptors(static_cast<u32>(2 * count), descriptors)) {
+      REXGPU_WARN("unscaled resolve copy: no descriptors for {} copies, left out",
+                  copies.size() - first);
+      break;
+    }
+    SetExternalPipeline(resolve_downscale_pipeline_.Get());
+    deferred_command_list_.D3DSetComputeRootSignature(resolve_downscale_root_signature_.Get());
+    for (size_t i = 0; i < count; ++i) {
+      const PendingUnscaledResolveCopy& copy = copies[first + i];
+      gpu::d3d12::objects::CreateBufferRawSRV(device, descriptors[2 * i].first,
+                                              copy.scaled_resolve_buffer,
+                                              copy.source_length_aligned, copy.source_offset);
+      gpu::d3d12::objects::CreateBufferRawUAV(
+          device, descriptors[2 * i + 1].first, shared_memory_->GetBuffer(),
+          rex::RoundUpPow2(copy.written_length, static_cast<u32>(D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT)),
+          copy.written_address);
+      ResolveDownscaleConstants constants;
+      constants.scale_x = scale_x;
+      constants.scale_y = scale_y;
+      constants.pixel_size_log2 = copy.pixel_size_log2;
+      constants.tile_count = copy.tile_count;
+      constants.half_pixel_offset = half_pixel_offset ? 1u : 0u;
+      constants.unit_layout = 1u;
+      deferred_command_list_.D3DSetComputeRoot32BitConstants(
+          static_cast<UINT>(ResolveDownscaleRootParameter::kConstants),
+          sizeof(constants) / sizeof(u32), &constants, 0);
+      deferred_command_list_.D3DSetComputeRootDescriptorTable(
+          static_cast<UINT>(ResolveDownscaleRootParameter::kSource), descriptors[2 * i].second);
+      deferred_command_list_.D3DSetComputeRootDescriptorTable(
+          static_cast<UINT>(ResolveDownscaleRootParameter::kDestination),
+          descriptors[2 * i + 1].second);
+      deferred_command_list_.D3DDispatch(copy.tile_count, 1, 1);
+      ++made;
+    }
+  }
+  // The destinations are different ranges: no barrier between the copies. The next reader of the
+  // shared memory transitions it (with its own barriers).
+  if (made) {
+    shared_memory_->MarkUAVWritesCommitNeeded();
+  }
 }
 
 void D3D12CommandProcessor::CheckSubmissionFence(u64 await_submission) {
@@ -3273,6 +3530,11 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 
 bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
   const gpu::d3d12::D3D12Provider& provider = GetD3D12Provider();
+
+  // Copies of scaled resolves that wait (resolve_unscaled_copy_batch) belong to this submission.
+  if (submission_open_ && !pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
+  }
 
   if (submission_open_ && !command_allocator_writable_first_) {
     ID3D12CommandAllocator* command_allocator;

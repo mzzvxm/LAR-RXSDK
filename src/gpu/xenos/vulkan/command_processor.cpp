@@ -2150,6 +2150,9 @@ void VulkanCommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32
     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
     return;
   }
+  if (!pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
+  }
 
   bool skip_present_due_async_placeholder =
       GetXenosSettings().async_shader_compilation.Get() &&
@@ -3429,6 +3432,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, u32 index
   if (edram_mode == xenos::EDRAMMode::kCopy) {
     return IssueCopy();
   }
+  // The copies of scaled resolves that wait (resolve_unscaled_copy_batch) go
+  // before anything that draws can read the shared memory.
+  if (!pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
+  }
 
   bool surface_pitch_is_zero = regs.Get<xenos::reg::RB_SURFACE_INFO>().surface_pitch == 0;
 
@@ -4122,7 +4130,8 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   ReadbackResolveMode readback_mode =
       GetReadbackResolveMode(GetVulkanSettings().readback_resolve.Get());
-  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective()) {
+  if (readback_mode == ReadbackResolveMode::kDisabled && !IsResolveReadbackSelective() &&
+      !IsUnscaledResolveCopyEnabled()) {
     u32 written_address, written_length;
     return render_target_cache_->Resolve(physical_memory_, *shared_memory_, *texture_cache_,
                                          written_address, written_length);
@@ -4148,6 +4157,12 @@ bool VulkanCommandProcessor::IssueCopyReadbackResolvePath() {
 
   if (!GetPhysicalForWrite(physical_memory_, written_address, written_length)) {
     return true;
+  }
+
+  // The 1x version of a scaled resolve to the shared memory, on the GPU, if a rule of
+  // resolve_unscaled_copy_rules says so.
+  if (texture_cache_->IsDrawResolutionScaled()) {
+    IssueCopyUnscaledResolveCopy(written_address, written_length);
   }
 
   // The global mode, or, with readback_resolve_rules, that of the rule this resolve matches.
@@ -4423,6 +4438,257 @@ bool VulkanCommandProcessor::IssueCopyReadbackResolvePath() {
 
   readback.current_index = 1 - readback.current_index;
   return true;
+}
+
+void VulkanCommandProcessor::IssueCopyUnscaledResolveCopy(u32 written_address, u32 written_length) {
+  const std::optional<ResolveRule> rule =
+      MatchUnscaledResolveCopyRule(written_address, written_length);
+  if (!rule) {
+    // Not a resolve that is copied: the ones that wait go first (resolve_unscaled_copy_batch).
+    if (!pending_unscaled_copies_.empty()) {
+      FlushUnscaledResolveCopies();
+    }
+    return;
+  }
+  auto fail = [&](std::string_view reason) {
+    // The resolve that was made is a copy that is not done: the ones that wait go first
+    // (resolve_unscaled_copy_batch), as for a resolve that is not copied.
+    if (!pending_unscaled_copies_.empty()) {
+      FlushUnscaledResolveCopies();
+    }
+    LogUnscaledResolveCopy(written_address, written_length, *rule, reason, false);
+  };
+
+  if (resolve_downscale_pipeline_ == VK_NULL_HANDLE ||
+      resolve_downscale_pipeline_layout_ == VK_NULL_HANDLE) {
+    fail("not done: no downscale pipeline");
+    return;
+  }
+
+  // The downscale pass (the one readback_resolve uses) works on whole 32x32 tiles of the
+  // destination, and takes one host pixel of each block of scale_x * scale_y at the block's slot in
+  // the scaled data. Like xenia-canary's readback of a scaled resolve, only a destination that is
+  // whole tiles on a 128-byte boundary is done (tiled destinations are).
+  const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
+  const VkDevice device = vulkan_device->GetDevice();
+  const xenos::reg::RB_COPY_DEST_INFO copy_dest_info =
+      register_file_->Get<xenos::reg::RB_COPY_DEST_INFO>();
+  const xenos::FormatInfo* format_info =
+      xenos::FormatInfo::Get(static_cast<u32>(copy_dest_info.copy_dest_format));
+  const u32 bits_per_pixel = format_info->bits_per_pixel;
+  if (bits_per_pixel != 8 && bits_per_pixel != 16 && bits_per_pixel != 32 && bits_per_pixel != 64) {
+    fail("not done: the destination format is not 8, 16, 32 or 64 bits");
+    return;
+  }
+  u32 pixel_size_log2;
+  if (!rex::bit_scan_forward(bits_per_pixel >> 3, &pixel_size_log2)) {
+    fail("not done: the destination format");
+    return;
+  }
+  const u32 tile_size_1x = 32 * 32 * (static_cast<u32>(1) << pixel_size_log2);
+  const u32 tile_count = written_length / tile_size_1x;
+  if (!tile_count || (written_length % tile_size_1x) != 0) {
+    fail("not done: the written range is not a whole number of 32x32 tiles");
+    return;
+  }
+  // Storage buffer descriptors start at multiples of the device's alignment.
+  const gpu::vulkan::VulkanDevice::Properties& device_properties = vulkan_device->GetProperties();
+  const u64 offset_alignment =
+      std::max<u64>(128, static_cast<u64>(device_properties.minStorageBufferOffsetAlignment));
+  if ((written_address & (offset_alignment - 1)) != 0) {
+    fail("not done: the written range does not start on an aligned boundary");
+    return;
+  }
+  if (written_length > device_properties.maxStorageBufferRange) {
+    fail("not done: the written range is longer than a storage buffer range");
+    return;
+  }
+
+  u64 scaled_start = 0, scaled_length = 0;
+  if (!texture_cache_->GetScaledResolveRange(written_address, written_length, 0, scaled_start,
+                                             scaled_length) ||
+      !scaled_length) {
+    fail("not done: no scaled resolve range");
+    return;
+  }
+  VkBuffer scaled_resolve_buffer = texture_cache_->GetScaledResolveBuffer();
+  if (scaled_resolve_buffer == VK_NULL_HANDLE) {
+    fail("not done: no scaled resolve buffer");
+    return;
+  }
+  // The scaled data is bound from the aligned down start, and the shader skips to its own start (a
+  // window, as the resolves themselves bind it: not the whole of a buffer of several gigabytes at
+  // 3x).
+  const u64 source_window_start = scaled_start & ~(offset_alignment - 1);
+  const u64 source_skip = scaled_start - source_window_start;
+  const u64 source_window_length = source_skip + scaled_length;
+  if (source_window_length > device_properties.maxStorageBufferRange || source_skip > UINT32_MAX) {
+    fail("not done: the scaled data is longer than a storage buffer range");
+    return;
+  }
+
+  // The resolve has marked the pages as written by the GPU (valid) without anything having made
+  // sure there is host memory behind them.
+  if (!shared_memory_->EnsureRangeAllocated(written_address, written_length)) {
+    fail("not done: the shared memory could not be allocated");
+    return;
+  }
+
+  if (GetXenosSettings().resolve_unscaled_copy_batch.Get()) {
+    // The copy is made, with the others of its group, by FlushUnscaledResolveCopies.
+    PendingUnscaledResolveCopy pending;
+    pending.written_address = written_address;
+    pending.written_length = written_length;
+    pending.pixel_size_log2 = pixel_size_log2;
+    pending.tile_count = tile_count;
+    pending.source_window_start = source_window_start;
+    pending.source_window_length = source_window_length;
+    pending.source_skip = static_cast<u32>(source_skip);
+    pending_unscaled_copies_.push_back(pending);
+    LogUnscaledResolveCopy(written_address, written_length, *rule, "done", true);
+    if (pending_unscaled_copies_.size() >= 32) {
+      FlushUnscaledResolveCopies();
+    }
+    return;
+  }
+
+  VkDescriptorSet descriptor_set =
+      AllocateSingleTransientDescriptor(SingleTransientDescriptorLayout::kStorageBufferPairCompute);
+  if (descriptor_set == VK_NULL_HANDLE) {
+    fail("not done: no descriptor set");
+    return;
+  }
+  VkDescriptorBufferInfo buffer_infos[2] = {};
+  buffer_infos[0].buffer = scaled_resolve_buffer;
+  buffer_infos[0].offset = source_window_start;
+  buffer_infos[0].range = source_window_length;
+  buffer_infos[1].buffer = shared_memory_->GetBuffer();
+  buffer_infos[1].offset = written_address;
+  buffer_infos[1].range = written_length;
+  VkWriteDescriptorSet descriptor_writes[2] = {};
+  for (u32 i = 0; i < 2; ++i) {
+    descriptor_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptor_writes[i].dstSet = descriptor_set;
+    descriptor_writes[i].dstBinding = i;
+    descriptor_writes[i].descriptorCount = 1;
+    descriptor_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptor_writes[i].pBufferInfo = &buffer_infos[i];
+  }
+  dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
+
+  texture_cache_->UseScaledResolveBufferForRead();
+  shared_memory_->Use(VulkanSharedMemory::Usage::kComputeWrite,
+                      std::pair<u32, u32>(written_address, written_length));
+  SubmitBarriers(true);
+
+  BindExternalComputePipeline(resolve_downscale_pipeline_);
+
+  ResolveDownscaleConstants constants;
+  constants.scale_x = texture_cache_->GetDrawResolutionScaleX();
+  constants.scale_y = texture_cache_->GetDrawResolutionScaleY();
+  constants.pixel_size_log2 = pixel_size_log2;
+  constants.tile_count = tile_count;
+  constants.source_offset_bytes = static_cast<u32>(source_skip);
+  constants.half_pixel_offset = (GetXenosSettings().readback_resolve_half_pixel_offset.Get() &&
+                                 (constants.scale_x > 1 || constants.scale_y > 1))
+                                    ? 1u
+                                    : 0u;
+  // Always the scaled resolve layout's addressing, as in the readback path.
+  constants.unit_layout = 1u;
+  deferred_command_buffer_.CmdVkPushConstants(resolve_downscale_pipeline_layout_,
+                                              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
+                                              &constants);
+  deferred_command_buffer_.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                                   resolve_downscale_pipeline_layout_, 0, 1,
+                                                   &descriptor_set, 0, nullptr);
+  deferred_command_buffer_.CmdVkDispatch(tile_count, 1, 1);
+
+  LogUnscaledResolveCopy(written_address, written_length, *rule, "done", true);
+}
+
+void VulkanCommandProcessor::FlushUnscaledResolveCopies() {
+  if (pending_unscaled_copies_.empty()) {
+    return;
+  }
+  std::vector<PendingUnscaledResolveCopy> copies;
+  copies.swap(pending_unscaled_copies_);
+  VkBuffer scaled_resolve_buffer = texture_cache_->GetScaledResolveBuffer();
+  if (!submission_open_ || resolve_downscale_pipeline_ == VK_NULL_HANDLE ||
+      resolve_downscale_pipeline_layout_ == VK_NULL_HANDLE ||
+      scaled_resolve_buffer == VK_NULL_HANDLE) {
+    REXGPU_WARN("unscaled resolve copy: {} copies could not be made (no open submission or pass)",
+                copies.size());
+    return;
+  }
+  const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
+  const VkDevice device = vulkan_device->GetDevice();
+
+  // Compute is not recorded inside a render pass (the resolves that came before ended it, and
+  // nothing began one since).
+  EndRenderPass();
+
+  // One barrier for the scaled data the resolves wrote, and one for the shared memory (the span of
+  // all the destinations, as written), for all the copies.
+  u32 written_first = UINT32_MAX;
+  u32 written_end = 0;
+  for (const PendingUnscaledResolveCopy& copy : copies) {
+    written_first = std::min(written_first, copy.written_address);
+    written_end = std::max(written_end, copy.written_address + copy.written_length);
+  }
+  texture_cache_->UseScaledResolveBufferForRead();
+  shared_memory_->Use(VulkanSharedMemory::Usage::kComputeWrite,
+                      std::pair<u32, u32>(written_first, written_end - written_first));
+  SubmitBarriers(true);
+
+  BindExternalComputePipeline(resolve_downscale_pipeline_);
+  const u32 scale_x = texture_cache_->GetDrawResolutionScaleX();
+  const u32 scale_y = texture_cache_->GetDrawResolutionScaleY();
+  const bool half_pixel_offset =
+      GetXenosSettings().readback_resolve_half_pixel_offset.Get() && (scale_x > 1 || scale_y > 1);
+  for (const PendingUnscaledResolveCopy& copy : copies) {
+    VkDescriptorSet descriptor_set = AllocateSingleTransientDescriptor(
+        SingleTransientDescriptorLayout::kStorageBufferPairCompute);
+    if (descriptor_set == VK_NULL_HANDLE) {
+      REXGPU_WARN("unscaled resolve copy: no descriptor set, a copy of {} bytes left out",
+                  copy.written_length);
+      continue;
+    }
+    VkDescriptorBufferInfo buffer_infos[2] = {};
+    buffer_infos[0].buffer = scaled_resolve_buffer;
+    buffer_infos[0].offset = copy.source_window_start;
+    buffer_infos[0].range = copy.source_window_length;
+    buffer_infos[1].buffer = shared_memory_->GetBuffer();
+    buffer_infos[1].offset = copy.written_address;
+    buffer_infos[1].range = copy.written_length;
+    VkWriteDescriptorSet descriptor_writes[2] = {};
+    for (u32 i = 0; i < 2; ++i) {
+      descriptor_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      descriptor_writes[i].dstSet = descriptor_set;
+      descriptor_writes[i].dstBinding = i;
+      descriptor_writes[i].descriptorCount = 1;
+      descriptor_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      descriptor_writes[i].pBufferInfo = &buffer_infos[i];
+    }
+    dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
+
+    ResolveDownscaleConstants constants;
+    constants.scale_x = scale_x;
+    constants.scale_y = scale_y;
+    constants.pixel_size_log2 = copy.pixel_size_log2;
+    constants.tile_count = copy.tile_count;
+    constants.source_offset_bytes = copy.source_skip;
+    constants.half_pixel_offset = half_pixel_offset ? 1u : 0u;
+    constants.unit_layout = 1u;
+    deferred_command_buffer_.CmdVkPushConstants(resolve_downscale_pipeline_layout_,
+                                                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
+                                                &constants);
+    deferred_command_buffer_.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                                     resolve_downscale_pipeline_layout_, 0, 1,
+                                                     &descriptor_set, 0, nullptr);
+    deferred_command_buffer_.CmdVkDispatch(copy.tile_count, 1, 1);
+  }
 }
 
 void VulkanCommandProcessor::EvictOldReadbackBuffers(
@@ -4928,6 +5194,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
   const VkDevice device = vulkan_device->GetDevice();
+
+  // Copies of scaled resolves that wait (resolve_unscaled_copy_batch) belong to this submission.
+  if (submission_open_ && !pending_unscaled_copies_.empty()) {
+    FlushUnscaledResolveCopies();
+  }
 
   if (submission_open_) {
     if (fences_free_.empty()) {

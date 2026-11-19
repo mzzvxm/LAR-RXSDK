@@ -105,6 +105,17 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
    */
   void RangeWrittenByGPU(u32 start, u32 length);
 
+  /**
+   * Makes sure the host GPU memory behind a range exists (the sparse allocations of the backends
+   * that use them), without uploading anything or changing which pages are valid. RequestRange
+   * allocates too, but it also uploads what is not valid, and a range that RangeWrittenByGPU has
+   * marked valid after a resolution scaled resolve may never have had its memory allocated, and
+   * then be written from the GPU (the unscaled resolve copy).
+   *
+   * @return True when the memory exists.
+   */
+  bool EnsureRangeAllocated(u32 start, u32 length) { return AllocateHostGPUMemory(start, length); }
+
  protected:
   SharedMemory(IPhysicalMemory& memory, IPhysicalWriteWatch& watch);
   /** Implementations call it from their initialization. */

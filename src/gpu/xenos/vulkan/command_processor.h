@@ -449,6 +449,30 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void ClearTransientDescriptorPools();
   bool IssueCopyReadbackResolvePath();
+  /**
+   * After a resolution scaled resolve that a rule of resolve_unscaled_copy_rules matches, writes
+   * its 1x version to the shared memory (the readback path's downscale pass, with the shared memory
+   * as its destination). No wait.
+   */
+  void IssueCopyUnscaledResolveCopy(u32 written_address, u32 written_length);
+  /**
+   * With resolve_unscaled_copy_batch, the copies wait in PendingUnscaledResolveCopy after
+   * IssueCopyUnscaledResolveCopy has checked them (see the D3D12 command processor's), and
+   * FlushUnscaledResolveCopies makes them before the next draw, the swap, the end of the
+   * submission, or a resolve that is not copied, with one barrier for the scaled data and one for
+   * the shared memory around all of them.
+   */
+  struct PendingUnscaledResolveCopy {
+    u32 written_address;
+    u32 written_length;
+    u32 pixel_size_log2;
+    u32 tile_count;
+    u64 source_window_start;
+    u64 source_window_length;
+    u32 source_skip;
+  };
+  std::vector<PendingUnscaledResolveCopy> pending_unscaled_copies_;
+  void FlushUnscaledResolveCopies();
   bool IssueDrawMemexportReadbackFullPath(u32 total_size);
   bool IssueDrawMemexportReadbackFastPath(u32 total_size);
 

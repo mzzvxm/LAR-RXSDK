@@ -89,6 +89,7 @@ CommandProcessor::CommandProcessor(XenosGraphicsDriverBase* graphics_system, con
       graphics_system_(graphics_system),
       register_file_(graphics_system_->GetRegisterFile()),
       readback_rules_(graphics_system->readback_resolve_rules),
+      unscaled_copy_rules_(graphics_system->resolve_unscaled_copy_rules),
       worker_running_(true),
       write_ptr_index_event_(rex::platform::Event::CreateAutoResetEvent(false)),
       write_ptr_index_(0) {
@@ -277,6 +278,34 @@ ResolveDescription CommandProcessor::DescribeResolve(u32 written_address,
   resolve.format = static_cast<u32>(copy_dest_info.copy_dest_format);
   resolve.source = copy_control.copy_src_select;
   return resolve;
+}
+
+std::optional<ResolveRule> CommandProcessor::MatchUnscaledResolveCopyRule(
+    u32 written_address, u32 written_length) const {
+  if (!unscaled_copy_rules_.HasRules() || !written_length) {
+    return std::nullopt;
+  }
+  return unscaled_copy_rules_.Match(DescribeResolve(written_address, written_length));
+}
+
+void CommandProcessor::LogUnscaledResolveCopy(u32 written_address, u32 written_length,
+                                              const ResolveRule& rule, std::string_view result,
+                                              bool done) {
+  if (done) {
+    ++unscaled_copy_done_count_;
+  }
+  // The first ones and every 1024th copy.
+  const bool periodic = done && (unscaled_copy_done_count_ & 1023) == 0;
+  if (unscaled_copy_log_count_ >= 16 && !periodic) {
+    return;
+  }
+  if (unscaled_copy_log_count_ < 16) {
+    ++unscaled_copy_log_count_;
+  }
+  REXGPU_INFO(
+      "unscaled resolve copy: swap {} address 0x{:08X} length {} (rule \"{}\") -> {} ({} done so "
+      "far)",
+      counter_, written_address, written_length, rule.text, result, unscaled_copy_done_count_);
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled() const {

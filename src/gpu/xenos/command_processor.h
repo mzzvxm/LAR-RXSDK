@@ -384,6 +384,35 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
    */
   ResolveDescription DescribeResolve(u32 written_address, u32 written_length) const;
 
+  /**
+   * Reports whether gpu.xenos.resolve_unscaled_copy_rules holds a rule. IssueCopy takes the path
+   * that sees what the resolve wrote only then, or when a readback is on.
+   */
+  bool IsUnscaledResolveCopyEnabled() const { return unscaled_copy_rules_.HasRules(); }
+
+  /**
+   * Finds the rule of gpu.xenos.resolve_unscaled_copy_rules that the resolve that has just been
+   * made matches. With draw resolution scaling a resolve writes only the scaled resolve buffer,
+   * which the GPU reads as textures but not as anything else (vertex data, for instance). A
+   * resolve that matches a rule also gets its 1x version, made by the readback path's downscale
+   * pass, written to its destination range of the shared memory on the GPU, with no wait. The
+   * mode of a rule is not used. Command processor thread only.
+   *
+   * @return The rule, or nothing.
+   */
+  std::optional<ResolveRule> MatchUnscaledResolveCopyRule(u32 written_address,
+                                                          u32 written_length) const;
+
+  /**
+   * Logs an unscaled resolve copy. The first copies, the first failures and every 1024th copy are
+   * logged.
+   *
+   * @param result A short text.
+   * @param done True when the copy was made or queued, false when it was left out.
+   */
+  void LogUnscaledResolveCopy(u32 written_address, u32 written_length, const ResolveRule& rule,
+                              std::string_view result, bool done);
+
   bool IsReadbackMemexportEnabled() const;
 
   TitleInfo title_info_;
@@ -396,6 +425,10 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
 
   /** The rules of gpu.xenos.readback_resolve_rules. */
   ResolveRuleSetting readback_rules_;
+  /** The rules of gpu.xenos.resolve_unscaled_copy_rules. */
+  ResolveRuleSetting unscaled_copy_rules_;
+  u32 unscaled_copy_log_count_ = 0;
+  u32 unscaled_copy_done_count_ = 0;
 
   std::atomic<bool> worker_running_;
   ScopeGuard worker_thread_;
