@@ -32,7 +32,9 @@ install(
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-if (WIN32)
+# A .pdb comes from the MSVC linker (and clang-cl's lld-link). llvm-mingw's linker writes none, and
+# $<TARGET_PDB_FILE:...> is an error for it at generate time, whatever CONFIGURATIONS says.
+if (WIN32 AND NOT MINGW)
   foreach (_install_target IN LISTS REXGLUE_INSTALL_TARGETS)
     get_target_property(_install_type ${_install_target} TYPE)
     if (_install_type STREQUAL "SHARED_LIBRARY" OR _install_type STREQUAL "MODULE_LIBRARY")
@@ -64,12 +66,14 @@ foreach (_module IN LISTS REXGLUE_RUNTIME_FILE_TARGETS)
 
   if (WIN32)
     install(FILES $<TARGET_FILE:${_module}> DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(
-      FILES $<TARGET_PDB_FILE:${_module}>
-      DESTINATION ${CMAKE_INSTALL_BINDIR}
-      CONFIGURATIONS Debug RelWithDebInfo
-      OPTIONAL
-    )
+    if (NOT MINGW)
+      install(
+        FILES $<TARGET_PDB_FILE:${_module}>
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        CONFIGURATIONS Debug RelWithDebInfo
+        OPTIONAL
+      )
+    endif ()
   else ()
     install(TARGETS ${_module} LIBRARY DESTINATION ${_module_dir} NAMELINK_SKIP)
   endif ()

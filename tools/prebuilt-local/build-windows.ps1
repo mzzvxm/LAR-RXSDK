@@ -158,6 +158,8 @@ function Fwd([string]$Path) { return $Path.Replace('\', '/') }
 
 # Runs a program, shows its output, and stops the script when it does not end with 0. The error preference is
 # relaxed for the call only: Windows PowerShell 5.1 turns a native program's stderr lines into errors otherwise.
+# stderr goes through the pipeline as plain lines (2>&1) so that the transcript keeps it: cmake prints its generate-time
+# errors there, and without this the log ended in "FAILED: cmake configure failed" with no reason.
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
@@ -166,7 +168,7 @@ function Invoke-Native {
     )
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Exe @Arguments | Out-Host } finally { $ErrorActionPreference = $savedPreference }
+    try { & $Exe @Arguments 2>&1 | ForEach-Object { [string]$_ } | Out-Host } finally { $ErrorActionPreference = $savedPreference }
     if ($LASTEXITCODE -ne 0) { throw ('{0} failed (exit code {1}).' -f $What, $LASTEXITCODE) }
 }
 
