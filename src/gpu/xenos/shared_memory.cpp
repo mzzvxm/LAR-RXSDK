@@ -94,6 +94,8 @@ void SharedMemory::ShutdownCommon() {
   page_heat_.shrink_to_fit();
   page_hot_until_ms_.clear();
   page_hot_until_ms_.shrink_to_fit();
+  pending_hot_page_watches_.clear();
+  has_pending_hot_page_watches_.store(false, std::memory_order_relaxed);
   num_system_page_flags_ = 0;
 }
 
@@ -212,6 +214,31 @@ SharedMemory::WatchHandle SharedMemory::WatchMemoryRange(const ScopeGuard&, u32 
       watch_buckets_[i]->bucket_node_previous = node;
     }
     watch_buckets_[i] = node;
+  }
+
+  // A hot page is not write-protected, so a guest write to it never faults and would never fire
+  // this watch: what was loaded from it (a texture the CPU rewrites every frame, such as a movie's
+  // planes) would stay as loaded until the page cooled down. Watching wins: the watched hot pages
+  // are tracked again (still invalid), so the next write faults and fires the watch. A page that
+  // keeps being written turns hot again after gpu.xenos.shared_memory_hot_page_faults faults, and
+  // the next load cools it again. The protection itself waits for ApplyPendingHotPageWatches, as
+  // the write watch lock is held here.
+  const u32 now_ms = static_cast<u32>(rex::Clock::QueryHostUptimeMillis());
+  if (write_listener_registered_ && AnyPageHot(now_ms)) {
+    u32 run_first = UINT32_MAX;
+    for (u32 page = watch_page_first; page <= watch_page_last + 1; ++page) {
+      if (page <= watch_page_last && IsPageHot(page, now_ms)) {
+        page_hot_until_ms_[page] = now_ms;
+        if (run_first == UINT32_MAX) {
+          run_first = page;
+        }
+      } else if (run_first != UINT32_MAX) {
+        pending_hot_page_watches_.emplace_back(run_first, page - run_first);
+        run_first = UINT32_MAX;
+      }
+    }
+    has_pending_hot_page_watches_.store(!pending_hot_page_watches_.empty(),
+                                        std::memory_order_release);
   }
 
   return reinterpret_cast<WatchHandle>(range);
@@ -351,6 +378,21 @@ u64 SharedMemory::HotPageMask(u32 block, u32 now_ms) const {
     }
   }
   return mask;
+}
+
+void SharedMemory::ApplyPendingHotPageWatches() {
+  if (!has_pending_hot_page_watches_.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::vector<std::pair<u32, u32>> runs;
+  {
+    auto lock = AcquireLock();
+    runs.swap(pending_hot_page_watches_);
+    has_pending_hot_page_watches_.store(false, std::memory_order_release);
+  }
+  for (const std::pair<u32, u32>& run : runs) {
+    write_watch_.WatchPhysicalWrites({run.first << page_size_log2_, run.second << page_size_log2_});
+  }
 }
 
 void SharedMemory::UnlinkWatchRange(WatchRange* range) {

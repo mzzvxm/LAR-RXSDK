@@ -257,6 +257,7 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
 
   // Scaled resolves are watched too, to detect CPU reuse of the memory.
   texture.UpdateAndWatch(GetSharedMemory().AcquireLock());
+  GetSharedMemory().ApplyPendingHotPageWatches();
   texture.LogAction("Loaded");
 
   return true;

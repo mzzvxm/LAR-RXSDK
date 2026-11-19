@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -79,6 +80,13 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
    */
   ScopeGuard AcquireLock() const { return write_watch_.LockWriteWatches(); }
   void UnwatchMemoryRange(WatchHandle handle);
+
+  /**
+   * Write-protects the hot pages that WatchMemoryRange took out of the hot set, so a write to them
+   * fires the watch. WatchMemoryRange cannot do it, as the caller holds the memory watch lock,
+   * which protecting takes. Call it after releasing the lock, soon after watching.
+   */
+  void ApplyPendingHotPageWatches();
 
   /**
    * Uploads new data for ranges that changed and makes the host GPU memory backing them resident.
@@ -225,6 +233,9 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
   std::vector<u32> page_hot_until_ms_;
   u32 page_heat_decay_ms_ = 0;
   u32 page_hot_latest_until_ms_ = 0;
+  /** Runs of pages (first page, count) that WatchMemoryRange took out of the hot set. */
+  std::vector<std::pair<u32, u32>> pending_hot_page_watches_;
+  std::atomic<bool> has_pending_hot_page_watches_{false};
   bool AnyPageHot(u32 now_ms) const {
     return static_cast<i32>(page_hot_latest_until_ms_ - now_ms) > 0;
   }
