@@ -51,7 +51,9 @@ REX_API std::filesystem::path GetUserFolder();
 /**
  * Reports whether the application runs from a read only package.
  *
- * @return True for an AppImage or a macOS app bundle, false on Windows and for a loose build.
+ * @return True for an AppImage or a macOS app bundle, false on Windows and for a loose build. A
+ *         program that an AppImage started does not count, although it inherits the AppImage's
+ *         environment: its executable is not inside the image (APPDIR).
  */
 [[nodiscard]] REX_API bool IsPackagedApp();
 

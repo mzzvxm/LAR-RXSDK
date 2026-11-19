@@ -72,6 +72,26 @@ std::filesystem::path GetHomeFolder() {
   return {found->pw_dir};
 }
 
+// The AppImage runtime sets APPIMAGE and APPDIR for the program it starts, and that program's own
+// children inherit both. A program the packaged one starts (a game its launcher runs) is not
+// packaged itself: its executable is outside APPDIR.
+bool RunsFromAppImage() {
+  if (!GetEnvironmentValue("APPIMAGE")) {
+    return false;
+  }
+  const auto appdir = GetEnvironmentValue("APPDIR");
+  if (!appdir || appdir->empty()) {
+    return true;
+  }
+  std::error_code ec;
+  const std::filesystem::path root = std::filesystem::weakly_canonical(*appdir, ec);
+  if (ec) {
+    return true;
+  }
+  const std::filesystem::path relative = GetExecutablePath().lexically_relative(root);
+  return !relative.empty() && *relative.begin() != "..";
+}
+
 #if defined(__APPLE__)
 bool IsMacAppBundle() {
   const std::filesystem::path executable_dir = GetExecutableFolder();
@@ -94,7 +114,7 @@ std::filesystem::path GetUserFolder() {
 }
 
 bool IsPackagedApp() {
-  if (GetEnvironmentValue("APPIMAGE")) {
+  if (RunsFromAppImage()) {
     return true;
   }
 #if defined(__APPLE__)

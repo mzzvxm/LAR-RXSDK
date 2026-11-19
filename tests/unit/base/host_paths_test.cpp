@@ -141,12 +141,35 @@ REX_TEST_CASE("An AppImage run is a packaged app and keeps its files in the user
     CHECK_FALSE(rex::platform::IsPackagedApp());
   }
   EnvGuard appimage("APPIMAGE", "/tmp/hostpathtest.AppImage");
+  EnvGuard appdir("APPDIR", std::nullopt);
   CHECK(rex::platform::IsPackagedApp());
 #if !REX_PLATFORM_MAC
   CHECK(rex::platform::GetAppRoot("hostpathtest") == folder.path / "hostpathtest");
 #endif
   CHECK(rex::platform::GetAppRoot("hostpathtest") ==
         rex::platform::GetUserConfigFolder("hostpathtest"));
+}
+
+REX_TEST_CASE("A program an AppImage started is packaged only when its executable is in APPDIR",
+              "[base][paths]") {
+  rex::test::TempFolder folder;
+  EnvGuard xdg("XDG_CONFIG_HOME", folder.path.string());
+  EnvGuard appimage("APPIMAGE", "/tmp/hostpathtest.AppImage");
+  {
+    // The inherited variables of a parent AppImage: this executable is not inside its folder.
+    EnvGuard appdir("APPDIR", folder.path.string());
+    CHECK_FALSE(rex::platform::IsPackagedApp());
+  }
+  const std::string exe_folder = rex::platform::GetExecutableFolder().string();
+  {
+    EnvGuard appdir("APPDIR", exe_folder);
+    CHECK(rex::platform::IsPackagedApp());
+  }
+  {
+    // A folder whose name only starts like the executable's folder is another folder.
+    EnvGuard appdir("APPDIR", exe_folder.substr(0, exe_folder.size() - 1));
+    CHECK_FALSE(rex::platform::IsPackagedApp());
+  }
 }
 #else
 REX_TEST_CASE("A Windows build is never a packaged app", "[base][paths]") {

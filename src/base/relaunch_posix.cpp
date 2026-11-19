@@ -54,8 +54,11 @@ Result<void> Spawn(const std::string& exe, std::span<const std::string> args,
 }  // namespace
 
 [[nodiscard]] Result<void> Relaunch(std::span<const std::string> args) {
+  // APPIMAGE names the image this process runs from, so it only counts when the process does.
   const auto appimage = GetEnvironmentValue("APPIMAGE");
-  return Spawn(appimage && !appimage->empty() ? *appimage : platform::GetExecutablePath().string(),
+  return Spawn(appimage && !appimage->empty() && IsPackagedApp()
+                   ? *appimage
+                   : platform::GetExecutablePath().string(),
                args, {});
 }
 
