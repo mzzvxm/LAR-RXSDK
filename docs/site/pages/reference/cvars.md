@@ -189,6 +189,12 @@ These settings exist while a Xenos driver is initialized, with any host API. Dec
 | `gpu.xenos.texture_cache_memory_limit_soft` | `i32` | `384` | restart | The soft texture cache memory limit in MB. 64 to 4096. |
 | `gpu.xenos.texture_cache_memory_limit_hard` | `i32` | `768` | restart | The hard texture cache memory limit in MB. 128 to 8192. |
 | `gpu.xenos.texture_cache_memory_limit_soft_lifetime` | `i32` | `30` | live | How many seconds a texture may exceed the soft limit before it is removed. 1 to 3600. |
+| `gpu.xenos.render_target_max_height` | `u32` | `0` | restart | With host render targets, the tallest host render target to make, in pixels at 1x (rounded up to the tile height, at least 32). 0 makes each as tall as the whole EDRAM from its base, up to 8192 rows, which is about 10 MB times the resolution scale squared however little is drawn. A draw that reaches past the limit is cut at it and the cut is logged. 0 to 8192. |
+| `gpu.xenos.render_target_trim_seconds` | `u32` | `0` | live | With host render targets, free the ones that hold no EDRAM data and have not been used for this many seconds. They are made again when a draw needs them, which takes a few milliseconds each. A trim waits for the GPU to finish a frame. 0 keeps every one. 0 to 3600. |
+| `gpu.xenos.memory_pressure_percent` | `u32` | `0` | live | When the process uses this percent of the video memory budget the OS gives it (DXGI on Direct3D 12, VK_EXT_memory_budget on Vulkan), unused render targets go after 2 seconds (needs `render_target_trim_seconds`) and the texture cache limits are halved. It ends 8 points under the threshold. 0 is off. 0 to 100. |
+| `gpu.xenos.shared_memory_hot_page_faults` | `u32` | `0` | live | Guest write faults on one page, within about a second, after which the page is hot: not watched, and uploaded whenever it is requested (only the bytes a draw asks for on Vulkan, the whole page on Direct3D 12). A page that a texture watches is not hot. 0 never. 0 to 255. |
+| `gpu.xenos.shared_memory_hot_page_ms` | `u32` | `2000` | live | How long a hot page stays hot before it is watched again. 1 to 3600000. |
+| `gpu.xenos.shared_memory_request_fast_path` | `bool` | `true` | live | A shared memory request whose pages are all valid returns before it is batched, sorted and locked. Off takes the full path, to compare. Hidden from the settings overlay outside debug builds. |
 | `gpu.xenos.pre_mask_resolve_l2_block` | `bool` | `true` | live | Mask scaled resolve L2 blocks to the write range before iterating. |
 | `gpu.xenos.force_convert_line_loops_to_strips` | `bool` | `false` | live | Convert line loops to line strips. |
 | `gpu.xenos.force_convert_quad_lists_to_triangle_lists` | `bool` | `false` | live | Convert quad lists to triangle lists. |
@@ -269,6 +275,7 @@ These settings exist while the Direct3D 12 driver is initialized, on Windows onl
 | `gpu.d3d12.native_stencil_value_output_intel` | `bool` | `false` | live | Use native stencil value output on Intel graphics. |
 | `gpu.d3d12.render_target_path` | `string` | `""` | startup only | The render target implementation path. |
 | `gpu.d3d12.tiled_shared_memory` | `bool` | `true` | restart | Use tiled shared memory. |
+| `gpu.d3d12.texture_heaps` | `bool` | `true` | live | Place the textures that are not render targets or depth buffers in shared 256 MB heaps, not one committed resource each. Off is committed resources only, to compare. Hidden from the settings overlay outside debug builds. |
 | `gpu.d3d12.allow_tearing` | `bool` | `true` | live | Allow variable refresh rate and tearing. |
 | `gpu.d3d12.debug` | `bool` | `false` | startup only | Enable the Direct3D 12 and DXGI debug layer. |
 | `gpu.d3d12.break_on_error` | `bool` | `false` | live | Break into the debugger on a Direct3D 12 validation error. |
