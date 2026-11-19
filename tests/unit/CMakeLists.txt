@@ -241,6 +241,7 @@ add_executable(
   codegen/stack_slot_forwarding_test.cpp
   codegen/tail_call_test.cpp
   codegen/vector_pair_write_test.cpp
+  codegen/vmsum_mode_test.cpp
   codegen/setjmp_test.cpp
   codegen/skip_lr_test.cpp
   codegen/call_usage_test.cpp
