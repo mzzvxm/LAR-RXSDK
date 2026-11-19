@@ -83,6 +83,14 @@ class XenosSettings : public SettingOwner {
               Range{128, 8192}, kRestart);
   REX_SETTING(i32, texture_cache_memory_limit_soft_lifetime, 30,
               "Soft texture cache memory limit lifetime (seconds)", Range{1, 3600});
+  REX_SETTING(u32, render_target_max_height, 0,
+              "With host render targets, the tallest host render target to make, in pixels at 1x "
+              "resolution (a multiple of the EDRAM tile height, at least 32; 0: as tall as the "
+              "console's whole EDRAM from the base, up to 8192, which makes every render target "
+              "about 10 MB times the resolution scale squared, however little of it is drawn). A "
+              "title that never draws a surface taller than this loses nothing; a taller draw is "
+              "cut at the limit (logged). Memory only",
+              Range{0, 8192}, kRestart);
   REX_SETTING(bool, pre_mask_resolve_l2_block, true,
               "Mask scaled resolve L2 blocks to the write range before iterating");
   REX_SETTING(bool, force_convert_line_loops_to_strips, false,

@@ -556,6 +556,11 @@ class REX_GPU_XENOS_API RenderTargetCache : public rex::NonCopyable {
 
   RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
 
+  // render_target_max_height (0: off) as read at start-up, rounded to the
+  // tile height, and how many draws it has cut (logged, rate-limited).
+  u32 render_target_max_height_ = 0;
+  u64 render_target_max_height_clamped_draws_ = 0;
+
   /**
    * Reports whether changing ownership of the range would require transferring data.
    *
