@@ -123,6 +123,38 @@ class REX_GPU_XENOS_API RenderTargetCache : public rex::NonCopyable {
   virtual void BeginFrame();
 
   /**
+   * Reports whether host render targets that hold no data can be given back
+   * (gpu.xenos.render_target_trim_seconds).
+   *
+   * A host render target is made for each key a title uses and is otherwise kept for good, though
+   * one that owns no EDRAM range holds no data and can be made again when needed. The command
+   * processor calls this at the end of every frame; it reads the clock itself and says yes at most
+   * once a second. On yes, the command processor waits until the GPU is done with every submission
+   * and calls TrimUnusedRenderTargets.
+   */
+  bool IsTrimDue();
+
+  /**
+   * Frees the render targets that own no EDRAM range and have not been used for the time set (at
+   * most 2 seconds while set_trim_pressure(true): the host is short of video memory), and drops
+   * every pointer to them. The GPU must be done with every submission.
+   *
+   * @param freed_bytes_out Receives the host memory freed, may be null.
+   * @return How many render targets were freed.
+   */
+  u32 TrimUnusedRenderTargets(u64* freed_bytes_out = nullptr);
+
+  void SetTrimPressure(bool pressure) { trim_pressure_ = pressure; }
+
+  /**
+   * Returns how much host memory the render targets take, as the implementation reports it per
+   * render target.
+   *
+   * @param count_out Receives how many render targets are made, may be null.
+   */
+  u64 GetRenderTargetsHostMemoryBytes(u32* count_out = nullptr) const;
+
+  /**
    * Updates the bound render targets and EDRAM ownership for a draw.
    *
    * Render targets whose EDRAM base conflicts with another are eliminated. Lower indexed render
@@ -232,11 +264,21 @@ class REX_GPU_XENOS_API RenderTargetCache : public rex::NonCopyable {
     virtual ~RenderTarget() = default;
     RenderTargetKey GetKey() const { return key_; }
 
+    /** Returns the host memory the render target takes, 0 if the implementation does not say. */
+    u64 GetHostMemoryBytes() const { return host_memory_bytes_; }
+    void SetHostMemoryBytes(u64 bytes) { host_memory_bytes_ = bytes; }
+
+    /** Returns when, on the clock of RenderTargetCache::IsTrimDue, it was last asked for. */
+    u64 GetLastUsedMs() const { return last_used_ms_; }
+    void SetLastUsedMs(u64 ms) { last_used_ms_ = ms; }
+
    protected:
     RenderTarget(RenderTargetKey key) : key_(key) {}
 
    private:
     RenderTargetKey key_;
+    u64 host_memory_bytes_ = 0;
+    u64 last_used_ms_ = 0;
   };
 
   /**
@@ -555,6 +597,19 @@ class REX_GPU_XENOS_API RenderTargetCache : public rex::NonCopyable {
   }
 
   RenderTarget* GetOrCreateRenderTarget(RenderTargetKey key);
+
+  /**
+   * Called after render targets were freed (TrimUnusedRenderTargets), with no pointer to any of
+   * them left in the common code, for the implementation to drop what refers to them
+   * (framebuffers, the command list's render targets).
+   */
+  virtual void OnRenderTargetsTrimmed() {}
+
+  // The clock of IsTrimDue, and what limits the next check.
+  u64 trim_now_ms_ = 0;
+  u64 trim_next_check_ms_ = 0;
+  u64 trim_min_idle_ms_ = 0;
+  bool trim_pressure_ = false;
 
   // render_target_max_height (0: off) as read at start-up, rounded to the
   // tile height, and how many draws it has cut (logged, rate-limited).

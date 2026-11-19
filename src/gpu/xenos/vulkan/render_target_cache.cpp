@@ -1031,6 +1031,20 @@ void VulkanRenderTargetCache::ClearCache() {
   RenderTargetCache::ClearCache();
 }
 
+void VulkanRenderTargetCache::OnRenderTargetsTrimmed() {
+  const gpu::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
+  const VkDevice device = vulkan_device->GetDevice();
+
+  // As in ClearCache: framebuffers reference views of attachment images, which
+  // may be gone. The command processor has awaited all the submissions.
+  last_update_framebuffer_ = VK_NULL_HANDLE;
+  for (const auto& framebuffer_pair : framebuffers_) {
+    dfn.vkDestroyFramebuffer(device, framebuffer_pair.second.framebuffer, nullptr);
+  }
+  framebuffers_.clear();
+}
+
 void VulkanRenderTargetCache::CompletedSubmissionUpdated() {
   if (transfer_vertex_buffer_pool_) {
     transfer_vertex_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
@@ -1790,9 +1804,10 @@ std::unique_ptr<RenderTargetCache::RenderTarget> VulkanRenderTargetCache::Create
   }
   VkImage image;
   VkDeviceMemory memory;
+  VkDeviceSize memory_size = 0;
   if (!gpu::vulkan::objects::CreateDedicatedAllocationImage(
           vulkan_device, image_create_info, gpu::vulkan::objects::MemoryPurpose::kDeviceLocal,
-          image, memory)) {
+          image, memory, nullptr, &memory_size)) {
     REXGPU_FAIL(nullptr,
                 "VulkanRenderTarget: Failed to create a {}x{} {}xMSAA {} render target "
                 "image",
@@ -1951,9 +1966,11 @@ std::unique_ptr<RenderTargetCache::RenderTarget> VulkanRenderTargetCache::Create
   }
   dfn.vkUpdateDescriptorSets(device, key.is_depth ? 2 : 1, descriptor_set_write, 0, nullptr);
 
-  return std::make_unique<VulkanRenderTarget>(
+  auto render_target = std::make_unique<VulkanRenderTarget>(
       key, *this, image, memory, view_depth_color, view_depth_stencil, view_stencil, view_srgb,
       view_color_transfer_separate, descriptor_set_index_transfer_source);
+  render_target->SetHostMemoryBytes(static_cast<u64>(memory_size));
+  return render_target;
 }
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(

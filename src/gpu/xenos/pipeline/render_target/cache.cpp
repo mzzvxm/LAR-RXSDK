@@ -26,6 +26,7 @@
 #include <rex/xenos/state.h>
 #include <rex/logging/log_category.h>
 #include <rex/bit.h>
+#include <rex/chrono.h>
 
 namespace rex::gpu {
 
@@ -348,6 +349,108 @@ void RenderTargetCache::ClearCache() {
 
 void RenderTargetCache::BeginFrame() {
   ResetAccumulatedRenderTargets();
+}
+
+u64 RenderTargetCache::GetRenderTargetsHostMemoryBytes(u32* count_out) const {
+  u64 bytes = 0;
+  u32 count = 0;
+  for (const auto& render_target_pair : render_targets_) {
+    if (render_target_pair.second) {
+      ++count;
+      bytes += render_target_pair.second->GetHostMemoryBytes();
+    }
+  }
+  if (count_out) {
+    *count_out = count;
+  }
+  return bytes;
+}
+
+bool RenderTargetCache::IsTrimDue() {
+  const u64 now_ms = rex::Clock::QueryHostUptimeMillis();
+  const bool first_call = !trim_now_ms_;
+  trim_now_ms_ = now_ms;
+  if (first_call) {
+    // The render targets made until now carry no time: give them a while.
+    trim_next_check_ms_ = now_ms + 5000;
+    return false;
+  }
+  const u32 trim_seconds = settings_.render_target_trim_seconds.Get();
+  if (!trim_seconds || GetPath() != Path::kHostRenderTargets || now_ms < trim_next_check_ms_) {
+    return false;
+  }
+  trim_next_check_ms_ = now_ms + 1000;
+  // Short of video memory: what was used in the last couple of seconds is the
+  // working set (freeing it would only make it again), the rest goes.
+  trim_min_idle_ms_ = trim_pressure_
+                          ? std::min(static_cast<u64>(trim_seconds) * 1000, static_cast<u64>(2000))
+                          : static_cast<u64>(trim_seconds) * 1000;
+  // The render targets holding data (the owners of EDRAM ranges), as in
+  // ClearCache.
+  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
+  for (const auto& ownership_range_pair : ownership_ranges_) {
+    const OwnershipRange& ownership_range = ownership_range_pair.second;
+    owners.emplace(ownership_range.render_target);
+    owners.emplace(ownership_range.host_depth_render_target_unorm24);
+    owners.emplace(ownership_range.host_depth_render_target_float24);
+  }
+  for (const auto& render_target_pair : render_targets_) {
+    const RenderTarget* render_target = render_target_pair.second.get();
+    if (render_target && owners.find(render_target_pair.first) == owners.end() &&
+        render_target->GetLastUsedMs() + trim_min_idle_ms_ <= now_ms) {
+      return true;
+    }
+  }
+  return false;
+}
+
+u32 RenderTargetCache::TrimUnusedRenderTargets(u64* freed_bytes_out) {
+  u64 freed_bytes = 0;
+  u32 freed_count = 0;
+  std::unordered_set<RenderTargetKey, RenderTargetKey::Hasher> owners;
+  for (const auto& ownership_range_pair : ownership_ranges_) {
+    const OwnershipRange& ownership_range = ownership_range_pair.second;
+    owners.emplace(ownership_range.render_target);
+    owners.emplace(ownership_range.host_depth_render_target_unorm24);
+    owners.emplace(ownership_range.host_depth_render_target_float24);
+  }
+  for (auto it = render_targets_.begin(); it != render_targets_.end();) {
+    RenderTarget* render_target = it->second.get();
+    if (!render_target) {
+      // Failed to make (memory may be there now): let the next use try again.
+      it = render_targets_.erase(it);
+      continue;
+    }
+    if (owners.find(it->first) == owners.end() &&
+        render_target->GetLastUsedMs() + trim_min_idle_ms_ <= trim_now_ms_) {
+      freed_bytes += render_target->GetHostMemoryBytes();
+      ++freed_count;
+      it = render_targets_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (freed_count) {
+    // Nothing of the common code may keep a pointer to one that's gone.
+    std::memset(last_update_used_render_targets_, 0, sizeof(last_update_used_render_targets_));
+    std::memset(last_update_accumulated_render_targets_, 0,
+                sizeof(last_update_accumulated_render_targets_));
+    ResetAccumulatedRenderTargets();
+    for (std::vector<Transfer>& transfers : last_update_transfers_) {
+      transfers.clear();
+    }
+    OnRenderTargetsTrimmed();
+    REXGPU_INFO(
+        "RenderTargetCache: freed {} unused render targets ({} MB), {} left ({} MB), idle limit "
+        "{} s{}",
+        freed_count, freed_bytes >> 20, render_targets_.size(),
+        GetRenderTargetsHostMemoryBytes() >> 20, trim_min_idle_ms_ / 1000,
+        trim_pressure_ ? ", the video memory is short" : "");
+  }
+  if (freed_bytes_out) {
+    *freed_bytes_out = freed_bytes;
+  }
+  return freed_count;
 }
 
 bool RenderTargetCache::Update(bool is_rasterization_done,
@@ -1006,6 +1109,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
   RenderTarget* render_target;
   if (it_rt != render_targets_.end()) {
     render_target = it_rt->second.get();
+    if (render_target) {
+      render_target->SetLastUsedMs(trim_now_ms_);
+    }
   } else {
     std::unique_ptr<RenderTarget> created = CreateRenderTarget(key);
     render_target = created.get();
@@ -1025,6 +1131,9 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
           width, height, static_cast<u32>(1) << static_cast<u32>(key.msaa_samples),
           key.is_depth ? "depth" : "color", static_cast<u32>(key.resource_format),
           static_cast<u32>(key.base_tiles));
+    }
+    if (render_target) {
+      render_target->SetLastUsedMs(trim_now_ms_);
     }
     render_targets_.emplace(key, std::move(created));
   }

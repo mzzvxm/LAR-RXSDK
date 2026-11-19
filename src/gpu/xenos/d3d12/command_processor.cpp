@@ -3594,6 +3594,10 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
       render_target_cache_->ClearCache();
 
       shared_memory_->ClearCache();
+    } else if (!cache_clear_requested_ && render_target_cache_ &&
+               render_target_cache_->IsTrimDue() && AwaitAllQueueOperationsCompletion()) {
+      // The GPU is done with everything submitted: render targets that hold no data can go.
+      render_target_cache_->TrimUnusedRenderTargets();
     }
   }
 

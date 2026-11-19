@@ -91,6 +91,13 @@ class XenosSettings : public SettingOwner {
               "title that never draws a surface taller than this loses nothing; a taller draw is "
               "cut at the limit (logged). Memory only",
               Range{0, 8192}, kRestart);
+  REX_SETTING(u32, render_target_trim_seconds, 0,
+              "With host render targets, free the ones that hold no EDRAM data (another render "
+              "target has the tiles they last had) and have not been used for this many seconds "
+              "(0: keep every one made). They are made again if needed, which takes a few "
+              "milliseconds each (a hitch when the pause menu opens after a long time). A trim "
+              "waits for the GPU to finish a frame",
+              Range{0, 3600});
   REX_SETTING(bool, pre_mask_resolve_l2_block, true,
               "Mask scaled resolve L2 blocks to the write range before iterating");
   REX_SETTING(bool, force_convert_line_loops_to_strips, false,
