@@ -426,6 +426,13 @@ void CommandProcessor::WriteRegister(u32 index, u32 value) {
   }
 #endif
 
+  if (IsSpecialRegister(index)) {
+    HandleSpecialRegisterWrite(index, value);
+  }
+}
+
+void CommandProcessor::HandleSpecialRegisterWrite(u32 index, u32 value) {
+  xenos::RegisterFile& regs = *register_file_;
   if (index >= std::to_underlying(xenos::Register::SCRATCH_REG0) &&
       index <= std::to_underlying(xenos::Register::SCRATCH_REG7)) {
     u32 scratch_reg = index - std::to_underlying(xenos::Register::SCRATCH_REG0);
@@ -750,6 +757,12 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, u32 packet
 
   u32 base_index = (packet & 0x7FFF);
   u32 write_one_reg = (packet >> 15) & 0x1;
+  if (!write_one_reg) {
+    // A block of consecutive registers: the range path lets the driver copy ordinary registers in
+    // bulk instead of one virtual WriteRegister call per register. Same registers, same order.
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   for (u32 m = 0; m < count; m++) {
     u32 reg_data = reader->ReadAndSwap<u32>();
     u32 target_index = write_one_reg ? base_index : base_index + m;

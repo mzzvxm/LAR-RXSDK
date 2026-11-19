@@ -39,6 +39,7 @@
 #include <rex/utility.h>
 #include <rex/platform/sync.h>
 #include "gpu/xenos/host/presenter.h"
+#include "gpu/xenos/register_blocks.h"
 #include "gpu/xenos/resolve_rules.h"
 #include "gpu/xenos/xenos_export.h"
 
@@ -245,6 +246,8 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
    * although the documentation says bit 7 is ignored for PWL.
    */
   virtual void WriteRegister(u32 index, u32 value);
+  /** The part of a write that goes beyond storing, for a register IsSpecialRegister names. */
+  void HandleSpecialRegisterWrite(u32 index, u32 value);
   u32 ReadRegisterValue(u32 index) const;
   virtual void WriteRegistersFromMem(u32 start_index, u32* base, u32 num_registers);
   virtual void WriteRegisterRangeFromRing(memory::RingBuffer* ring, u32 base, u32 num_registers);
