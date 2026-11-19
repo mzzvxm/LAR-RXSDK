@@ -3,6 +3,7 @@ set(CMAKE_FOLDER "tests/unit")
 add_executable(
   unit_tests
   test_memory.cpp
+  test_title_settings.cpp
   crash_child_runner.cpp
   hid/xam_input_error_test.cpp
   apu/audio_system_test.cpp
