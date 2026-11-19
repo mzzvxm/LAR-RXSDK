@@ -18,6 +18,7 @@
 #include <rex/input/flags.h>
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 #include <rex/ui/virtual_key.h>
 
 REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
@@ -109,6 +110,18 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
           },
           this);
 
+      // SDL's event loop reads the joysticks itself, and while any pad is open it wakes the UI
+      // thread every millisecond to do it, all session long. Only the guest reads pad state, and
+      // it does so once a frame from its own thread, so it reads them (RefreshJoystickState)
+      // and the UI thread sleeps until a window event. The environment variable
+      // SDL_AUTO_UPDATE_JOYSTICKS outranks this call (SDL's rule for hints), so setting it to 1
+      // brings the old behaviour back for a comparison. macOS keeps the UI thread's read: its
+      // joystick drivers are serviced by the thread that started SDL.
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_LINUX
+      SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+#endif
+      on_demand_update_ = !SDL_GetHintBoolean(SDL_HINT_AUTO_UPDATE_JOYSTICKS, true);
+
       // Initialize game controller subsystem
       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         REXLOG_ERROR("SDL: Failed to init gamecontroller subsystem: {}", SDL_GetError());
@@ -135,7 +148,17 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
           }
         }
       }
-      REXLOG_INFO("SDL input driver initialized successfully");
+      if (on_demand_update_) {
+        // Hot-plug needs somebody to read the joysticks while the guest is not asking: with no
+        // pad open nothing calls GetDeviceState at all, and SDL only notices a new pad inside
+        // that read. Slower than the 3 s SDL's own loop used with no pad open.
+        idle_update_timer_ = SDL_AddTimer(JoystickUpdateGate::kIdleTimerMs, IdleUpdateTimer, this);
+        if (!idle_update_timer_) {
+          REXLOG_WARN("SDL: could not start the idle joystick timer: {}", SDL_GetError());
+        }
+      }
+      REXLOG_INFO("SDL input driver initialized successfully (joystick reads: {})",
+                  on_demand_update_ ? "by the guest's calls" : "by SDL's event loop");
     });
   }
 }
@@ -146,6 +169,10 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
     if (sdl_pumpevents_queued_) {
       attached_window_->app_context().CallInUIThreadSynchronous(
           [this]() { attached_window_->app_context().ExecutePendingFunctionsFromUIThread(); });
+    }
+    if (idle_update_timer_) {
+      SDL_RemoveTimer(idle_update_timer_);
+      idle_update_timer_ = 0;
     }
     for (auto& controller : controllers_) {
       SDL_CloseGamepad(controller.sdl);
@@ -199,7 +226,7 @@ X_RESULT SDLInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  QueueControllerUpdate();
+  RefreshJoystickState();
 
   auto guard = DrainAndLock();
 
@@ -223,7 +250,7 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   auto is_active = this->is_active();
 
   if (is_active) {
-    QueueControllerUpdate();
+    RefreshJoystickState();
   }
 
   auto guard = DrainAndLock();
@@ -253,7 +280,7 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
 X_RESULT SDLInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
 
-  QueueControllerUpdate();
+  RefreshJoystickState();
 
   auto guard = DrainAndLock();
 
@@ -327,7 +354,7 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
   auto is_active = this->is_active();
 
   if (is_active) {
-    QueueControllerUpdate();
+    RefreshJoystickState();
   }
 
   auto guard = DrainAndLock();
@@ -715,6 +742,30 @@ void SDLInputDriver::QueueControllerUpdate() {
       sdl_pumpevents_queued_ = false;
     });
   }
+}
+
+void SDLInputDriver::RefreshJoystickState() {
+  if (!on_demand_update_) {
+    QueueControllerUpdate();
+    return;
+  }
+  // On this thread, before the controller lock below is taken: SDL pushes the resulting events
+  // through HandleEvent, which only buffers them, and DrainAndLock then applies them, so the
+  // state read right after is current. SDL_UpdateJoysticks may be called from any thread.
+  if (update_gate_.TryBegin(SDL_GetTicksNS() + 1, JoystickUpdateGate::kGuestMinGapNs)) {
+    SDL_UpdateJoysticks();
+  }
+}
+
+Uint32 SDLCALL SDLInputDriver::IdleUpdateTimer(void* userdata, SDL_TimerID /*timer_id*/,
+                                               Uint32 interval) {
+  // Runs on SDL's timer thread. While the guest reads pads every frame this finds a recent read
+  // and does nothing.
+  auto* driver = static_cast<SDLInputDriver*>(userdata);
+  if (driver->update_gate_.TryBegin(SDL_GetTicksNS() + 1, JoystickUpdateGate::kIdleMaxAgeNs)) {
+    SDL_UpdateJoysticks();
+  }
+  return interval;
 }
 
 // Check if the analog inputs exceed their thresholds to become a button press
