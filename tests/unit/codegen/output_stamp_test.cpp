@@ -53,6 +53,28 @@ REX_TEST_CASE("Identical inputs produce identical fingerprints", "[codegen][outp
         ComputeInputFingerprint(inputs, "1.2.3", flags));
 }
 
+REX_TEST_CASE("The order the inputs are listed in does not change the fingerprint",
+              "[codegen][output_stamp]") {
+  // The build step spells the manifest as an absolute path and a run from the project folder as a
+  // relative one, so the same inputs reach the fingerprint sorted differently.
+  Scratch scratch("order");
+  auto binary = scratch.WriteFile("game.xex", "binary bytes");
+  auto config = scratch.WriteFile("game.toml", "project = 'x'");
+  auto manifest = scratch.WriteFile("game_manifest.toml", "[project]");
+
+  std::vector<fs::path> sorted{config, manifest, binary};
+  std::vector<fs::path> shuffled{manifest, binary, config};
+  std::vector<std::string> flags{"max_file_size_bytes=2097152"};
+
+  CHECK(ComputeInputFingerprint(sorted, "1.2.3", flags) ==
+        ComputeInputFingerprint(shuffled, "1.2.3", flags));
+
+  // A file that is not listed at all still changes it.
+  std::vector<fs::path> fewer{manifest, binary};
+  CHECK(ComputeInputFingerprint(sorted, "1.2.3", flags) !=
+        ComputeInputFingerprint(fewer, "1.2.3", flags));
+}
+
 REX_TEST_CASE("Changed file content changes the fingerprint", "[codegen][output_stamp]") {
   Scratch scratch("content");
   auto binary = scratch.WriteFile("game.xex", "binary bytes");

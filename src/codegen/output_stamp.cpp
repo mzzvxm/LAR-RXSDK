@@ -1,5 +1,6 @@
 #include "output_stamp.h"
 
+#include <algorithm>
 #include <fstream>
 
 #include <format>
@@ -67,6 +68,14 @@ std::string ComputeInputFingerprint(std::span<const std::filesystem::path> input
     accumulator += '\n';
   }
 
+  // The callers sort the inputs by path, so their order depends on how a path is spelled: the build
+  // step passes the manifest as an absolute path, `rexglue codegen larecomp_manifest.toml` as a
+  // relative one, and the same files sort differently. A fingerprint that followed that order
+  // made the build step regenerate everything the first time it ran after a manual run. The
+  // entries name a file by its base name and content only, so they are sorted here and the order
+  // of `input_files` does not matter.
+  std::vector<std::string> entries;
+  entries.reserve(input_files.size());
   for (const auto& path : input_files) {
     // Hash content, not mtime, so the stamp survives a checkout, a copy or a touch.
     std::error_code ec;
@@ -80,7 +89,11 @@ std::string ComputeInputFingerprint(std::span<const std::filesystem::path> input
                              std::filesystem::last_write_time(path, ec).time_since_epoch().count());
       }
     }
-    accumulator += std::format("file={} {}\n", path.filename().string(), digest);
+    entries.push_back(std::format("file={} {}\n", path.filename().string(), digest));
+  }
+  std::sort(entries.begin(), entries.end());
+  for (const auto& entry : entries) {
+    accumulator += entry;
   }
 
   return rex::HashBytes(accumulator);
