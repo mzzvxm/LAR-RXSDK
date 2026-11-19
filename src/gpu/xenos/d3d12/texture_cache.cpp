@@ -1133,6 +1133,7 @@ bool D3D12TextureCache::CommitScaledResolveMemory(u32 start_unscaled, u32 length
     UINT range_tile_count = kScaledResolveHeapSize / D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
     std::array<size_t, 2> buffer_indices =
         GetPossibleScaledResolveBufferIndices(static_cast<u64>(i) << kScaledResolveHeapSizeLog2);
+    command_processor_.AwaitSubmissionsInQueue();
     for (size_t j = 0; j < 2; ++j) {
       size_t buffer_index = buffer_indices[j];
       if (j && buffer_index == buffer_indices[0]) {

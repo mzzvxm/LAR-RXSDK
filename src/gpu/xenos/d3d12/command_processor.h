@@ -14,8 +14,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -37,6 +39,7 @@
 #include "gpu/xenos/draw_state.h"
 #include <rex/xenos/format.h>
 #include <rex/xenos/state.h>
+#include <rex/platform/thread.h>
 #include "gpu/xenos/host/d3d12/d3d12_descriptor_heap_pool.h"
 #include "gpu/xenos/host/d3d12/d3d12_provider.h"
 #include "gpu/xenos/host/d3d12/d3d12_settings.h"
@@ -79,6 +82,10 @@ class D3D12CommandProcessor : public CommandProcessor {
   void NotifyQueueOperationsDoneDirectly() {
     queue_operations_done_since_submission_signal_ = true;
   }
+  // Must be called before a subsystem does something like UpdateTileMappings,
+  // so it reaches the queue after the submissions already ended, as it does
+  // without threaded submission.
+  void AwaitSubmissionsInQueue() { AwaitSubmissionThread(); }
 
   u64 GetCurrentFrame() const { return frame_current_; }
   u64 GetCompletedFrame() const { return frame_completed_; }
@@ -381,6 +388,24 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12PipelineState* msaa_line_guard_pipelines_[2] = {};
   mutable std::atomic<u64> msaa_line_guard_binds_{0};
 
+  // Threaded submission: EndSubmission hands the deferred commands to a thread
+  // that replays them into command_list_ and submits them, while the command
+  // processor goes on with the next packets. Without it, that replay (mostly
+  // driver time) runs on the command processor thread at every submission. The
+  // thread also signals submission_fence_, so awaiting a submission's fence
+  // value covers its replay too.
+  struct SubmissionJob {
+    u64 submission;
+    ID3D12CommandAllocator* command_allocator;
+    std::vector<uintmax_t> stream;
+  };
+  // Starts the thread if needed; returns whether it's running.
+  bool StartSubmissionThread();
+  void SubmissionThread();
+  // Waits until the thread has submitted everything handed to it.
+  void AwaitSubmissionThread();
+  void ShutdownSubmissionThread();
+
   /**
    * Requests descriptors and rebinds the descriptor heap on the draw command list. See
    * D3D12DescriptorHeapPool::Request for the partial and full update counts. Not for bindless
@@ -495,6 +520,22 @@ class D3D12CommandProcessor : public CommandProcessor {
   ID3D12GraphicsCommandList* command_list_ = nullptr;
   ID3D12GraphicsCommandList1* command_list_1_ = nullptr;
   DeferredCommandList deferred_command_list_;
+
+  // Threaded submission (SubmissionJob). While the thread is running, only it
+  // uses command_list_; the command processor thread drains it first.
+  std::unique_ptr<rex::platform::Thread> submission_thread_;
+  std::mutex submission_thread_mutex_;
+  std::condition_variable submission_thread_request_cond_;
+  std::condition_variable submission_thread_done_cond_;
+  std::deque<SubmissionJob> submission_thread_jobs_;
+  std::vector<std::vector<uintmax_t>> submission_thread_free_streams_;
+  bool submission_thread_shutdown_ = false;
+  // The last submission handed to the thread (command processor thread only)
+  // and the last one the thread has submitted.
+  u64 submission_thread_queued_ = 0;
+  std::atomic<u64> submission_thread_submitted_{0};
+  // Draws in the open submission (the threaded_submission_split_draws setting).
+  u32 submission_draws_ = 0;
 
   bool debug_markers_enabled_ = false;
 

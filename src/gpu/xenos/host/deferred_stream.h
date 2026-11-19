@@ -42,6 +42,12 @@ class DeferredStream {
   /** Discards every command and keeps the capacity. */
   void Clear() { stream_.clear(); }
 
+  /**
+   * Exchanges the elements with a vector, to hand the recorded commands to another thread and
+   * take back an empty vector (with its capacity) to record into.
+   */
+  void Swap(std::vector<uintmax_t>& elements) { stream_.swap(elements); }
+
   const uintmax_t* Data() const { return stream_.data(); }
 
   size_t Size() const { return stream_.size(); }
