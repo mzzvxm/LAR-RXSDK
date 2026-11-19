@@ -43,6 +43,9 @@ namespace shaders {
 #include "../shaders/vulkan_spirv/texture_load_8bpb_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_8bpb_scaled_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_bgrg8_rgb8_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_copy_to_image_128bpp_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_copy_to_image_32bpp_cs.h"
+#include "../shaders/vulkan_spirv/texture_load_copy_to_image_64bpp_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_ctx1_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_depth_float_cs.h"
 #include "../shaders/vulkan_spirv/texture_load_depth_float_scaled_cs.h"
@@ -95,6 +98,9 @@ namespace {
 // Invalid fetch constant reads sample 0 in all channels.
 constexpr VkFormat kInvalidTextureFetchFallbackFormat = VK_FORMAT_R8G8B8A8_UNORM;
 const VkClearColorValue kInvalidTextureFetchFallbackColor = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+// Textures smaller than this keep vkCmdCopyBufferToImage when the storage copy is on.
+constexpr u64 kStorageCopyMinSizeBytes = 64 * 1024;
 
 }  // namespace
 
@@ -427,6 +433,14 @@ VulkanTextureCache::~VulkanTextureCache() {
   }
   if (load_pipeline_layout_ != VK_NULL_HANDLE) {
     dfn.vkDestroyPipelineLayout(device, load_pipeline_layout_, nullptr);
+  }
+  for (VkPipeline storage_copy_pipeline : storage_copy_pipelines_) {
+    if (storage_copy_pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, storage_copy_pipeline, nullptr);
+    }
+  }
+  if (storage_copy_pipeline_layout_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyPipelineLayout(device, storage_copy_pipeline_layout_, nullptr);
   }
 
   // Destroy all textures before VMA, which allocated their memory.
@@ -1044,7 +1058,8 @@ u32 VulkanTextureCache::GetMaxHostTextureDepthOrArraySize(xenos::DataDimension d
 }
 
 std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(TextureKey key) {
-  VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+  // The third is for the storage view of texture_load_storage_copy.
+  VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
   const HostFormatPair& host_format = GetHostFormatPair(key);
   if (host_format.format_signed.format == VK_FORMAT_UNDEFINED) {
     formats[0] = host_format.format_unsigned.format;
@@ -1072,12 +1087,18 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
   bool is_3d = key.dimension == xenos::DataDimension::k3D;
   u32 depth_or_array_size = key.GetDepthOrArraySize();
 
+  u32 view_format_count = formats[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
+  VkFormat storage_copy_format = GetStorageCopyFormat(key, formats, view_format_count);
+  if (storage_copy_format != VK_FORMAT_UNDEFINED) {
+    formats[view_format_count++] = storage_copy_format;
+  }
+
   VkImageCreateInfo image_create_info;
   VkImageCreateInfo* image_create_info_last = &image_create_info;
   image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_create_info.pNext = nullptr;
   image_create_info.flags = 0;
-  if (formats[1] != VK_FORMAT_UNDEFINED) {
+  if (view_format_count > 1) {
     image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   }
   if (key.dimension == xenos::DataDimension::kCube) {
@@ -1097,18 +1118,20 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
   image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
   image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  if (storage_copy_format != VK_FORMAT_UNDEFINED) {
+    image_create_info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+  }
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_create_info.queueFamilyIndexCount = 0;
   image_create_info.pQueueFamilyIndices = nullptr;
   image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImageFormatListCreateInfo image_format_list_create_info;
-  if (formats[1] != VK_FORMAT_UNDEFINED &&
-      vulkan_device->GetExtensions().ext_1_2_KHR_image_format_list) {
+  if (view_format_count > 1 && vulkan_device->GetExtensions().ext_1_2_KHR_image_format_list) {
     image_create_info_last->pNext = &image_format_list_create_info;
     image_create_info_last = reinterpret_cast<VkImageCreateInfo*>(&image_format_list_create_info);
     image_format_list_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
     image_format_list_create_info.pNext = nullptr;
-    image_format_list_create_info.viewFormatCount = 2;
+    image_format_list_create_info.viewFormatCount = view_format_count;
     image_format_list_create_info.pViewFormats = formats;
   }
 
@@ -1122,7 +1145,107 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
     return nullptr;
   }
 
-  return std::make_unique<VulkanTexture>(*this, key, image, allocation);
+  auto texture = std::make_unique<VulkanTexture>(*this, key, image, allocation);
+  texture->set_storage_copy_format(storage_copy_format);
+  return texture;
+}
+
+bool VulkanTextureCache::IsStorageImageFormat(VkFormat format) {
+  auto it = storage_image_formats_.find(format);
+  if (it != storage_image_formats_.end()) {
+    return it->second;
+  }
+  const gpu::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  VkFormatProperties format_properties;
+  vulkan_device->GetVulkanInstance()->GetFunctions().vkGetPhysicalDeviceFormatProperties(
+      vulkan_device->GetPhysicalDevice(), format, &format_properties);
+  bool is_storage_image =
+      (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+  storage_image_formats_.emplace(format, is_storage_image);
+  return is_storage_image;
+}
+
+VkFormat VulkanTextureCache::GetStorageCopyFormat(TextureKey key, const VkFormat* view_formats,
+                                                  u32 view_format_count) {
+  // Only single-level 2D (and stacked and cube) textures: the copy is of one
+  // level, and 3D images would need another shader.
+  if (storage_copy_pipeline_layout_ == VK_NULL_HANDLE || key.mip_max_level != 0 ||
+      key.dimension == xenos::DataDimension::k3D) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  // The format the load writes in (as in LoadTextureDataFromResidentMemoryImpl).
+  const HostFormatPair& host_format_pair = GetHostFormatPair(key);
+  bool host_format_is_signed;
+  if (IsSignedVersionSeparateForFormat(key)) {
+    host_format_is_signed = bool(key.signed_separate);
+  } else {
+    host_format_is_signed = host_format_pair.format_unsigned.load_shader == kLoadShaderIndexUnknown;
+  }
+  const HostFormat& host_format =
+      host_format_is_signed ? host_format_pair.format_signed : host_format_pair.format_unsigned;
+  if (host_format.load_shader == kLoadShaderIndexUnknown || host_format.block_compressed) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  // The unsigned integer view must be in the same compatibility class as the
+  // view formats: only plain 32, 64 and 128 bit color formats.
+  u32 texel_size = 0;
+  for (u32 i = 0; i < view_format_count; ++i) {
+    u32 view_texel_size;
+    switch (view_formats[i]) {
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_SNORM:
+      case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+      case VK_FORMAT_R16G16_UNORM:
+      case VK_FORMAT_R16G16_SNORM:
+      case VK_FORMAT_R16G16_SFLOAT:
+      case VK_FORMAT_R32_SFLOAT:
+      case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        view_texel_size = 4;
+        break;
+      case VK_FORMAT_R16G16B16A16_UNORM:
+      case VK_FORMAT_R16G16B16A16_SNORM:
+      case VK_FORMAT_R16G16B16A16_SFLOAT:
+      case VK_FORMAT_R32G32_SFLOAT:
+        view_texel_size = 8;
+        break;
+      case VK_FORMAT_R32G32B32A32_SFLOAT:
+        view_texel_size = 16;
+        break;
+      default:
+        return VK_FORMAT_UNDEFINED;
+    }
+    if (i && view_texel_size != texel_size) {
+      return VK_FORMAT_UNDEFINED;
+    }
+    texel_size = view_texel_size;
+  }
+  // The load writes texels of this size.
+  if (GetLoadShaderInfo(host_format.load_shader).bytes_per_host_block != texel_size) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  u64 size_bytes =
+      static_cast<u64>(key.GetWidth()) * key.GetHeight() * key.GetDepthOrArraySize() * texel_size;
+  if (key.scaled_resolve) {
+    size_bytes *= static_cast<u64>(GetDrawResolutionScaleX()) * GetDrawResolutionScaleY();
+  }
+  if (size_bytes < kStorageCopyMinSizeBytes) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  VkFormat storage_copy_format = texel_size == 4   ? VK_FORMAT_R32_UINT
+                                 : texel_size == 8 ? VK_FORMAT_R16G16B16A16_UINT
+                                                   : VK_FORMAT_R32G32B32A32_UINT;
+  // Every view format of an image with the storage usage must support it.
+  if (!IsStorageImageFormat(storage_copy_format)) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  for (u32 i = 0; i < view_format_count; ++i) {
+    if (!IsStorageImageFormat(view_formats[i])) {
+      return VK_FORMAT_UNDEFINED;
+    }
+  }
+  return storage_copy_format;
 }
 
 bool VulkanTextureCache::CommitScaledResolveMemory(u32 start_unscaled, u32 length_unscaled,
@@ -1609,13 +1732,98 @@ bool VulkanTextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture,
     }
   }
 
+  vulkan_texture.MarkAsUsed();
+
+  // texture_load_storage_copy: write the image in a compute shader
+  // through an unsigned integer view of the texel size. vkCmdCopyBufferToImage
+  // from the scratch buffer runs at about 60 GB/s on some drivers (NVIDIA,
+  // Windows), a few times slower than the memory bandwidth the dispatches and
+  // the Direct3D 12 copy get.
+  if (vulkan_texture.storage_copy_format() != VK_FORMAT_UNDEFINED && level_first == 0 &&
+      level_last == 0 && level_packed != 0) {
+    u32 texel_size = load_shader_info.bytes_per_host_block;
+    u32 texel_size_index = texel_size == 4 ? 0 : (texel_size == 8 ? 1 : 2);
+    VkPipeline storage_copy_pipeline = storage_copy_pipelines_[texel_size_index];
+    VkImageView storage_copy_view = vulkan_texture.GetStorageCopyView();
+    VkDescriptorSet descriptor_set_storage_image = VK_NULL_HANDLE;
+    if (storage_copy_pipeline != VK_NULL_HANDLE && storage_copy_view != VK_NULL_HANDLE) {
+      descriptor_set_storage_image = command_processor_.AllocateSingleTransientDescriptor(
+          VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute);
+    }
+    if (descriptor_set_storage_image != VK_NULL_HANDLE) {
+      VkDescriptorImageInfo storage_image_info;
+      storage_image_info.sampler = VK_NULL_HANDLE;
+      storage_image_info.imageView = storage_copy_view;
+      storage_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      VkWriteDescriptorSet write_descriptor_set_storage_image;
+      write_descriptor_set_storage_image.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write_descriptor_set_storage_image.pNext = nullptr;
+      write_descriptor_set_storage_image.dstSet = descriptor_set_storage_image;
+      write_descriptor_set_storage_image.dstBinding = 0;
+      write_descriptor_set_storage_image.dstArrayElement = 0;
+      write_descriptor_set_storage_image.descriptorCount = 1;
+      write_descriptor_set_storage_image.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+      write_descriptor_set_storage_image.pImageInfo = &storage_image_info;
+      write_descriptor_set_storage_image.pBufferInfo = nullptr;
+      write_descriptor_set_storage_image.pTexelBufferView = nullptr;
+      dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_storage_image, 0, nullptr);
+
+      command_processor_.PushBufferMemoryBarrier(
+          scratch_buffer, 0, VK_WHOLE_SIZE,
+          scratch_buffer_acquisition.SetStageMask(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          scratch_buffer_acquisition.SetAccessMask(VK_ACCESS_SHADER_READ_BIT),
+          VK_ACCESS_SHADER_READ_BIT);
+      // The only level, all the layers, is overwritten: the old contents don't
+      // need to be kept (VK_IMAGE_LAYOUT_UNDEFINED), only the previous accesses
+      // completed. Not skipped if the previous usage is also this copy, to
+      // order the two writes.
+      VulkanTexture::Usage texture_old_usage =
+          vulkan_texture.SetUsage(VulkanTexture::Usage::kStorageCopyDestination);
+      VkPipelineStageFlags texture_src_stage_mask, texture_dst_stage_mask;
+      VkAccessFlags texture_src_access_mask, texture_dst_access_mask;
+      VkImageLayout texture_old_layout, texture_new_layout;
+      GetTextureUsageMasks(texture_old_usage, texture_src_stage_mask, texture_src_access_mask,
+                           texture_old_layout);
+      GetTextureUsageMasks(VulkanTexture::Usage::kStorageCopyDestination, texture_dst_stage_mask,
+                           texture_dst_access_mask, texture_new_layout);
+      command_processor_.PushImageMemoryBarrier(
+          vulkan_texture.GetImage(), gpu::vulkan::objects::BuildSubresourceRange(),
+          texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
+          texture_dst_access_mask, VK_IMAGE_LAYOUT_UNDEFINED, texture_new_layout,
+          VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
+      command_processor_.SubmitBarriers(true);
+
+      command_processor_.BindExternalComputePipeline(storage_copy_pipeline);
+      VkDescriptorSet storage_copy_descriptor_sets[kStorageCopyDescriptorSetCount];
+      storage_copy_descriptor_sets[kStorageCopyDescriptorSetIndexSource] = descriptor_set_dest;
+      storage_copy_descriptor_sets[kStorageCopyDescriptorSetIndexDestination] =
+          descriptor_set_storage_image;
+      command_buffer.CmdVkBindDescriptorSets(
+          VK_PIPELINE_BIND_POINT_COMPUTE, storage_copy_pipeline_layout_, 0,
+          kStorageCopyDescriptorSetCount, storage_copy_descriptor_sets, 0, nullptr);
+      StorageCopyConstants storage_copy_constants;
+      storage_copy_constants.offset = static_cast<u32>(host_layout_base.offset_bytes / texel_size);
+      storage_copy_constants.row_pitch = host_layout_base.x_pitch_blocks;
+      storage_copy_constants.layer_pitch =
+          static_cast<u32>(host_layout_base.layer_size_bytes / texel_size);
+      storage_copy_constants.width = width * texture_resolution_scale_x;
+      storage_copy_constants.height = height * texture_resolution_scale_y;
+      command_buffer.CmdVkPushConstants(storage_copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                                        0, sizeof(storage_copy_constants), &storage_copy_constants);
+      command_buffer.CmdVkDispatch((storage_copy_constants.width + 31) / 32,
+                                   (storage_copy_constants.height + 7) / 8, array_size);
+      return true;
+    }
+  }
+
+  // Submit copying from the copy buffer to the host texture.
   command_processor_.PushBufferMemoryBarrier(
       scratch_buffer, 0, VK_WHOLE_SIZE,
       scratch_buffer_acquisition.SetStageMask(VK_PIPELINE_STAGE_TRANSFER_BIT),
       VK_PIPELINE_STAGE_TRANSFER_BIT,
       scratch_buffer_acquisition.SetAccessMask(VK_ACCESS_TRANSFER_READ_BIT),
       VK_ACCESS_TRANSFER_READ_BIT);
-  vulkan_texture.MarkAsUsed();
   VulkanTexture::Usage texture_old_usage =
       vulkan_texture.SetUsage(VulkanTexture::Usage::kTransferDestination);
   if (texture_old_usage != VulkanTexture::Usage::kTransferDestination) {
@@ -1747,7 +1955,42 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
   if (image_view_3d_as_2d_signed_ != VK_NULL_HANDLE) {
     dfn.vkDestroyImageView(device, image_view_3d_as_2d_signed_, nullptr);
   }
+  if (storage_copy_view_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImageView(device, storage_copy_view_, nullptr);
+  }
   vmaDestroyImage(vulkan_texture_cache.vma_allocator_, image_, allocation_);
+}
+
+VkImageView VulkanTextureCache::VulkanTexture::GetStorageCopyView() {
+  if (storage_copy_view_ != VK_NULL_HANDLE || storage_copy_format_ == VK_FORMAT_UNDEFINED) {
+    return storage_copy_view_;
+  }
+  const VulkanTextureCache& vulkan_texture_cache =
+      static_cast<const VulkanTextureCache&>(GetTextureCache());
+  const gpu::vulkan::VulkanDevice* const vulkan_device =
+      vulkan_texture_cache.command_processor_.GetVulkanDevice();
+  VkImageViewCreateInfo view_create_info;
+  view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_create_info.pNext = nullptr;
+  view_create_info.flags = 0;
+  view_create_info.image = GetImage();
+  // 2D textures, stacked ones and cube maps (all six faces) alike.
+  view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  view_create_info.format = storage_copy_format_;
+  view_create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+  view_create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+  view_create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+  view_create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+  view_create_info.subresourceRange =
+      gpu::vulkan::objects::BuildSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
+  if (vulkan_device->GetFunctions().vkCreateImageView(vulkan_device->GetDevice(), &view_create_info,
+                                                      nullptr, &storage_copy_view_) != VK_SUCCESS) {
+    REXGPU_ERROR("VulkanTextureCache: Failed to create a storage view for copying a texture");
+    // Use vkCmdCopyBufferToImage from now on.
+    storage_copy_format_ = VK_FORMAT_UNDEFINED;
+    storage_copy_view_ = VK_NULL_HANDLE;
+  }
+  return storage_copy_view_;
 }
 
 VkImageView VulkanTextureCache::VulkanTexture::GetView(bool is_signed, u32 host_swizzle,
@@ -2793,6 +3036,57 @@ bool VulkanTextureCache::Initialize() {
     }
   }
 
+  // texture_load_storage_copy pipelines. Without them, all textures are
+  // copied with vkCmdCopyBufferToImage.
+  const std::string& storage_copy_mode =
+      command_processor_.GetVulkanSettings().texture_load_storage_copy.Get();
+  if (storage_copy_mode == "on" ||
+      (storage_copy_mode == "auto" && device_properties.vendorID == 0x10DE)) {
+    VkDescriptorSetLayout storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetCount];
+    storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetIndexSource] =
+        load_descriptor_set_layout_storage_buffer;
+    storage_copy_descriptor_set_layouts[kStorageCopyDescriptorSetIndexDestination] =
+        command_processor_.GetSingleTransientDescriptorLayout(
+            VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageImageCompute);
+    VkPushConstantRange storage_copy_push_constant_range;
+    storage_copy_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    storage_copy_push_constant_range.offset = 0;
+    storage_copy_push_constant_range.size = sizeof(StorageCopyConstants);
+    VkPipelineLayoutCreateInfo storage_copy_pipeline_layout_create_info;
+    storage_copy_pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    storage_copy_pipeline_layout_create_info.pNext = nullptr;
+    storage_copy_pipeline_layout_create_info.flags = 0;
+    storage_copy_pipeline_layout_create_info.setLayoutCount = kStorageCopyDescriptorSetCount;
+    storage_copy_pipeline_layout_create_info.pSetLayouts = storage_copy_descriptor_set_layouts;
+    storage_copy_pipeline_layout_create_info.pushConstantRangeCount = 1;
+    storage_copy_pipeline_layout_create_info.pPushConstantRanges =
+        &storage_copy_push_constant_range;
+    if (dfn.vkCreatePipelineLayout(device, &storage_copy_pipeline_layout_create_info, nullptr,
+                                   &storage_copy_pipeline_layout_) != VK_SUCCESS) {
+      REXGPU_ERROR("VulkanTextureCache: Failed to create the texture storage copy pipeline layout");
+      storage_copy_pipeline_layout_ = VK_NULL_HANDLE;
+    } else {
+      const std::pair<const u32*, size_t> storage_copy_shader_code[] = {
+          {shaders::kTextureLoadCopyToImage32BPPCS,
+           sizeof(shaders::kTextureLoadCopyToImage32BPPCS)},
+          {shaders::kTextureLoadCopyToImage64BPPCS,
+           sizeof(shaders::kTextureLoadCopyToImage64BPPCS)},
+          {shaders::kTextureLoadCopyToImage128BPPCS,
+           sizeof(shaders::kTextureLoadCopyToImage128BPPCS)},
+      };
+      static_assert(rex::CountOf(storage_copy_shader_code) == kStorageCopyTexelSizeCount);
+      for (u32 i = 0; i < kStorageCopyTexelSizeCount; ++i) {
+        // A failure leaves vkCmdCopyBufferToImage for this texel size.
+        storage_copy_pipelines_[i] = gpu::vulkan::objects::CreateComputePipeline(
+            vulkan_device, storage_copy_pipeline_layout_, storage_copy_shader_code[i].first,
+            storage_copy_shader_code[i].second);
+        if (storage_copy_pipelines_[i] == VK_NULL_HANDLE) {
+          REXGPU_ERROR("VulkanTextureCache: Failed to create texture storage copy pipeline {}", i);
+        }
+      }
+    }
+  }
+
   if (device_properties.nullDescriptor) {
     null_images_cleared_ = true;
   } else {
@@ -3031,6 +3325,11 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
       stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
       access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
       layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      break;
+    case VulkanTexture::Usage::kStorageCopyDestination:
+      stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+      layout = VK_IMAGE_LAYOUT_GENERAL;
       break;
     case VulkanTexture::Usage::kGuestShaderSampled:
       stage_mask = guest_shader_pipeline_stages_;

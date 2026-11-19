@@ -57,6 +57,11 @@ class VulkanSettings : public SettingOwner {
   REX_SETTING(bool, sparse_shared_memory, true, "Use sparse shared memory", kRestart);
   REX_SETTING(bool, cube_map_edge_filtering_off, false,
               "Sample cube maps without edge filtering across faces");
+  REX_SETTING(std::string, texture_load_storage_copy, "auto",
+              "Copy loaded single-level textures into their images with a compute shader instead "
+              "of vkCmdCopyBufferToImage: on, off, or auto (on with NVIDIA, where "
+              "vkCmdCopyBufferToImage was measured to be slow)",
+              Allowed("auto", "on", "off"), kRestart);
   REX_SETTING(bool, require_geometry_shader, !REX_PLATFORM_MAC,
               "Require geometryShader support, disable to allow the fallback primitive emulation "
               "paths",
