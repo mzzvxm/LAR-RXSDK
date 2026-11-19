@@ -260,17 +260,33 @@ bool VulkanSharedMemory::UploadByteRanges(
   // The ranges are in any order, so the barrier covers all of them.
   u32 bounds_start = UINT32_MAX;
   u32 bounds_end = 0;
+  // The pages the bytes are in, for the hoisting, which decides by pages.
+  hoist_byte_pages_temp_.clear();
   for (const std::pair<u32, u32>& range : upload_byte_ranges) {
     bounds_start = std::min(bounds_start, range.first);
     bounds_end = std::max(bounds_end, range.first + range.second);
+    if (range.second) {
+      const u32 page_first = range.first >> GetPageSizeLog2();
+      const u32 page_last = (range.first + range.second - 1) >> GetPageSizeLog2();
+      hoist_byte_pages_temp_.emplace_back(page_first, page_last - page_first + 1);
+    }
   }
-  // The buffer is written, so its usage changes through Use, like in UploadRanges; the barriers
-  // are submitted with the render pass ended, which also ends the hoisting for that render pass
-  // (EndRenderPass clears hoist_render_pass_).
-  Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
-  command_processor_.SubmitBarriers(true);
+  // The hot pages' bytes join the upload hoisting like the page uploads (BeginHoistedUpload and
+  // EndHoistedUpload only know pages, so this is where bytes meet them): a draw that needs a hot
+  // page, which is every draw that uses one, then does not end the render pass for it unless a
+  // draw before it in the render pass has read a page of these bytes, or an upload of one is in the
+  // render pass already (the page marks decide, and a miss is the in-place path below).
+  const bool hoist = BeginHoistedUpload(hoist_byte_pages_temp_);
+  if (!hoist) {
+    // The buffer is written, so its usage changes through Use, like in UploadRanges; the barriers
+    // are submitted with the render pass ended, which also ends the hoisting for that render pass
+    // (EndRenderPass clears hoist_render_pass_).
+    Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
+    command_processor_.SubmitBarriers(true);
+  }
   DeferredCommandBuffer& command_buffer = command_processor_.GetDeferredCommandBuffer();
   u64 submission_current = command_processor_.GetCurrentSubmission();
+  bool successful = true;
   upload_regions_.clear();
   VkBuffer upload_buffer_previous = VK_NULL_HANDLE;
   for (const std::pair<u32, u32>& range : upload_byte_ranges) {
@@ -284,13 +300,15 @@ bool VulkanSharedMemory::UploadByteRanges(
                                               upload_buffer_offset, upload_buffer_size);
       if (upload_buffer_mapping == nullptr) {
         REXGPU_ERROR("Shared memory: Failed to get a Vulkan upload buffer");
-        return false;
+        successful = false;
+        break;
       }
       upload_buffer_size = std::min(upload_buffer_size, VkDeviceSize(remaining));
       const u8* upload_source =
           GetPhysicalForRead(GetMemory(), start, static_cast<u32>(upload_buffer_size));
       if (!upload_source) {
-        return false;
+        successful = false;
+        break;
       }
       std::memcpy(upload_buffer_mapping, upload_source, upload_buffer_size);
       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
@@ -307,6 +325,9 @@ bool VulkanSharedMemory::UploadByteRanges(
       start += static_cast<u32>(upload_buffer_size);
       remaining -= static_cast<u32>(upload_buffer_size);
     }
+    if (!successful) {
+      break;
+    }
   }
   if (!upload_regions_.empty()) {
     command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
@@ -314,7 +335,12 @@ bool VulkanSharedMemory::UploadByteRanges(
                                    upload_regions_.data());
     upload_regions_.clear();
   }
-  return true;
+  if (hoist) {
+    // Also after a failure, to leave the hoisted commands well-formed (the caller uploads the
+    // whole pages after a failure, which then finds these pages marked and is done in place).
+    EndHoistedUpload(upload_byte_ranges);
+  }
+  return successful;
 }
 
 bool VulkanSharedMemory::UploadRanges(const std::vector<std::pair<u32, u32>>& upload_page_ranges) {

@@ -94,6 +94,8 @@ class VulkanSharedMemory : public SharedMemory {
   u64 hoist_render_pass_serial_ = 0;
   size_t hoist_closing_barrier_offset_ = 0;
   std::vector<std::pair<u32, u32>> hoist_page_ranges_temp_;
+  // The pages (first, count) that the byte ranges of UploadByteRanges are in.
+  std::vector<std::pair<u32, u32>> hoist_byte_pages_temp_;
 
   std::unique_ptr<gpu::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
   std::vector<VkBufferCopy> upload_regions_;
