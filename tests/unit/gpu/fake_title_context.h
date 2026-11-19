@@ -61,7 +61,10 @@ class FakeTitleContext final : public IPhysicalMemory,
     listeners.push_back(&listener);
     return ScopeGuard();
   }
-  void WatchPhysicalWrites(PhysicalRange) override {}
+  void WatchPhysicalWrites(PhysicalRange range) override {
+    std::lock_guard lock(stores_mutex_);
+    watched_.push_back(range);
+  }
   ScopeGuard LockWriteWatches() override { return ScopeGuard(); }
   Result<void> RaiseGraphicsInterrupt(u32, u32) override { return {}; }
   Result<ScopeGuard> StartHostThread(std::string_view,
@@ -86,12 +89,18 @@ class FakeTitleContext final : public IPhysicalMemory,
     std::lock_guard lock(stores_mutex_);
     return stores_;
   }
+  /** The ranges passed to WatchPhysicalWrites, in call order. */
+  std::vector<PhysicalRange> GetWatchedRanges() {
+    std::lock_guard lock(stores_mutex_);
+    return watched_;
+  }
   std::vector<IPhysicalWriteListener*> listeners;
 
  private:
   kernel::GuestAddressSpace& memory_;
   std::mutex stores_mutex_;
   std::vector<Store> stores_;
+  std::vector<PhysicalRange> watched_;
 };
 
 }  // namespace rex::test
