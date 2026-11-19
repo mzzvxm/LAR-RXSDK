@@ -208,6 +208,7 @@ add_executable(
   kernel/title_runtime_test.cpp
   kernel/guest_global_test.cpp
   kernel/apu_test.cpp
+  kernel/xma_context_frames_test.cpp
   kernel/xma_decoder_test.cpp
   kernel/title_context_test.cpp
   kernel/recompiled_module_test.cpp
