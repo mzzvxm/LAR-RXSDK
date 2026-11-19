@@ -37,6 +37,7 @@ add_executable(
   gpu/draw_state_test.cpp
   gpu/dxbc_operand_test.cpp
   gpu/present_policy_test.cpp
+  gpu/resolve_rules_test.cpp
   gpu/vblank_pacing_test.cpp
   gpu/shader_interpreter_test.cpp
   gpu/shader_translation_test.cpp

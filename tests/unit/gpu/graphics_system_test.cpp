@@ -64,6 +64,10 @@ struct FakeData {
   std::atomic<rex::u32> write_back_calls{0};
   std::atomic<rex::u32> last_write_index{0};
   std::atomic<rex::u32> last_write_value{0};
+  std::atomic<rex::u32> readback_calls{0};
+  std::atomic<rex::u32> readback_address{0};
+  std::atomic<rex::u32> readback_length{0};
+  std::atomic<rex::u32> readback_frames{0};
   std::mutex mutex;
   std::vector<std::string> events;
 
@@ -89,6 +93,10 @@ struct FakeData {
     write_back_calls = 0;
     last_write_index = 0;
     last_write_value = 0;
+    readback_calls = 0;
+    readback_address = 0;
+    readback_length = 0;
+    readback_frames = 0;
   }
 };
 
@@ -143,6 +151,13 @@ class FakeDriver final : public rex::gpu::IXenosGraphicsDriver {
   void WriteRegister(rex::u32 index, rex::u32 value) override {
     g_fake.last_write_index = index;
     g_fake.last_write_value = value;
+  }
+  bool RequestResolveReadback(rex::u32 address, rex::u32 length, rex::u32 frames) override {
+    ++g_fake.readback_calls;
+    g_fake.readback_address = address;
+    g_fake.readback_length = length;
+    g_fake.readback_frames = frames;
+    return true;
   }
 };
 
@@ -387,6 +402,28 @@ REX_TEST_CASE("vd calls and registers reach a xenos driver", "[gpu]") {
   CHECK(g_fake.write_back_calls.load() == 1);
   CHECK(g_fake.last_write_index.load() == 0x20);
   CHECK(g_fake.last_write_value.load() == 0x55);
+}
+
+REX_TEST_CASE("a resolve readback request reaches a xenos driver", "[gpu]") {
+  GraphicsApp app("fake");
+  auto tool = app.OpenTitle();
+  REQUIRE(tool);
+  rex::gpu::IGraphicsSystem& graphics = app.GetGraphics();
+  CHECK(graphics.RequestResolveReadback(0x05100000, 0x400000, 8));
+  CHECK(g_fake.readback_calls.load() == 1);
+  CHECK(g_fake.readback_address.load() == 0x05100000);
+  CHECK(g_fake.readback_length.load() == 0x400000);
+  CHECK(g_fake.readback_frames.load() == 8);
+}
+
+REX_TEST_CASE("a resolve readback request has no taker without a xenos driver", "[gpu]") {
+  GraphicsApp app("none", false, {}, rex::GraphicsFamily::kNone);
+  auto tool = app.OpenTitle();
+  REQUIRE(tool);
+  rex::gpu::IGraphicsSystem& graphics = app.GetGraphics();
+  CHECK_FALSE(graphics.HasDriver());
+  CHECK_FALSE(graphics.RequestResolveReadback(0x05100000, 0x400000, 8));
+  CHECK(g_fake.readback_calls.load() == 0);
 }
 
 REX_TEST_CASE("GetProcessRuntime is the loaded runtime and null after Unload", "[gpu][runtime]") {
