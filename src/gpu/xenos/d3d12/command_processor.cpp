@@ -11,6 +11,7 @@
 
 #include <bit>
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
@@ -26,6 +27,7 @@
 #include "gpu/xenos/d3d12/shader.h"
 #include <rex/title.h>
 #include <rex/xenos/register.h>
+#include "gpu/xenos/async_pipeline_policy.h"
 #include "gpu/xenos/draw_state.h"
 #include "gpu/xenos/register_blocks.h"
 #include <rex/xenos/fetch.h>
@@ -234,6 +236,9 @@ ID3D12RootSignature* D3D12CommandProcessor::GetRootSignature(const DXBCShader* v
   index |= static_cast<u32>(vertex_visibility == D3D12_SHADER_VISIBILITY_DOMAIN) << index_offset;
   ++index_offset;
   REX_ASSERT(index_offset <= 32);
+
+  // Also called by the pipeline creation threads.
+  std::lock_guard<std::mutex> root_signatures_bindful_lock(root_signatures_bindful_mutex_);
 
   auto it = root_signatures_bindful_.find(index);
   if (it != root_signatures_bindful_.end()) {
@@ -1908,6 +1913,25 @@ void D3D12CommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32 
     FlushUnscaledResolveCopies();
   }
 
+  // A frame with draws left out for pipelines that weren't ready is not presented, the previous
+  // picture stays: presenting it would show the objects of those draws missing for a frame, as
+  // flashing squares and triangles.
+  if (async_pipeline::ShouldSkipPresent(
+          GetXenosSettings().async_shader_compilation.Get() && frame_left_out_async_pipeline_draw_,
+          std::chrono::steady_clock::now(),
+          GetD3D12Settings().async_skip_incomplete_frames_max_ms.Get(),
+          incomplete_frames_skipped_since_)) {
+    static bool skipped_incomplete_frame_logged = false;
+    if (!skipped_incomplete_frame_logged) {
+      skipped_incomplete_frame_logged = true;
+      REXGPU_WARN(
+          "Skipping Direct3D 12 frame presentation due to draws left out for pipelines that "
+          "weren't ready");
+    }
+    EndSubmission(true);
+    return;
+  }
+
   D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
   xenos::TextureFormat frontbuffer_format;
   u32 frontbuffer_width_unscaled = 0, frontbuffer_height_unscaled = 0;
@@ -2417,9 +2441,23 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
           bound_depth_and_color_render_target_formats, &pipeline_handle, &root_signature)) {
     return false;
   }
-  if (GetXenosSettings().async_shader_compilation.Get() &&
-      pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
-    return true;
+  if (GetXenosSettings().async_shader_compilation.Get()) {
+    // Left out until the pipeline is ready, unless it's ready within the
+    // frame's waiting budget.
+    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr &&
+        (!AwaitAsyncPipeline(pipeline_handle) ||
+         pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr)) {
+      // A pipeline that failed to be created stays left out, but the frame
+      // isn't incomplete for it - it would never be complete again.
+      if (!pipeline_cache_->HasAsyncPipelineCreationFailed(pipeline_handle)) {
+        frame_left_out_async_pipeline_draw_ = true;
+      }
+      return true;
+    }
+    // A pipeline created asynchronously gets its root signature on the
+    // creation thread, stored before the pipeline, possibly after
+    // ConfigurePipeline returned.
+    root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
   }
 
   // Updating textures may bind pipelines.
@@ -3609,6 +3647,8 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 
   if (is_opening_frame) {
     frame_open_ = true;
+    frame_async_pipeline_wait_us_ = 0;
+    frame_left_out_async_pipeline_draw_ = false;
 
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
     std::memset(current_float_constant_map_pixel_, 0, sizeof(current_float_constant_map_pixel_));
@@ -3805,7 +3845,31 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
 }
 
 bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
-  return !submission_open_ || !pipeline_cache_->IsCreatingPipelines();
+  // Pending pipelines of asynchronous creation don't hold a submission: the end
+  // of one doesn't wait for them.
+  return !submission_open_ || GetXenosSettings().async_shader_compilation.Get() ||
+         !pipeline_cache_->IsCreatingPipelines();
+}
+
+bool D3D12CommandProcessor::AwaitAsyncPipeline(void* pipeline_handle) {
+  // A draw in an occlusion query whose pipeline an earlier draw queued waits (outside the budget)
+  // rather than being left out, which the query would count as hidden.
+  if (IsOcclusionQueryActive()) {
+    return pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle,
+                                                       async_pipeline::kOcclusionQueryWaitUs);
+  }
+  const u64 timeout_us = async_pipeline::GetBudgetedWaitUs(
+      GetXenosSettings().async_pipeline_wait_budget_ms.Get(), frame_async_pipeline_wait_us_);
+  if (!timeout_us) {
+    return false;
+  }
+  auto wait_start = std::chrono::steady_clock::now();
+  bool created = pipeline_cache_->AwaitAsyncPipelineCreation(pipeline_handle, timeout_us);
+  frame_async_pipeline_wait_us_ +=
+      static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - wait_start)
+                           .count());
+  return created;
 }
 
 void D3D12CommandProcessor::ClearCommandAllocatorCache() {

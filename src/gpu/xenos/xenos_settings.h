@@ -152,6 +152,11 @@ class XenosSettings : public SettingOwner {
       bool, async_shader_compilation, true,
       "Compile shaders and create pipelines asynchronously in background threads. This reduces "
       "stutter but may cause brief visual artifacts while pipelines are being prepared");
+  REX_SETTING(i32, async_pipeline_wait_budget_ms, 4,
+              "With async shader compilation, how long a frame may wait in total for pipelines its "
+              "draws need that are still being created, before those draws are left out until "
+              "their pipelines are ready. 0 leaves them out at once, -1 waits as long as it takes",
+              Range{-1, 1000});
   REX_SETTING(bool, native_2x_msaa, true, "Enable native 2x MSAA");
   REX_SETTING(bool, depth_float24_round, false, "Round float24 depth values");
   REX_SETTING(bool, depth_float24_convert_in_pixel_shader, false,

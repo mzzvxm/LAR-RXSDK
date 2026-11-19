@@ -54,6 +54,12 @@ class D3D12Settings : public SettingOwner {
   REX_SETTING(bool, dxbc_disasm_dxilconv, false, "Dump DXIL conversion disassembly");
   REX_SETTING(i32, pipeline_creation_threads, -1,
               "Number of pipeline creation threads, -1 for auto", Range{-1, 32}, kRestart);
+  REX_SETTING(u32, async_skip_incomplete_frames_max_ms, 100,
+              "With async shader compilation, frames with draws left out because their pipelines "
+              "were still being created are not presented (the previous picture stays), as on "
+              "Vulkan. Once presents have been skipped for this long, such frames are presented "
+              "anyway, so a slow pipeline creation shows as objects missing for a moment rather "
+              "than a picture held still. 0 skips for as long as it takes");
   REX_SETTING(bool, tessellation_wireframe, false, "Render tessellation as wireframe");
   REX_SETTING(bool, native_stencil_value_output, true, "Enable native stencil value output");
   REX_SETTING(bool, use_fuzzy_alpha_epsilon, false,

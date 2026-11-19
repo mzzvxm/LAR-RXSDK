@@ -32,6 +32,11 @@ class VulkanSettings : public SettingOwner {
   REX_SETTING(bool, async_skip_incomplete_frames, true,
               "When async shader compilation is enabled, skip presenting frames that used "
               "placeholder pipelines to avoid visible flashing");
+  REX_SETTING(u32, async_skip_incomplete_frames_max_ms, 100,
+              "With async_skip_incomplete_frames, present frames that used placeholder pipelines "
+              "anyway once presents have been skipped for this long, so a slow pipeline creation "
+              "shows as objects missing for a moment rather than a picture held still. 0 skips "
+              "for as long as it takes");
   REX_SETTING(bool, submit_on_primary_buffer_end, true,
               "Submit command buffer when PM4 primary buffer ends");
   REX_SETTING(bool, threaded_submission, true,
