@@ -26,6 +26,7 @@
 #include "fake_title_context.h"
 #include "gpu/xenos/null/null_xenos_graphics_driver.h"
 #include "gpu/xenos/shared_memory.h"
+#include "gpu/xenos/xenos_settings.h"
 #include "test_memory.h"
 
 namespace {
@@ -91,9 +92,12 @@ Ring Submit(rex::kernel::GuestAddressSpace& memory, rex::gpu::null::NullXenosGra
   return ring;
 }
 
+struct TestXenosSettings final : rex::gpu::XenosSettings {};
+
 class TestSharedMemory final : public rex::gpu::SharedMemory {
  public:
-  explicit TestSharedMemory(FakeTitleContext& title) : SharedMemory(title, title) {
+  explicit TestSharedMemory(FakeTitleContext& title, const rex::gpu::XenosSettings& settings)
+      : SharedMemory(title, title, settings) {
     InitializeCommon();
   }
 
@@ -158,7 +162,8 @@ REX_TEST_CASE_METHOD(Fixture, "fence write is release ordered", "[gpu][xenos]") 
 REX_TEST_CASE_METHOD(Fixture, "write listener invalidates shared memory", "[gpu][xenos]") {
   auto& memory = rex::test::GetTestMemory();
   FakeTitleContext title(memory);
-  TestSharedMemory shared(title);
+  TestXenosSettings settings;
+  TestSharedMemory shared(title, settings);
   REQUIRE(title.listeners.size() == 1);
 
   constexpr rex::u32 kStart = 0x10000;

@@ -25,7 +25,8 @@ namespace rex::gpu::d3d12 {
 
 D3D12SharedMemory::D3D12SharedMemory(D3D12CommandProcessor& command_processor,
                                      IPhysicalMemory& memory, IPhysicalWriteWatch& watch)
-    : SharedMemory(memory, watch), command_processor_(command_processor) {}
+    : SharedMemory(memory, watch, command_processor.GetXenosSettings()),
+      command_processor_(command_processor) {}
 
 D3D12SharedMemory::~D3D12SharedMemory() {
   Shutdown(true);

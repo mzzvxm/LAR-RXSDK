@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -24,8 +25,9 @@
 
 namespace rex::gpu {
 
-SharedMemory::SharedMemory(IPhysicalMemory& memory, IPhysicalWriteWatch& watch)
-    : physical_memory_(memory), write_watch_(watch) {
+SharedMemory::SharedMemory(IPhysicalMemory& memory, IPhysicalWriteWatch& watch,
+                           const XenosSettings& settings)
+    : physical_memory_(memory), write_watch_(watch), settings_(settings) {
   page_size_log2_ = rex::log2_ceil(static_cast<u32>(rex::memory::GetPageSize()));
 }
 
@@ -320,11 +322,53 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
   watch_range_first_free_ = range;
 }
 
+bool SharedMemory::AreAllPagesValid(const std::pair<u32, u32>* ranges, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    const u32 start = ranges[i].first;
+    const u32 length = ranges[i].second;
+    if (!length) {
+      continue;
+    }
+    if (start > kBufferSize || (kBufferSize - start) < length) {
+      // The full path reports the bad range.
+      return false;
+    }
+    const u32 page_first = start >> page_size_log2_;
+    const u32 page_last = (start + length - 1) >> page_size_log2_;
+    const u32 block_first = page_first >> 6;
+    const u32 block_last = page_last >> 6;
+    for (u32 block = block_first; block <= block_last; ++block) {
+      u64 needed = UINT64_MAX;
+      if (block == block_first) {
+        needed &= ~((static_cast<u64>(1) << (page_first & 63)) - 1);
+      }
+      if (block == block_last && (page_last & 63) != 63) {
+        needed &= (static_cast<u64>(1) << ((page_last & 63) + 1)) - 1;
+      }
+      // No lock: a page seen as valid may be one that a concurrent invalidation is about to clear,
+      // which is the same as an invalidation right after a locked check.
+      const u64 valid =
+          std::atomic_ref<u64>(system_page_flags_valid_[block]).load(std::memory_order_relaxed);
+      if ((valid & needed) != needed) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool SharedMemory::RequestRanges(const std::pair<u32, u32>* ranges, size_t count) {
   if (ranges == nullptr || !count) {
     return true;
   }
 
+  // Every page the request covers is valid already, nearly always: most draws request vertex
+  // buffers and textures that did not change. Nothing is batched, sorted or locked then.
+  if (settings_.shared_memory_request_fast_path.Get() && AreAllPagesValid(ranges, count)) {
+    return true;
+  }
+
+  // Some texture or buffer is empty, for example - safe to draw in this case.
   std::vector<std::pair<u32, u32>> merged_ranges;
   merged_ranges.reserve(count);
   for (size_t i = 0; i < count; ++i) {

@@ -23,6 +23,7 @@
 #include <rex/types.h>
 #include <rex/utility.h>
 #include "gpu/xenos/xenos_export.h"
+#include "gpu/xenos/xenos_settings.h"
 
 namespace rex::gpu {
 
@@ -120,7 +121,7 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
   bool EnsureRangeAllocated(u32 start, u32 length) { return AllocateHostGPUMemory(start, length); }
 
  protected:
-  SharedMemory(IPhysicalMemory& memory, IPhysicalWriteWatch& watch);
+  SharedMemory(IPhysicalMemory& memory, IPhysicalWriteWatch& watch, const XenosSettings& settings);
   /** Implementations call it from their initialization. */
   void InitializeCommon();
   void InitializeSparseHostGPUMemory(u32 granularity_log2);
@@ -167,11 +168,19 @@ class REX_GPU_XENOS_API SharedMemory : public rex::NonCopyable, public IPhysical
  private:
   IPhysicalMemory& physical_memory_;
   IPhysicalWriteWatch& write_watch_;
+  const XenosSettings& settings_;
 
   /** Log2 of the system page size, the invalidation granularity. */
   u32 page_size_log2_;
 
   bool AllocateHostGPUMemory(u32 start, u32 length);
+
+  /**
+   * Reports whether every page of the ranges is valid, reading the page flags without the memory
+   * watch lock. Valid pages are backed by host GPU memory, as they were uploaded or written by the
+   * GPU.
+   */
+  bool AreAllPagesValid(const std::pair<u32, u32>* ranges, size_t count);
   u32 host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
   std::vector<u64> host_gpu_memory_sparse_allocated_;
   u32 host_gpu_memory_sparse_allocations_ = 0;

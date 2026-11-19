@@ -29,7 +29,7 @@ namespace rex::gpu::vulkan {
 VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
                                        IPhysicalMemory& memory, IPhysicalWriteWatch& watch,
                                        VkPipelineStageFlags guest_shader_pipeline_stages)
-    : SharedMemory(memory, watch),
+    : SharedMemory(memory, watch, command_processor.GetXenosSettings()),
       command_processor_(command_processor),
       guest_shader_pipeline_stages_(guest_shader_pipeline_stages) {}
 
