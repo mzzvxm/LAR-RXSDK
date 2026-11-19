@@ -922,6 +922,18 @@ void VulkanImmediateDrawer::DestroyTextureResource(VulkanOverlayTexture::Resourc
 void VulkanImmediateDrawer::OnImmediateTextureDestroyed(VulkanOverlayTexture& texture) {
   size_t pending_upload_index = texture.pending_upload_index;
   if (pending_upload_index != SIZE_MAX) {
+    // The upload hasn't been recorded in a command buffer, so its staging buffer isn't in use by
+    // the GPU. Without freeing it here, a texture destroyed before it was drawn (no overlay was
+    // ever shown, so the pending uploads never ran) leaks the buffer and its memory.
+    {
+      const PendingTextureUpload& abandoned_upload = texture_uploads_pending_[pending_upload_index];
+      if (abandoned_upload.buffer != VK_NULL_HANDLE) {
+        const VulkanDevice::Functions& dfn = vulkan_device_->GetFunctions();
+        const VkDevice device = vulkan_device_->GetDevice();
+        dfn.vkDestroyBuffer(device, abandoned_upload.buffer, nullptr);
+        dfn.vkFreeMemory(device, abandoned_upload.buffer_memory, nullptr);
+      }
+    }
     if (pending_upload_index + 1 < texture_uploads_pending_.size()) {
       PendingTextureUpload& pending_upload = texture_uploads_pending_[pending_upload_index];
       pending_upload = texture_uploads_pending_.back();

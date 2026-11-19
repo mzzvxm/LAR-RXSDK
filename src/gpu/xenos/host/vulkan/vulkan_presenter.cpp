@@ -859,11 +859,27 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
 }
 
 VkSwapchainKHR VulkanPresenter::PaintContext::PrepareForSwapchainRetirement() {
-  if (swapchain != VK_NULL_HANDLE) {
-    submission_tracker.AwaitAllSubmissionsCompletion();
-  }
   const VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
   const VkDevice device = vulkan_device->GetDevice();
+  if (swapchain != VK_NULL_HANDLE) {
+    submission_tracker.AwaitAllSubmissionsCompletion();
+    // The fences of the paint submissions are signaled before their presents happen, and a
+    // present has no fence: the last image may still wait for its present semaphore in the
+    // queue. Only an idle queue shows that the swapchain and the present semaphores are no longer
+    // in use (VUID-vkDestroySwapchainKHR-swapchain-01282, VUID-vkDestroySemaphore-semaphore-05149).
+    const u32 queue_family_graphics_compute = vulkan_device->GetQueueFamilyGraphicsCompute();
+    {
+      const VulkanDevice::Queue::Acquisition queue_acquisition =
+          vulkan_device->AcquireQueue(queue_family_graphics_compute, 0);
+      dfn.vkQueueWaitIdle(queue_acquisition.GetQueue());
+    }
+    if (present_queue_family != UINT32_MAX &&
+        present_queue_family != queue_family_graphics_compute) {
+      const VulkanDevice::Queue::Acquisition queue_acquisition =
+          vulkan_device->AcquireQueue(present_queue_family, 0);
+      dfn.vkQueueWaitIdle(queue_acquisition.GetQueue());
+    }
+  }
   for (const SwapchainFramebuffer& framebuffer : swapchain_framebuffers) {
     dfn.vkDestroyFramebuffer(device, framebuffer.framebuffer, nullptr);
     dfn.vkDestroyImageView(device, framebuffer.image_view, nullptr);
