@@ -51,7 +51,7 @@ class REX_GPU_API GraphicsSettings final : public SettingOwner {
  * Vd calls and GPU register accesses to a Xenos driver. With no driver a project that presents
  * itself calls ReportFrame and UISystem::DrawOverlays from its own present.
  */
-REX_DECLARE_INTERFACE(IGraphicsSystem, 1)
+REX_DECLARE_INTERFACE(IGraphicsSystem, 2)
   virtual GraphicsSettings& GetSettings() = 0;
 
   virtual bool HasDriver() const = 0;
@@ -66,6 +66,22 @@ REX_DECLARE_INTERFACE(IGraphicsSystem, 1)
 
   /** Returns the frame counters. Any thread. The result is a snapshot. */
   virtual FrameStats GetFrameStats() const = 0;
+
+  /**
+   * Asks the Xenos driver to read the resolves that write a range of guest physical memory back
+   * into it, synchronously and whatever the driver's readback settings say, so the CPU sees what
+   * the GPU rendered there. A title that reads a picture on the CPU, such as a screenshot of its
+   * front buffer, needs it for the frames around the read. A frame is a swap the driver has run,
+   * which can be a few frames behind the title, so a caller that needs the readback for a while
+   * repeats the request every frame. Any thread.
+   *
+   * @param physical_address Guest physical address of the range, as the resolve writes it.
+   * @param length Bytes in the range.
+   * @param frames How many frames the request lasts.
+   * @return True when the Xenos driver took the request. False with no Xenos driver (a project
+   *         that presents with its own renderer reads back by itself) or with nothing asked for.
+   */
+  virtual bool RequestResolveReadback(u32 physical_address, u32 length, u32 frames) = 0;
 };
 
 }  // namespace rex::gpu

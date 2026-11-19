@@ -43,6 +43,24 @@ class IXenosGraphicsDriver : public IGraphicsDriver {
 
   /** Writes a GPU register for the guest. Any guest thread. */
   virtual void WriteRegister(u32 index, u32 value) = 0;
+
+  /**
+   * Asks for the resolves that write a range of guest physical memory to be read back to it
+   * synchronously for a number of frames, whatever the driver's readback settings say, so the CPU
+   * sees what the GPU rendered there. A driver without a command processor takes no request. Any
+   * thread.
+   *
+   * @param physical_address Guest physical address of the range.
+   * @param length Bytes in the range.
+   * @param frames How many swaps the request lasts.
+   * @return True when the driver took the request.
+   */
+  virtual bool RequestResolveReadback(u32 physical_address, u32 length, u32 frames) {
+    (void)physical_address;
+    (void)length;
+    (void)frames;
+    return false;
+  }
 };
 
 }  // namespace rex::gpu

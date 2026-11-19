@@ -10,6 +10,7 @@
 
 #include "gpu/xenos/resolve_rules.h"
 
+#include <algorithm>
 #include <charconv>
 #include <format>
 #include <utility>
@@ -219,6 +220,65 @@ void ResolveRuleSetting::Assign() {
   }
   rule_count_.store(static_cast<u32>(rules->size()), std::memory_order_relaxed);
   rules_ = std::move(rules);
+}
+
+bool ResolveReadbackRequests::Request(u32 address, u32 length, u32 frames) {
+  if (!length || !frames) {
+    return false;
+  }
+  const u64 first = address;
+  const u64 last = first + length - 1;
+  if (last > UINT32_MAX) {
+    return false;
+  }
+  std::lock_guard lock(mutex_);
+  for (Entry& entry : entries_) {
+    if (entry.first == first && entry.last == last) {
+      entry.frames_left = std::max(entry.frames_left, frames);
+      return true;
+    }
+  }
+  if (entries_.size() >= kMaxRequests) {
+    // Make room by dropping the request that has the fewest frames left.
+    entries_.erase(std::min_element(
+        entries_.begin(), entries_.end(),
+        [](const Entry& a, const Entry& b) { return a.frames_left < b.frames_left; }));
+  }
+  entries_.push_back({first, last, frames, false});
+  count_.store(static_cast<u32>(entries_.size()), std::memory_order_relaxed);
+  return true;
+}
+
+bool ResolveReadbackRequests::Touches(u32 written_address, u32 written_length) {
+  if (!HasRequests() || !written_length) {
+    return false;
+  }
+  const u64 first = written_address;
+  const u64 last = first + written_length - 1;
+  std::lock_guard lock(mutex_);
+  bool touches = false;
+  for (Entry& entry : entries_) {
+    if (last >= entry.first && first <= entry.last) {
+      entry.touched = true;
+      touches = true;
+    }
+  }
+  return touches;
+}
+
+void ResolveReadbackRequests::EndFrame() {
+  if (!HasRequests()) {
+    return;
+  }
+  std::lock_guard lock(mutex_);
+  for (Entry& entry : entries_) {
+    if (--entry.frames_left == 0 && !entry.touched) {
+      REXGPU_INFO("resolve readback request for 0x{:08X}-0x{:08X} ran out with no resolve into it",
+                  static_cast<u32>(entry.first), static_cast<u32>(entry.last));
+    }
+  }
+  std::erase_if(entries_, [](const Entry& entry) { return entry.frames_left == 0; });
+  count_.store(static_cast<u32>(entries_.size()), std::memory_order_relaxed);
 }
 
 }  // namespace rex::gpu

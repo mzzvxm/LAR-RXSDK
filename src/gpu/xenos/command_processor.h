@@ -143,6 +143,20 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
    */
   void EnableReadPointerWriteBack(u32 ptr, u32 block_size_log2);
 
+  /**
+   * Asks for the resolves that write a range of guest physical memory to be read back to it
+   * synchronously for a number of frames, whatever the readback settings say, so the CPU sees what
+   * the GPU rendered there. Any thread. See ResolveReadbackRequests.
+   *
+   * @param physical_address Guest physical address of the range.
+   * @param length Bytes in the range.
+   * @param frames How many swaps the request lasts.
+   * @return False when the request asks for nothing.
+   */
+  bool RequestResolveReadback(u32 physical_address, u32 length, u32 frames) {
+    return readback_requests_.Request(physical_address, length, frames);
+  }
+
   void UpdateWritePointer(u32 value);
 
   void ExecutePacket(u32 ptr, u32 count);
@@ -361,22 +375,23 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
 
   /**
    * Reports whether a resolve can be read back although the readback mode of the backend is
-   * disabled, because the gpu.xenos.readback_resolve_rules setting holds a rule. IssueCopy takes
-   * the path that sees what the resolve wrote only then.
+   * disabled, because the gpu.xenos.readback_resolve_rules setting holds a rule or a request for a
+   * range is waiting. IssueCopy takes the path that sees what the resolve wrote only then.
    */
   bool IsResolveReadbackSelective() const;
 
   /**
-   * Returns the readback mode of a resolve that has been made. It is the one of the first rule of
-   * gpu.xenos.readback_resolve_rules that the resolve matches, or the global mode. Command
-   * processor thread only.
+   * Returns the readback mode of a resolve that has been made. A resolve that writes into a range
+   * that RequestResolveReadback asked for is read back in full. Otherwise it is the mode of the
+   * first rule of gpu.xenos.readback_resolve_rules that the resolve matches, or the global mode.
+   * Command processor thread only.
    *
    * @param legacy_readback_resolve_enabled The backend's own readback_resolve setting.
    * @param written_address Guest physical address of the first byte the resolve wrote.
    * @param written_length Bytes the resolve wrote.
    */
   ReadbackResolveMode GetReadbackResolveModeFor(bool legacy_readback_resolve_enabled,
-                                                u32 written_address, u32 written_length) const;
+                                                u32 written_address, u32 written_length);
 
   /**
    * Describes the resolve that has just been made, for a rule to match: what it wrote and the
@@ -425,6 +440,8 @@ class REX_GPU_XENOS_API CommandProcessor : public rex::NonCopyable {
 
   /** The rules of gpu.xenos.readback_resolve_rules. */
   ResolveRuleSetting readback_rules_;
+  /** The requests of RequestResolveReadback. */
+  ResolveReadbackRequests readback_requests_;
   /** The rules of gpu.xenos.resolve_unscaled_copy_rules. */
   ResolveRuleSetting unscaled_copy_rules_;
   u32 unscaled_copy_log_count_ = 0;

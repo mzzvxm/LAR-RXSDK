@@ -117,4 +117,51 @@ class REX_GPU_XENOS_API ResolveRuleSetting {
   ScopeGuard watch_;
 };
 
+/**
+ * Requests, made while the title runs, to read back the resolves that write a range of guest
+ * memory for a number of frames: a screenshot the title reads from its front buffer on the CPU, for
+ * instance. A frame is a swap the command processor has run, and the command processor may run a
+ * few frames behind the title, so a request is best repeated every frame it is needed.
+ */
+class REX_GPU_XENOS_API ResolveReadbackRequests {
+ public:
+  /** The most ranges that wait at once. */
+  static constexpr size_t kMaxRequests = 16;
+
+  /**
+   * Asks for the resolves that write a range to be read back. A range asked for again takes the
+   * longer of the two lifetimes. Any thread.
+   *
+   * @param address Guest physical address of the range.
+   * @param length Bytes in the range.
+   * @param frames How many swaps the request lasts.
+   * @return False when the request asks for nothing (no bytes, no frames, or a range past the end
+   *         of the 32 bit address space).
+   */
+  bool Request(u32 address, u32 length, u32 frames);
+
+  /** Reports whether any request is waiting. Any thread, no lock. */
+  bool HasRequests() const { return count_.load(std::memory_order_relaxed) != 0; }
+
+  /**
+   * Reports whether the bytes a resolve wrote touch a request. Any thread.
+   */
+  bool Touches(u32 written_address, u32 written_length);
+
+  /** Counts a frame and drops the requests that have run out. Command processor thread. */
+  void EndFrame();
+
+ private:
+  struct Entry {
+    u64 first = 0; /**< The first byte of the range. */
+    u64 last = 0;  /**< The last byte of the range. */
+    u32 frames_left = 0;
+    bool touched = false; /**< A resolve has written into the range. */
+  };
+
+  std::mutex mutex_;
+  std::vector<Entry> entries_;
+  std::atomic<u32> count_{0};
+};
+
 }  // namespace rex::gpu

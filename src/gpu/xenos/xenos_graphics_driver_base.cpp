@@ -261,6 +261,11 @@ void XenosGraphicsDriverBase::WriteRegister(u32 r, u32 value) {
   register_file_.values[r] = value;
 }
 
+bool XenosGraphicsDriverBase::RequestResolveReadback(u32 physical_address, u32 length, u32 frames) {
+  return command_processor_ &&
+         command_processor_->RequestResolveReadback(physical_address, length, frames);
+}
+
 void XenosGraphicsDriverBase::InitializeRingBuffer(u32 ptr, u32 size_log2) {
   command_processor_->InitializeRingBuffer(ptr, size_log2);
 }

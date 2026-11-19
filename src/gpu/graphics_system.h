@@ -38,6 +38,7 @@ class GraphicsSystem final : public rex::gpu::IGraphicsSystem, public IGraphicsC
   std::string GetDriverName() const override;
   void ReportFrame() override;
   rex::gpu::FrameStats GetFrameStats() const override;
+  bool RequestResolveReadback(u32 physical_address, u32 length, u32 frames) override;
 
   [[nodiscard]] Result<void> AttachTitle(const TitleInfo& info, IPhysicalMemory& memory,
                                          IPhysicalWriteWatch& watch,

@@ -248,11 +248,14 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
 }
 
 bool CommandProcessor::IsResolveReadbackSelective() const {
-  return readback_rules_.HasRules();
+  return readback_rules_.HasRules() || readback_requests_.HasRequests();
 }
 
 ReadbackResolveMode CommandProcessor::GetReadbackResolveModeFor(
-    bool legacy_readback_resolve_enabled, u32 written_address, u32 written_length) const {
+    bool legacy_readback_resolve_enabled, u32 written_address, u32 written_length) {
+  if (readback_requests_.Touches(written_address, written_length)) {
+    return ReadbackResolveMode::kFull;
+  }
   const ReadbackResolveMode mode = GetReadbackResolveMode(legacy_readback_resolve_enabled);
   if (!readback_rules_.HasRules()) {
     return mode;
@@ -984,6 +987,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader,
   reader->AdvanceRead((count - 4) * sizeof(u32));
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  readback_requests_.EndFrame();
   if (graphics_system_) {
     graphics_system_->NotifySwap();
   }

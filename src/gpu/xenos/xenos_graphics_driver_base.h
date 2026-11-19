@@ -84,6 +84,7 @@ class REX_GPU_XENOS_API XenosGraphicsDriverBase : public IXenosGraphicsDriver,
   void EnableReadPointerWriteBack(u32 address, u32 block_size_log2) override;
   u32 ReadRegister(u32 index) override;
   void WriteRegister(u32 index, u32 value) override;
+  bool RequestResolveReadback(u32 physical_address, u32 length, u32 frames) override;
 
   ::rex::gpu::Presenter* GetHostPresenter() const {
     return presentation_ ? presentation_->GetPresenter() : nullptr;

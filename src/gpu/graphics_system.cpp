@@ -76,6 +76,11 @@ rex::gpu::FrameStats GraphicsSystem::GetFrameStats() const {
   return stats;
 }
 
+bool GraphicsSystem::RequestResolveReadback(u32 physical_address, u32 length, u32 frames) {
+  return state_->xenos != nullptr &&
+         state_->xenos->RequestResolveReadback(physical_address, length, frames);
+}
+
 void GraphicsSystem::State::CountFrame() {
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(stats_mutex);
