@@ -308,6 +308,13 @@ bool D3D12SharedMemory::UploadRanges(const std::vector<std::pair<u32, u32>>& upl
   if (upload_page_ranges.empty()) {
     return true;
   }
+  // Everything that writes the buffer comes through here. That includes the hot pages
+  // (gpu.xenos.shared_memory_hot_page_faults): this backend has no byte path (UploadByteRanges
+  // says so), so SharedMemory::RequestRanges sends a hot page here whole, to be hoisted or copied
+  // in place like any other upload. A hot page is uploaded again for every draw that asks for it,
+  // so the second request in a run finds its pages marked by the first one, is done in place, and
+  // the transition below ends the run (EndHoistRun). The request fast path (every page valid)
+  // returns before any upload and does not touch the buffer.
   bool hoist = BeginHoistedUpload(upload_page_ranges);
   if (!hoist) {
     CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);

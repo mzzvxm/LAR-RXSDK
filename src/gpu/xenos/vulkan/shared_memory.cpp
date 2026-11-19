@@ -264,6 +264,9 @@ bool VulkanSharedMemory::UploadByteRanges(
     bounds_start = std::min(bounds_start, range.first);
     bounds_end = std::max(bounds_end, range.first + range.second);
   }
+  // The buffer is written, so its usage changes through Use, like in UploadRanges; the barriers
+  // are submitted with the render pass ended, which also ends the hoisting for that render pass
+  // (EndRenderPass clears hoist_render_pass_).
   Use(Usage::kTransferDestination, std::make_pair(bounds_start, bounds_end - bounds_start));
   command_processor_.SubmitBarriers(true);
   DeferredCommandBuffer& command_buffer = command_processor_.GetDeferredCommandBuffer();

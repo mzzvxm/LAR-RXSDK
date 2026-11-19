@@ -102,7 +102,9 @@ class D3D12SharedMemory : public SharedMemory {
   // menu identical, free roam one view marginally over its limit). Every other user of the
   // buffer in this tree goes through UseForReading, UseForWriting or UseAsCopySource (the texture
   // loads, direct resolves, scaled resolve copies, memexport readback, index copies), read from
-  // the code; a later one has to call EndHoistRun.
+  // the code; a later one has to call EndHoistRun. The tier 3 additions to the base class do not
+  // add one: the request fast path touches no buffer, and the hot pages are uploaded by
+  // UploadRanges (see there).
   void EndHoistRun() { hoist_run_active_ = false; }
 
   void WriteRawSRVDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE handle);
