@@ -332,6 +332,16 @@ add_subdirectory(src/xbdm)
 add_subdirectory(src/app)
 add_subdirectory(src/codegen)
 add_subdirectory(src/rexglue)
+if (MINGW)
+  # LARecomp branch. The libraries that MSVC's default list covers and the MinGW driver's (kernel32,
+  # user32, shell32, advapi32) does not: ole32 for CoInitializeEx and CoTaskMemFree (app/title_app.cpp,
+  # base/platform/file_win.cpp, gpu/xenos/d3d12/shader.cpp), uuid for the FOLDERID_ GUIDs of
+  # SHGetKnownFolderPath (base/platform/file_win.cpp). Linked per target: the link audit below allows a
+  # module only the libraries its entry names.
+  target_link_libraries(rexbase PRIVATE ole32 uuid)
+  target_link_libraries(rexapp PRIVATE ole32)
+  target_link_libraries(rexgpu-xenos-d3d12 PRIVATE ole32)
+endif ()
 rexglue_group_object_libraries()
 include(cmake/rexglue_sdk.cmake)
 

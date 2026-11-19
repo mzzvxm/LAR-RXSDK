@@ -23,7 +23,7 @@ constexpr DWORD kHeapCorruption = 0xC0000374;
 constexpr u32 kBacktraceFrames = 32;
 
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
-_crt_signal_t g_previous_abort = SIG_DFL;
+void (*g_previous_abort)(int) = SIG_DFL;
 
 std::string_view ExceptionName(DWORD code) {
   switch (code) {

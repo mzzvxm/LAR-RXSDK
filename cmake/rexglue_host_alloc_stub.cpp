@@ -4,6 +4,15 @@
 #endif
 #endif
 
+#if defined(__MINGW32__) && !defined(REX_HOST_ALLOC_SANITIZED)
+// LARecomp branch. libc++.dll (llvm-mingw) allocates with its own operator new, and PE has no symbol
+// interposition to make it call these forwarders: they would free blocks they did not allocate (std::string
+// and std::vector code of a program frees what libc++.dll's compiled functions allocated). With MinGW every
+// binary shares libc++.dll's operator new and delete instead, which is what the forwarders are for. The file
+// compiles to nothing, as under ThreadSanitizer; cmake/rexglue_link_audit.cmake asks for the file only.
+#define REX_HOST_ALLOC_SANITIZED 1
+#endif
+
 #ifndef REX_HOST_ALLOC_SANITIZED
 
 #include <cstddef>

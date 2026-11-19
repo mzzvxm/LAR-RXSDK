@@ -142,6 +142,13 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
   set_source_files_properties(${EXCRYPT_DIR}/excrypt_aes.c PROPERTIES COMPILE_OPTIONS "-maes")
 endif ()
 target_compile_options(excrypt PRIVATE -w)
+if (MINGW)
+  # LARecomp branch. excrypt.h defines _byteswap_ulong and _byteswap_uint64 as GCC's builtins for every
+  # compiler but MSVC, and mingw-w64's stdlib.h declares those two functions: included after the define,
+  # the declaration redeclares the builtin with other types (excrypt_des.c, excrypt_ecc.c, excrypt_rc4.c,
+  # excrypt_sha2.c, rijndael.c). With stdlib.h first its declaration comes ahead of the define.
+  target_compile_options(excrypt PRIVATE "SHELL:-include stdlib.h")
+endif ()
 
 # TLSF - two level segregated fit allocator (used by GuestAllocator)
 add_library(tlsf STATIC tlsf/tlsf.c)

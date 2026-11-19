@@ -56,5 +56,10 @@ __CRT_UUID_DECL(IDxcUtils, 0x4605c4cb, 0x2019, 0x492a, 0xad, 0xa4, 0x65, 0xf2, 0
 __CRT_UUID_DECL(IDxcCompiler, 0x8c210bf3, 0x011f, 0x4422, 0x8d, 0x70, 0x6f, 0x9a, 0xcb, 0x8d,
                 0xb6, 0x17)
 #endif
+#if defined(__MINGW32__) && !defined(D3D12_COMPARISON_FUNC_NONE)
+// mingw-w64's d3d12.h has no D3D12_COMPARISON_FUNC_NONE, which the Windows SDK declares as 0. Written as
+// its value; a mingw-w64 that declares it later is not in conflict (the enumerator is declared first).
+#define D3D12_COMPARISON_FUNC_NONE static_cast<D3D12_COMPARISON_FUNC>(0)
+#endif
 
 // clang-format on

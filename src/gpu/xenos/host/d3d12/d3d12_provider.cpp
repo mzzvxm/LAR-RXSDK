@@ -239,7 +239,7 @@ bool D3D12Provider::Initialize(i32 adapter_index_wanted) {
   while (dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
     DXGI_ADAPTER_DESC1 adapter_desc;
     if (SUCCEEDED(adapter->GetDesc1(&adapter_desc))) {
-      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device),
+      if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
                                              nullptr))) {
         if (adapter_index_wanted >= 0) {
           if (adapter_index == static_cast<u32>(adapter_index_wanted)) {
