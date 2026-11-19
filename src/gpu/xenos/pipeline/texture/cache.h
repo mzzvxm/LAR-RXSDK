@@ -153,8 +153,15 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
     u32 signed_separate : 1;
 
     u32 scaled_resolve : 1;
+    /**
+     * texture_load_direct_unscaled: the texture, at native resolution, is over memory that a
+     * resolve has written. Such a texture is loaded straight into the host texture rather than
+     * through a buffer. Part of the key so that a texture created before the memory was first
+     * resolved, which has no unordered access to load through, is not reused.
+     */
+    u32 resolved_unscaled : 1;
     u32 is_valid : 1;
-    u32 padding : 30;
+    u32 padding : 29;
 
     TextureKey() { Invalidate(); }
     void Invalidate() {
@@ -335,6 +342,32 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
     kLoadShaderIndexUnknown = kLoadShaderCount,
   };
 
+  // Direct loads: shaders decoding resolution-scaled single-level 2D
+  // textures straight into the host texture through an unsigned integer view of
+  // the texel size (R32_UINT for 32bpb, R16G16B16A16_UINT for 64bpb), instead of
+  // into a buffer that is then copied to the texture.
+  enum DirectLoadShader {
+    kDirectLoadShader32bpb,
+    kDirectLoadShader64bpb,
+    kDirectLoadShaderDepthFloat,
+    kDirectLoadShaderDepthUnorm,
+
+    kDirectLoadShaderCount,
+    kDirectLoadShaderUnknown = kDirectLoadShaderCount,
+  };
+  // The direct load shader replacing the regular one, or kDirectLoadShaderUnknown.
+  static DirectLoadShader GetDirectLoadShader(LoadShaderIndex load_shader);
+  // Whether a texture with the key may be loaded directly: one level, 2D, one
+  // layer, not in the packed mip tail, and either scaled or, at native resolution
+  // (texture_load_direct_unscaled), tiled and over memory a resolve has written
+  // (resolved_unscaled). The host format and the shader are checked separately.
+  // At native resolution the scaled shaders are used with a scale of 1: their
+  // addressing is then the unscaled one.
+  bool IsDirectLoadPossible(const TextureKey& key) const;
+  // Whether the texture_load_direct_unscaled pipelines are wanted: native
+  // resolution and the setting on at startup.
+  bool IsDirectLoadUnscaledWanted() const;
+
   struct LoadShaderInfo {
     u32 source_bpe_log2; /**< Log2 of the element size in bytes of the source (guest) binding. */
     u32 dest_bpe_log2; /**< Log2 of the element size in bytes of the destination (host) binding. */
@@ -484,6 +517,14 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
    */
   bool IsRangeScaledResolved(u32 start_unscaled, u32 length_unscaled);
   /**
+   * texture_load_direct_unscaled: reports whether a resolve has written any page in the range at
+   * native resolution.
+   *
+   * @param start_unscaled Start address.
+   * @param length_unscaled Length in bytes.
+   */
+  bool IsRangeResolvedUnscaled(u32 start_unscaled, u32 length_unscaled);
+  /**
    * Global shared memory invalidation callback that unmarks scaled resolved texture data.
    *
    * @param address_first First invalidated address.
@@ -515,6 +556,12 @@ class REX_GPU_XENOS_API TextureCache : public rex::NonCopyable {
   u64 scaled_resolve_pages_l2_[SharedMemory::kBufferSize >> (12 + 5 + 6)];
 
   SharedMemory::GlobalWatchHandle scaled_resolve_global_watch_handle_ = nullptr;
+
+  // texture_load_direct_unscaled, native resolution only: bit vector storing
+  // whether a resolve has ever written each 4 KB physical memory page. Never
+  // cleared before the cache is: it only chooses which textures are created for
+  // loading straight into (a wrong guess costs speed, not correctness).
+  std::unique_ptr<u32[]> resolved_pages_;
 
   u64 current_submission_index_ = 0;
   u64 current_submission_time_ = 0;

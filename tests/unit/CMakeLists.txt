@@ -41,6 +41,7 @@ add_executable(
   gpu/present_policy_test.cpp
   gpu/resolve_rules_test.cpp
   gpu/shared_memory_test.cpp
+  gpu/texture_direct_load_test.cpp
   gpu/vblank_pacing_test.cpp
   gpu/shader_interpreter_test.cpp
   gpu/shader_translation_test.cpp

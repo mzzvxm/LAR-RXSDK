@@ -40,8 +40,10 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/texture_load_16bpb_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_16bpb_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_32bpb_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/texture_load_32bpb_direct_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_32bpb_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_64bpb_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/texture_load_64bpb_direct_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_64bpb_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_8bpb_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_8bpb_scaled_cs.h"
@@ -49,8 +51,10 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/texture_load_bgrg8_rgbg8_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_ctx1_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_depth_float_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/texture_load_depth_float_direct_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_depth_float_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_depth_unorm_cs.h"
+#include "../shaders/bytecode/d3d12_5_1/texture_load_depth_unorm_direct_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_depth_unorm_scaled_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_dxn_rg8_cs.h"
 #include "../shaders/bytecode/d3d12_5_1/texture_load_dxt1_rgba8_cs.h"
@@ -550,6 +554,34 @@ bool D3D12TextureCache::Initialize() {
                       "texture loading pipeline for shader {}",
                       i);
         }
+      }
+    }
+  }
+
+  // Direct load pipelines. Without one, its textures are loaded through a
+  // buffer. At native resolution (texture_load_direct_unscaled) the same shaders
+  // are used, with a resolution scale of 1 and the shared memory as the source:
+  // their addressing is then the unscaled load shaders'.
+  if (IsDrawResolutionScaled() || IsDirectLoadUnscaledWanted()) {
+    const D3D12_SHADER_BYTECODE load_shader_code_direct[] = {
+        {shaders::kTextureLoad32BPBDirectScaledCS,
+         sizeof(shaders::kTextureLoad32BPBDirectScaledCS)},
+        {shaders::kTextureLoad64BPBDirectScaledCS,
+         sizeof(shaders::kTextureLoad64BPBDirectScaledCS)},
+        {shaders::kTextureLoadDepthFloatDirectScaledCS,
+         sizeof(shaders::kTextureLoadDepthFloatDirectScaledCS)},
+        {shaders::kTextureLoadDepthUNormDirectScaledCS,
+         sizeof(shaders::kTextureLoadDepthUNormDirectScaledCS)},
+    };
+    static_assert(rex::CountOf(load_shader_code_direct) == kDirectLoadShaderCount);
+    for (u32 i = 0; i < kDirectLoadShaderCount; ++i) {
+      *(load_pipelines_direct_[i].ReleaseAndGetAddressOf()) =
+          gpu::d3d12::objects::CreateComputePipeline(
+              device, load_shader_code_direct[i].pShaderBytecode,
+              load_shader_code_direct[i].BytecodeLength, load_root_signature_.Get());
+      if (!load_pipelines_direct_[i]) {
+        REXGPU_ERROR("D3D12TextureCache: Failed to create the direct texture loading pipeline {}",
+                     i);
       }
     }
   }
@@ -1483,40 +1515,120 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
   desc.SampleDesc.Count = 1;
   desc.SampleDesc.Quality = 0;
   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-  // Untiling goes through a buffer rather than unordered access, as copying is infrequent.
+  // Untiling goes through a buffer rather than unordered access, as copying is infrequent, except
+  // for resolved data (with resolution scaling, and with texture_load_direct_unscaled without),
+  // which is often reloaded every frame.
   desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  const DXGI_FORMAT plain_resource_format = desc.Format;
+  DXGI_FORMAT direct_load_uav_format = GetDirectLoadUAVFormat(key, desc.Format);
+  if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN) {
+    // CHECK: such a texture is a typeless, unordered access resource placed in the shared texture
+    // heaps (the allocation info below is taken with these flags). Its first use is a direct load
+    // that writes every texel of the only level, so no aliasing barrier or initialization is
+    // done. The fork has it on top of the placement too (RTX 5080; the debug layer in its city run
+    // reported no errors). Not run on v0.11.
+    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  }
   const gpu::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
   D3D12_RESOURCE_STATES resource_state = D3D12_RESOURCE_STATE_COPY_DEST;
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
   u32 heap_index = UINT32_MAX;
   u64 heap_offset = 0, heap_size = 0;
-  if (command_processor_.GetD3D12Settings().texture_heaps.Get()) {
-    D3D12_RESOURCE_ALLOCATION_INFO allocation_info = device->GetResourceAllocationInfo(0, 1, &desc);
-    if (allocation_info.SizeInBytes != UINT64_MAX &&
-        AllocateTextureHeapRange(allocation_info.SizeInBytes, allocation_info.Alignment, heap_index,
-                                 heap_offset)) {
-      if (SUCCEEDED(device->CreatePlacedResource(texture_heaps_[heap_index].heap.Get(), heap_offset,
-                                                 &desc, resource_state, nullptr,
-                                                 IID_PPV_ARGS(&resource)))) {
-        heap_size = allocation_info.SizeInBytes;
-      } else {
-        FreeTextureHeapRange(heap_index, heap_offset, allocation_info.SizeInBytes);
-        heap_index = UINT32_MAX;
+  while (true) {
+    if (command_processor_.GetD3D12Settings().texture_heaps.Get()) {
+      D3D12_RESOURCE_ALLOCATION_INFO allocation_info =
+          device->GetResourceAllocationInfo(0, 1, &desc);
+      if (allocation_info.SizeInBytes != UINT64_MAX &&
+          AllocateTextureHeapRange(allocation_info.SizeInBytes, allocation_info.Alignment,
+                                   heap_index, heap_offset)) {
+        if (SUCCEEDED(device->CreatePlacedResource(texture_heaps_[heap_index].heap.Get(),
+                                                   heap_offset, &desc, resource_state, nullptr,
+                                                   IID_PPV_ARGS(&resource)))) {
+          heap_size = allocation_info.SizeInBytes;
+        } else {
+          FreeTextureHeapRange(heap_index, heap_offset, allocation_info.SizeInBytes);
+          heap_index = UINT32_MAX;
+        }
       }
     }
-  }
-  if (!resource &&
-      FAILED(device->CreateCommittedResource(&gpu::d3d12::objects::kHeapPropertiesDefault,
-                                             provider.GetHeapFlagCreateNotZeroed(), &desc,
-                                             resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
-    return nullptr;
+    if (resource ||
+        SUCCEEDED(device->CreateCommittedResource(
+            &gpu::d3d12::objects::kHeapPropertiesDefault, provider.GetHeapFlagCreateNotZeroed(),
+            &desc, resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+      break;
+    }
+    if (direct_load_uav_format == DXGI_FORMAT_UNKNOWN) {
+      return nullptr;
+    }
+    // A host that does not accept unordered access for the format: the texture
+    // is loaded through a buffer, as without direct loads.
+    direct_load_uav_format = DXGI_FORMAT_UNKNOWN;
+    desc.Format = plain_resource_format;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    resource.Reset();
+    heap_index = UINT32_MAX;
+    heap_offset = 0;
+    heap_size = 0;
   }
   auto texture = std::make_unique<D3D12Texture>(*this, key, resource.Get(), resource_state);
   if (heap_index != UINT32_MAX) {
     texture->SetPlacement(heap_index, heap_offset, heap_size);
   }
+  texture->SetDirectLoadUAVFormat(direct_load_uav_format);
+  if (direct_load_uav_format != DXGI_FORMAT_UNKNOWN && !key.scaled_resolve) {
+    // The first few, to see that texture_load_direct_unscaled applies to anything.
+    static u32 direct_unscaled_logged = 0;
+    if (direct_unscaled_logged < 24) {
+      ++direct_unscaled_logged;
+      REXGPU_INFO(
+          "D3D12TextureCache: texture_load_direct_unscaled: {}x{} {} at 0x{:08X} is loaded "
+          "straight in",
+          key.GetWidth(), key.GetHeight(), xenos::FormatInfo::Get(key.format)->name,
+          key.base_page << 12);
+    }
+  }
   return texture;
+}
+
+DXGI_FORMAT D3D12TextureCache::GetDirectLoadUAVFormat(TextureKey key,
+                                                      DXGI_FORMAT& resource_format) const {
+  if (!IsDirectLoadPossible(key)) {
+    return DXGI_FORMAT_UNKNOWN;
+  }
+  DirectLoadShader direct_load_shader = GetDirectLoadShader(GetLoadShaderIndex(key));
+  if (direct_load_shader == kDirectLoadShaderUnknown ||
+      !load_pipelines_direct_[direct_load_shader]) {
+    return DXGI_FORMAT_UNKNOWN;
+  }
+  if (direct_load_shader == kDirectLoadShader64bpb) {
+    switch (resource_format) {
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+      case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        resource_format = DXGI_FORMAT_R16G16B16A16_TYPELESS;
+        return DXGI_FORMAT_R16G16B16A16_UINT;
+      default:
+        return DXGI_FORMAT_UNKNOWN;
+    }
+  }
+  // R32_UINT UAVs, unlike other casts between formats with different
+  // components, are allowed for resources of these typeless formats.
+  switch (resource_format) {
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_R32_FLOAT:
+      resource_format = DXGI_FORMAT_R32_TYPELESS;
+      return DXGI_FORMAT_R32_UINT;
+    case DXGI_FORMAT_R16G16_TYPELESS:
+    case DXGI_FORMAT_R16G16_FLOAT:
+      resource_format = DXGI_FORMAT_R16G16_TYPELESS;
+      return DXGI_FORMAT_R32_UINT;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+      return DXGI_FORMAT_R32_UINT;
+    default:
+      return DXGI_FORMAT_UNKNOWN;
+  }
 }
 
 bool D3D12TextureCache::AllocateTextureHeapRange(u64 size, u64 alignment, u32& heap_index_out,
@@ -1685,6 +1797,25 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
     loop_level_last = level_stored_last;
   }
 
+  // Direct load: decode straight into the texture through an unsigned integer
+  // UAV, without the buffer and the copy.
+  bool direct_load = false;
+  // Unscaled (texture_load_direct_unscaled): the scaled shaders with a scale of
+  // 1, reading the shared memory; tiled textures only (the scaled shaders
+  // assume tiling), which the key's resolved_unscaled implies.
+  if (d3d12_texture.direct_load_uav_format() != DXGI_FORMAT_UNKNOWN &&
+      (texture_resolution_scaled ||
+       (command_processor_.GetXenosSettings().texture_load_direct_unscaled.Get() &&
+        texture_key.resolved_unscaled && texture_key.tiled && !is_3d_tiling)) &&
+      level_first == 0 && level_last == 0 && level_packed != 0 && array_size == 1 && !is_3d) {
+    DirectLoadShader direct_load_shader = GetDirectLoadShader(load_shader);
+    if (direct_load_shader != kDirectLoadShaderUnknown &&
+        load_pipelines_direct_[direct_load_shader]) {
+      pipeline = load_pipelines_direct_[direct_load_shader].Get();
+      direct_load = true;
+    }
+  }
+
   bool host_block_compressed = kHostFormats[static_cast<u32>(guest_format)].is_block_compressed &&
                                !IsDecompressionNeeded(guest_format, width, height);
   u32 host_block_width = host_block_compressed ? block_width : 1;
@@ -1740,10 +1871,13 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
     copy_buffer_size += level_host_layer_size * array_size;
   }
   D3D12_RESOURCE_STATES copy_buffer_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  ID3D12Resource* copy_buffer = command_processor_.RequestScratchGPUBuffer(
-      static_cast<u32>(copy_buffer_size), copy_buffer_state);
-  if (copy_buffer == nullptr) {
-    return false;
+  ID3D12Resource* copy_buffer = nullptr;
+  if (!direct_load) {
+    copy_buffer = command_processor_.RequestScratchGPUBuffer(static_cast<u32>(copy_buffer_size),
+                                                             copy_buffer_state);
+    if (copy_buffer == nullptr) {
+      return false;
+    }
   }
 
   u32 descriptor_count = 1;
@@ -1757,7 +1891,9 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
   gpu::d3d12::objects::DescriptorCPUGPUHandlePair descriptors_allocated[3];
   if (!command_processor_.RequestOneUseSingleViewDescriptors(descriptor_count,
                                                              descriptors_allocated)) {
-    command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
+    if (copy_buffer) {
+      command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
+    }
     return false;
   }
   u32 descriptor_write_index = 0;
@@ -1766,10 +1902,32 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
   REX_ASSERT(descriptor_write_index < descriptor_count);
   gpu::d3d12::objects::DescriptorCPUGPUHandlePair descriptor_dest =
       descriptors_allocated[descriptor_write_index++];
-  gpu::d3d12::objects::CreateBufferTypedUAV(
-      device, descriptor_dest.first, copy_buffer,
-      gpu::d3d12::objects::GetUintPow2DXGIFormat(load_shader_info.dest_bpe_log2),
-      static_cast<u32>(copy_buffer_size) >> load_shader_info.dest_bpe_log2);
+  if (direct_load) {
+    D3D12_UNORDERED_ACCESS_VIEW_DESC direct_load_uav_desc;
+    direct_load_uav_desc.Format = d3d12_texture.direct_load_uav_format();
+    direct_load_uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+    direct_load_uav_desc.Texture2DArray.MipSlice = 0;
+    direct_load_uav_desc.Texture2DArray.FirstArraySlice = 0;
+    direct_load_uav_desc.Texture2DArray.ArraySize = 1;
+    direct_load_uav_desc.Texture2DArray.PlaneSlice = 0;
+    device->CreateUnorderedAccessView(d3d12_texture.GetResource(), nullptr, &direct_load_uav_desc,
+                                      descriptor_dest.first);
+    // The whole texture is written. A previous direct load may still be
+    // writing if nothing has read the texture since.
+    D3D12_RESOURCE_STATES texture_old_state =
+        d3d12_texture.SetResourceState(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (texture_old_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+      command_processor_.PushUAVBarrier(d3d12_texture.GetResource());
+    } else {
+      command_processor_.PushTransitionBarrier(d3d12_texture.GetResource(), texture_old_state,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+  } else {
+    gpu::d3d12::objects::CreateBufferTypedUAV(
+        device, descriptor_dest.first, copy_buffer,
+        gpu::d3d12::objects::GetUintPow2DXGIFormat(load_shader_info.dest_bpe_log2),
+        static_cast<u32>(copy_buffer_size) >> load_shader_info.dest_bpe_log2);
+  }
   command_list.D3DSetComputeRootDescriptorTable(2, descriptor_dest.second);
   // Scaled sources depend on the current buffer, so their descriptors are set later in the loop.
   if (!texture_resolution_scaled) {
@@ -1811,7 +1969,9 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
           is_base ? d3d12_texture.GetGuestBaseSize() : d3d12_texture.GetGuestMipsSize();
       if (!UpdateScaledResolveRange(guest_address, guest_size_unscaled,
                                     load_shader_info.source_bpe_log2)) {
-        command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
+        if (copy_buffer) {
+          command_processor_.ReleaseScratchGPUBuffer(copy_buffer, copy_buffer_state);
+        }
         return false;
       }
       TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1904,6 +2064,10 @@ bool D3D12TextureCache::LoadHostTextureDataFromResidentMemory(Texture& texture, 
   }
 
   d3d12_texture.MarkAsUsed();
+
+  if (direct_load) {
+    return true;
+  }
 
   ID3D12Resource* texture_resource = d3d12_texture.GetResource();
   command_processor_.PushTransitionBarrier(

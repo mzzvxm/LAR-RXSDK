@@ -170,6 +170,14 @@ class XenosSettings : public SettingOwner {
   REX_SETTING(bool, direct_host_resolve, true,
               "Resolve from host render targets to shared memory when possible");
   REX_SETTING(bool, texture_3d_to_2d, true, "Sample 3D textures as 2D textures");
+  REX_SETTING(bool, texture_load_direct_unscaled, true,
+              "At native resolution, load single-level 2D textures over memory that a resolve "
+              "has written straight into the host texture in one compute pass, instead of "
+              "decoding into a buffer and copying that into the texture (at a scaled resolution "
+              "such textures are always loaded straight in, where the host allows it). Gains were "
+              "measured on an integrated Radeon (4% of the frame); the pictures were not proved "
+              "identical on every GPU, so off keeps the buffer and the copy, to compare",
+              kRestart, kDebugOnly);
 
  protected:
   XenosSettings() : SettingOwner("gpu.xenos") {}

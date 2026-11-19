@@ -1,0 +1,141 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+// texture_load_32bpb.xesli and texture_load_64bpb.xesli for single-level
+// resolution-scaled 2D textures, storing the texels straight into the host
+// texture through an unsigned integer view of the texel size (the ReXGlue SDK's
+// texture_load_direct) instead of into a buffer copied to the texture
+// afterwards: R32_UINT / r32ui for 32bpb, R16G16B16A16_UINT / rgba16ui for
+// 64bpb. The guest addressing, endian swapping and transformation are the same;
+// the host offset and pitch push constants are unused. Built with the
+// xenia-project/xenia 0b2ffa3 shader sources, which the SDK's texture load
+// shaders are built from.
+// XE_TEXTURE_LOAD_DIRECT_64BPB: 64bpb, otherwise 32bpb with
+// XE_TEXTURE_LOAD_32BPB_TRANSFORM.
+
+#define XE_TEXTURE_LOAD_RESOLUTION_SCALED
+#include "texture_load.xesli"
+
+#ifdef XE_TEXTURE_LOAD_DIRECT_64BPB
+  #define XE_TEXTURE_LOAD_DIRECT_BLOCKS_PER_THREAD_LOG2 2u
+  #define XE_TEXTURE_LOAD_DIRECT_BPB 8u
+  #define XE_TEXTURE_LOAD_DIRECT_BPB_LOG2 3u
+#else
+  #define XE_TEXTURE_LOAD_DIRECT_BLOCKS_PER_THREAD_LOG2 3u
+  #define XE_TEXTURE_LOAD_DIRECT_BPB 4u
+  #define XE_TEXTURE_LOAD_DIRECT_BPB_LOG2 2u
+#endif
+
+#if SHADING_LANGUAGE_GLSL_XE
+  #ifdef XE_TEXTURE_LOAD_DIRECT_64BPB
+    layout(rgba16ui, set=0, binding=0) uniform writeonly uimage2DArray
+        xe_texture_load_dest;
+  #else
+    layout(r32ui, set=0, binding=0) uniform writeonly uimage2DArray
+        xe_texture_load_dest;
+  #endif
+  #define XE_TEXTURE_LOAD_DIRECT_STORE(x, y, z, value) \
+      imageStore(xe_texture_load_dest, int3_xe(int(x), int(y), int(z)), \
+                 uint4_xe(value))
+#elif SHADING_LANGUAGE_HLSL_XE
+  #ifdef XE_TEXTURE_LOAD_DIRECT_64BPB
+    RWTexture2DArray<uint4> xe_texture_load_dest : register(u0, space0);
+  #else
+    RWTexture2DArray<uint> xe_texture_load_dest : register(u0, space0);
+  #endif
+  #define XE_TEXTURE_LOAD_DIRECT_STORE(x, y, z, value) \
+      xe_texture_load_dest[uint3_xe(x, y, z)] = (value)
+#else
+  #error Direct texture loads are only implemented for GLSL and HLSL.
+#endif
+
+array_buffer_declare_xe(uint4_xe, xe_texture_load_source, set=1, binding=0, t0,
+                        space0)
+
+// Stores 16 bytes of blocks (4 32bpb or 2 64bpb) starting at block_index,
+// skipping the blocks beyond the width of the texture.
+void XeTextureLoadDirectStore(uint3_xe block_index, uint width,
+                              uint4_xe blocks) {
+  #ifdef XE_TEXTURE_LOAD_DIRECT_64BPB
+    // Little-endian: the low half of each dword is the lower-numbered
+    // component.
+    XE_TEXTURE_LOAD_DIRECT_STORE(
+        block_index.x, block_index.y, block_index.z,
+        uint4_xe(blocks.x & 0xFFFFu, blocks.x >> 16u, blocks.y & 0xFFFFu,
+                 blocks.y >> 16u));
+    dont_flatten_xe if (block_index.x + 1u < width) {
+      XE_TEXTURE_LOAD_DIRECT_STORE(
+          block_index.x + 1u, block_index.y, block_index.z,
+          uint4_xe(blocks.z & 0xFFFFu, blocks.z >> 16u, blocks.w & 0xFFFFu,
+                   blocks.w >> 16u));
+    }
+  #else
+    XE_TEXTURE_LOAD_DIRECT_STORE(block_index.x, block_index.y, block_index.z,
+                                 blocks.x);
+    dont_flatten_xe if (block_index.x + 1u < width) {
+      XE_TEXTURE_LOAD_DIRECT_STORE(block_index.x + 1u, block_index.y,
+                                   block_index.z, blocks.y);
+    }
+    dont_flatten_xe if (block_index.x + 2u < width) {
+      XE_TEXTURE_LOAD_DIRECT_STORE(block_index.x + 2u, block_index.y,
+                                   block_index.z, blocks.z);
+    }
+    dont_flatten_xe if (block_index.x + 3u < width) {
+      XE_TEXTURE_LOAD_DIRECT_STORE(block_index.x + 3u, block_index.y,
+                                   block_index.z, blocks.w);
+    }
+  #endif
+}
+
+entry_bindings_begin_compute_xe
+  XE_TEXTURE_LOAD_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  array_buffer_binding_xe(uint4_xe, xe_texture_load_source, buffer(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+{
+  // 1 thread = 8 32bpb or 4 64bpb blocks, in two 16-byte parts, as in
+  // texture_load_32bpb.xesli and texture_load_64bpb.xesli.
+  XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint3_xe block_index =
+      in_global_thread_id_xe <<
+      uint3_xe(XE_TEXTURE_LOAD_DIRECT_BLOCKS_PER_THREAD_LOG2, 0u, 0u);
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
+    return;
+  }
+  uint block_offset_guest =
+      XeTextureLoadGuestBlockOffset(load_info, block_index,
+                                    XE_TEXTURE_LOAD_DIRECT_BPB,
+                                    XE_TEXTURE_LOAD_DIRECT_BPB_LOG2) >> 4u;
+  uint4_xe guest_blocks = XeEndianSwap32(
+      array_buffer_load_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  #ifndef XE_TEXTURE_LOAD_DIRECT_64BPB
+    guest_blocks = XE_TEXTURE_LOAD_32BPB_TRANSFORM(guest_blocks);
+  #endif
+  XeTextureLoadDirectStore(block_index, load_info.size_blocks.x, guest_blocks);
+  uint3_xe block_index_right = block_index;
+  block_index_right.x += 16u >> XE_TEXTURE_LOAD_DIRECT_BPB_LOG2;
+  dont_flatten_xe if (block_index_right.x < load_info.size_blocks.x) {
+    block_offset_guest +=
+        XeTextureLoadRightConsecutiveBlocksOffset(
+            load_info, block_index.x, XE_TEXTURE_LOAD_DIRECT_BPB_LOG2) >> 4u;
+    guest_blocks = XeEndianSwap32(
+        array_buffer_load_xe(xe_texture_load_source, block_offset_guest),
+        load_info.endian_32);
+    #ifndef XE_TEXTURE_LOAD_DIRECT_64BPB
+      guest_blocks = XE_TEXTURE_LOAD_32BPB_TRANSFORM(guest_blocks);
+    #endif
+    XeTextureLoadDirectStore(block_index_right, load_info.size_blocks.x,
+                             guest_blocks);
+  }
+}
+entry_code_end_compute_xe
