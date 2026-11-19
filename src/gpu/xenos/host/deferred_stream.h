@@ -50,7 +50,13 @@ class DeferredStream {
 
   const uintmax_t* Data() const { return stream_.data(); }
 
+  /** For changing the arguments of a command written earlier. Valid until the next write. */
+  uintmax_t* Data() { return stream_.data(); }
+
   size_t Size() const { return stream_.size(); }
+
+  /** Discards the elements from the given count on. */
+  void Truncate(size_t elements) { stream_.resize(elements); }
 
   /**
    * Appends a header and room for its arguments.

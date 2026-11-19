@@ -36,9 +36,15 @@ class DeferredCommandList {
 
   // Swaps the recorded commands with `stream` (normally an empty one, whose
   // allocation is reused) and starts recording anew, for another thread to
-  // execute them (threaded submission).
+  // execute them (threaded submission). The hoisted commands (see
+  // CmdHoistPoint) follow the main ones in `stream`, and its last element is
+  // the size of the main ones.
   void TakeStream(std::vector<uintmax_t>& stream) {
     command_stream_.Swap(stream);
+    const size_t main_size = stream.size();
+    stream.insert(stream.end(), hoisted_stream_.Data(),
+                  hoisted_stream_.Data() + hoisted_stream_.Size());
+    stream.push_back(uintmax_t(main_size));
     Reset();
   }
   // Executes commands taken with TakeStream. Touches nothing else in the
@@ -47,8 +53,38 @@ class DeferredCommandList {
   void ExecuteStream(ID3D12GraphicsCommandList* command_list,
                      ID3D12GraphicsCommandList1* command_list_1,
                      const std::vector<uintmax_t>& stream) const {
-    ExecuteCommands(command_list, command_list_1, stream.data(), stream.size());
+    if (stream.empty()) {
+      return;
+    }
+    const size_t main_size = static_cast<size_t>(stream.back());
+    REX_ASSERT(main_size < stream.size());
+    ExecuteCommands(command_list, command_list_1, stream.data(), main_size,
+                    stream.data() + main_size);
   }
+
+  // Hoisting (gpu.d3d12.hoist_shared_memory_uploads): commands recorded later but
+  // executed earlier, at a hoist point written into the stream before (the
+  // shared memory uploads that D3D12SharedMemory moves to the start of a run of
+  // draws instead of copying between the draws). The hoisted commands go to a
+  // second stream; a hoist point covers a contiguous range of it, which Execute
+  // replays where the hoist point is.
+  // Writes a hoist point covering nothing yet, and returns its handle.
+  size_t CmdHoistPoint();
+  // Directs the commands written from now on to the hoisted stream (true) or
+  // the main one.
+  void SetWritingHoisted(bool hoisted) {
+    write_stream_ = hoisted ? &hoisted_stream_ : &command_stream_;
+  }
+  size_t hoisted_stream_size() const { return hoisted_stream_.Size(); }
+  // Drops the hoisted commands from `size` on (only those of the latest hoist
+  // point).
+  void TruncateHoistedStream(size_t size) {
+    REX_ASSERT(size <= hoisted_stream_.Size());
+    hoisted_stream_.Truncate(size);
+  }
+  // Makes the hoist point cover the hoisted stream from where it was at
+  // CmdHoistPoint to its current end.
+  void ExtendHoistPoint(size_t hoist_point);
 
   D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
                                                   D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
@@ -509,6 +545,7 @@ class DeferredCommandList {
     kBeginDebugMarker,
     kEndDebugMarker,
     kInsertDebugMarker,
+    kHoistedCommands,
   };
 
   using Stream = gpu::DeferredStream<Command>;
@@ -650,15 +687,23 @@ class DeferredCommandList {
     // Followed by null terminated label string.
   };
 
+  struct HoistedCommandsArguments {
+    // Range of the hoisted stream, in elements.
+    size_t begin;
+    size_t end;
+  };
+
   void* WriteCommand(Command command, size_t arguments_size_bytes);
   void ExecuteCommands(ID3D12GraphicsCommandList* command_list,
                        ID3D12GraphicsCommandList1* command_list_1, const uintmax_t* stream,
-                       size_t stream_remaining) const;
+                       size_t stream_remaining, const uintmax_t* hoisted_stream) const;
 
   const D3D12CommandProcessor& command_processor_;
 
   /** uintmax_t gives all structures uint64_t and pointer alignment. */
   Stream command_stream_;
+  Stream hoisted_stream_;
+  Stream* write_stream_ = &command_stream_;
 };
 
 }  // namespace rex::gpu::d3d12

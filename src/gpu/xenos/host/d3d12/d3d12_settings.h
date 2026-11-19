@@ -44,6 +44,12 @@ class D3D12Settings : public SettingOwner {
               "guest's command buffers end), so the submission thread replays it while the next "
               "draws are recorded and less is left to replay when a frame is presented",
               Range{0, 100000}, kDebugOnly);
+  REX_SETTING(bool, hoist_shared_memory_uploads, false,
+              "Record the shared memory uploads (vertex and index data the CPU rewrote, textures) "
+              "at the start of the run of draws they are for, between one pair of barriers for the "
+              "run, when no draw before the upload has read the uploaded pages, instead of copying "
+              "between the draws",
+              kDebugOnly);
   REX_SETTING(bool, dxbc_disasm, false, "Dump DXBC disassembly");
   REX_SETTING(bool, dxbc_disasm_dxilconv, false, "Dump DXIL conversion disassembly");
   REX_SETTING(i32, pipeline_creation_threads, -1,

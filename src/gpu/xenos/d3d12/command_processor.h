@@ -470,6 +470,11 @@ class D3D12CommandProcessor : public CommandProcessor {
   std::vector<PendingUnscaledResolveCopy> pending_unscaled_copies_;
   void FlushUnscaledResolveCopies();
   bool IssueDrawMemexportReadbackFullPath(u32 total_size);
+  // Upload hoisting (gpu.d3d12.hoist_shared_memory_uploads): called for a draw that
+  // has put the shared memory in the reading state (or the writing one, for a
+  // memory export) and submitted the barriers.
+  void BeginSharedMemoryDrawReads(bool memexport_used, const D3D12Shader* vertex_shader,
+                                  const D3D12Shader* pixel_shader);
   bool IssueDrawMemexportReadbackFastPath(u32 total_size);
 
   /** Returns a COPY_DEST buffer for reading GPU data back, synchronized right after use. */
