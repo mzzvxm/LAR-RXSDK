@@ -78,6 +78,8 @@ flowchart TD
 
 `IGraphicsSystem::GetFrameStats` returns `frame_time_ms` and `fps` over the last second, and `frame_count` since launch. A program that presents with its own renderer instead of a driver calls `IGraphicsSystem::ReportFrame` once per present, so these counts stay correct.
 
+`IGraphicsSystem::RequestResolveReadback` asks a Xenos driver to read the resolves that write a range of guest physical memory back into it, synchronously, for a number of frames. A title that reads a picture on the CPU, such as a screenshot of its front buffer, needs it for the frames around the read, and it costs nothing for the resolves outside the range. A frame is a swap the command processor has run, which can be a few frames behind the title, so a caller that needs the readback for a while repeats the request every frame. It returns false when there is no Xenos driver, and the program then reads back by itself.
+
 ## MMIO Block
 
 Recompiled code reaches the GPU registers through the MMIO block at `0x7FC80000`. `TitleRuntime::Launch` attaches the block, as `MMIOBlock::kGPU`, after the graphics system accepts the title. The block passes each access to the graphics system, which passes it to the driver. See [MMIO Blocks](../runtime/memory.md#mmio-blocks).
