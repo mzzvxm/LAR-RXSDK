@@ -29,6 +29,12 @@ class REX_KERNEL_API KernelSettings final : public SettingOwner {
               "asks for one on first launch");
   REX_SETTING(std::string, command_line, "", "Arguments the title sees after default.xex",
               kUntilLaunch);
+  REX_SETTING(bool, count_critical_section_spins, false,
+              "Count the critical section enters that spin (a spin count above 0) and how many of "
+              "them take the section while spinning, and log the totals when the title ends, "
+              "'critical section spins: ...'. For finding out whether a title ever reaches the "
+              "spin loop. Off: nothing is counted and the enter path is unchanged",
+              kDebugOnly);
 
   KernelSettings();
 };

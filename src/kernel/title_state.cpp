@@ -48,6 +48,7 @@
 #include "kernel/rexkernel_module.h"
 #include "kernel/dispatcher.h"
 #include "kernel/title_state.h"
+#include "kernel/xboxkrnl/critical_section_counter.h"
 #include "kernel/module_registry.h"
 #include "kernel/notification_broadcaster.h"
 #include "kernel/object_table.h"
@@ -437,6 +438,13 @@ void TitleState::Shutdown() {
     return;
   }
   StopThreads();
+  {
+    // Not through GetKernelSettings(), which checks that the kernel module is connected: a
+    // shutdown may come after it is gone.
+    const KernelServices* services = GetKernelServices();
+    xboxkrnl::LogCriticalSectionSpinCounts(services && services->kernel_settings &&
+                                           services->kernel_settings->count_critical_section_spins.Get());
+  }
   DetachSystems();
   DestroySubsystems();
   EndServing();
