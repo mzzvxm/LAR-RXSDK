@@ -686,6 +686,8 @@ bool VulkanCommandProcessor::SetupContext() {
   }
   InvalidateAllVertexBufferResidency();
 
+  vulkan_device_ = static_cast<const gpu::vulkan::VulkanProvider*>(graphics_system_->GetProvider())
+                       ->GetVulkanDevice();
   const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
   const VkDevice device = vulkan_device->GetDevice();
@@ -792,6 +794,14 @@ bool VulkanCommandProcessor::SetupContext() {
                                                         guest_shader_pipeline_stages_);
   if (!shared_memory_->Initialize()) {
     REXGPU_FAIL(false, "Failed to initialize shared memory");
+  }
+  {
+    size_t hoist_page_words =
+        ((static_cast<size_t>(SharedMemory::kBufferSize) >> shared_memory_->GetPageSizeLog2()) +
+         63) /
+        64;
+    hoist_read_pages_.assign(hoist_page_words, 0);
+    hoist_read_pages_serial_.assign(hoist_page_words, 0);
   }
 
   primitive_processor_ = std::make_unique<VulkanPrimitiveProcessor>(
@@ -1731,8 +1741,169 @@ bool VulkanCommandProcessor::SetupContext() {
   return true;
 }
 
+// Command buffers recorded and submitted on a thread of their own: ported from
+// ForzaHorizon1-ReImagined's patch 0038
+// (https://github.com/Dyotson/ForzaHorizon1-ReImagined, patches/rexglue-sdk),
+// under its licence:
+//
+//   MIT License
+//
+//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+
+bool VulkanCommandProcessor::StartSubmissionThread() {
+  if (submission_thread_) {
+    return true;
+  }
+  submission_thread_shutdown_ = false;
+  submission_thread_ = rex::platform::Thread::Create({}, [this]() { SubmissionThread(); });
+  if (!submission_thread_) {
+    REXGPU_ERROR("Failed to create the Vulkan submission thread, submitting on the GPU thread");
+    return false;
+  }
+  submission_thread_->SetName("GPU Submission");
+  return true;
+}
+
+void VulkanCommandProcessor::SubmissionThread() {
+  const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
+  const VkDevice device = vulkan_device->GetDevice();
+  while (true) {
+    SubmissionJob job;
+    {
+      std::unique_lock<std::mutex> lock(submission_thread_mutex_);
+      submission_thread_request_cond_.wait(
+          lock, [this] { return submission_thread_shutdown_ || !submission_thread_jobs_.empty(); });
+      if (submission_thread_jobs_.empty()) {
+        return;
+      }
+      job = std::move(submission_thread_jobs_.front());
+      submission_thread_jobs_.pop_front();
+    }
+    // After a failure, the following submissions are dropped: the command
+    // processor handles it as a lost device.
+    bool submitted = false;
+    if (!submission_thread_failed_.load(std::memory_order_relaxed)) {
+      // The pool was reclaimed only after the fence of its previous submission
+      // had been signaled.
+      VkResult result = dfn.vkResetCommandPool(device, job.command_buffer.pool, 0);
+      if (result == VK_SUCCESS) {
+        VkCommandBufferBeginInfo command_buffer_begin_info;
+        command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        command_buffer_begin_info.pNext = nullptr;
+        command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        command_buffer_begin_info.pInheritanceInfo = nullptr;
+        result = dfn.vkBeginCommandBuffer(job.command_buffer.buffer, &command_buffer_begin_info);
+      }
+      if (result == VK_SUCCESS) {
+        deferred_command_buffer_.ExecuteStream(job.command_buffer.buffer, job.stream,
+                                               job.hoisted_stream);
+        result = dfn.vkEndCommandBuffer(job.command_buffer.buffer);
+      }
+      if (result == VK_SUCCESS) {
+        VkSubmitInfo submit_info;
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.pNext = nullptr;
+        submit_info.waitSemaphoreCount = static_cast<u32>(job.wait_semaphores.size());
+        submit_info.pWaitSemaphores =
+            !job.wait_semaphores.empty() ? job.wait_semaphores.data() : nullptr;
+        submit_info.pWaitDstStageMask =
+            !job.wait_stage_masks.empty() ? job.wait_stage_masks.data() : nullptr;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &job.command_buffer.buffer;
+        submit_info.signalSemaphoreCount = 0;
+        submit_info.pSignalSemaphores = nullptr;
+        gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+            vulkan_device->AcquireQueue(vulkan_device->GetQueueFamilyGraphicsCompute(), 0);
+        result = dfn.vkQueueSubmit(queue_acquisition.GetQueue(), 1, &submit_info, job.fence);
+      }
+      if (result == VK_SUCCESS) {
+        submitted = true;
+      } else {
+        REXGPU_ERROR(
+            "Failed to record or submit a Vulkan command buffer on the submission thread "
+            "(result {})",
+            static_cast<i32>(result));
+      }
+    }
+    job.stream.clear();
+    job.hoisted_stream.clear();
+    {
+      std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+      if (!submitted) {
+        submission_thread_failed_.store(true, std::memory_order_relaxed);
+      }
+      submission_thread_free_streams_.push_back(std::move(job.stream));
+      submission_thread_free_streams_.push_back(std::move(job.hoisted_stream));
+      submission_thread_submitted_.store(job.submission, std::memory_order_release);
+    }
+    submission_thread_done_cond_.notify_all();
+  }
+}
+
+void VulkanCommandProcessor::AwaitSubmissionThread(u64 submission) {
+  const u64 target = std::min(submission, submission_thread_queued_);
+  if (submission_thread_submitted_.load(std::memory_order_acquire) >= target) {
+    return;
+  }
+  std::unique_lock<std::mutex> lock(submission_thread_mutex_);
+  submission_thread_done_cond_.wait(lock, [this, target] {
+    return submission_thread_submitted_.load(std::memory_order_acquire) >= target;
+  });
+}
+
+u64 VulkanCommandProcessor::GetLastQueuedSubmission() const {
+  const u64 submitted = submission_thread_submitted_.load(std::memory_order_acquire);
+  if (submitted >= submission_thread_queued_) {
+    // Nothing is left with the thread, and everything ended without it was
+    // submitted directly.
+    return GetCurrentSubmission() - 1;
+  }
+  // Submissions made directly while the setting was off come after all that
+  // the thread had been given before them.
+  return std::max(submitted, submission_direct_last_);
+}
+
+void VulkanCommandProcessor::ShutdownSubmissionThread() {
+  if (!submission_thread_) {
+    return;
+  }
+  // The thread goes through what's still queued before exiting.
+  {
+    std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+    submission_thread_shutdown_ = true;
+  }
+  submission_thread_request_cond_.notify_all();
+  rex::platform::Wait(submission_thread_.get(), false);
+  submission_thread_.reset();
+  submission_thread_jobs_.clear();
+  submission_thread_free_streams_.clear();
+  submission_thread_queued_ = 0;
+  submission_thread_submitted_.store(0, std::memory_order_relaxed);
+  submission_thread_failed_.store(false, std::memory_order_relaxed);
+}
+
 void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
+  ShutdownSubmissionThread();
   InvalidateAllVertexBufferResidency();
   ShutdownOcclusionQueryResources();
 
@@ -2734,6 +2905,9 @@ void VulkanCommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32
 
         // Everything submits before the image returns to the presenter, release barrier included.
         EndSubmission(true);
+        // With threaded submission, they must be in the queue, not only handed
+        // over: the presenter submits its own commands right after this.
+        AwaitSubmissionThread();
         return true;
       });
 
@@ -2919,10 +3093,19 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
+
+  // Shared memory uploads for the draws in this render pass may be recorded
+  // here, after the barriers before it (CanHoistSharedMemoryUpload).
+  if (!hoist_read_pages_.empty() && GetVulkanSettings().hoist_shared_memory_uploads.Get()) {
+    hoist_point_ = deferred_command_buffer_.CmdHoistPoint();
+    ++hoist_render_pass_serial_;
+    hoist_render_pass_ = true;
+  }
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
@@ -2991,6 +3174,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
@@ -3070,6 +3254,96 @@ void VulkanCommandProcessor::EndRenderPass() {
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
   in_render_pass_ = false;
+  hoist_render_pass_ = false;
+}
+
+// Shared memory uploads recorded before the render pass instead of ending it:
+// ported from ForzaHorizon1-ReImagined's patch 0036
+// (https://github.com/Dyotson/ForzaHorizon1-ReImagined, patches/rexglue-sdk),
+// under its licence:
+//
+//   MIT License
+//
+//   Copyright (c) 2026 Dyotson and Forza Horizon 1: ReImagined contributors
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+
+// CHECK: a draw reads the shared memory only through its vertex fetch constants' ranges, its guest
+// indices and its memory exports, rounded out to pages; and nothing else reads it inside a
+// guest render pass (clear rectangle draws and resolves do not, or end the render pass). Read
+// from this tree's code, not run: if another reader is added, it has to call
+// MarkSharedMemoryReadInRenderPass. The fork checked the same picture on and off at 3x only.
+bool VulkanCommandProcessor::CanHoistSharedMemoryUpload(
+    const std::vector<std::pair<u32, u32>>& upload_page_ranges) const {
+  if (!hoist_render_pass_ || !in_render_pass_) {
+    return false;
+  }
+  for (const std::pair<u32, u32>& range : upload_page_ranges) {
+    if (!range.second) {
+      continue;
+    }
+    u32 page_first = range.first;
+    u32 page_last = range.first + range.second - 1;
+    if ((page_last >> 6) >= hoist_read_pages_.size()) {
+      return false;
+    }
+    for (u32 word = page_first >> 6; word <= (page_last >> 6); ++word) {
+      if (hoist_read_pages_serial_[word] != hoist_render_pass_serial_) {
+        continue;
+      }
+      u64 mask = ~static_cast<u64>(0);
+      if (word == (page_first >> 6)) {
+        mask &= ~static_cast<u64>(0) << (page_first & 63);
+      }
+      if (word == (page_last >> 6)) {
+        mask &= ~static_cast<u64>(0) >> (63 - (page_last & 63));
+      }
+      if (hoist_read_pages_[word] & mask) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void VulkanCommandProcessor::MarkSharedMemoryReadInRenderPass(u32 start, u32 length) {
+  if (!hoist_render_pass_ || !length || start >= SharedMemory::kBufferSize) {
+    return;
+  }
+  length = std::min(length, SharedMemory::kBufferSize - start);
+  u32 page_size_log2 = shared_memory_->GetPageSizeLog2();
+  u32 page_first = start >> page_size_log2;
+  u32 page_last = (start + length - 1) >> page_size_log2;
+  for (u32 word = page_first >> 6; word <= (page_last >> 6); ++word) {
+    u64 mask = ~static_cast<u64>(0);
+    if (word == (page_first >> 6)) {
+      mask &= ~static_cast<u64>(0) << (page_first & 63);
+    }
+    if (word == (page_last >> 6)) {
+      mask &= ~static_cast<u64>(0) >> (63 - (page_last & 63));
+    }
+    if (hoist_read_pages_serial_[word] != hoist_render_pass_serial_) {
+      hoist_read_pages_serial_[word] = hoist_render_pass_serial_;
+      hoist_read_pages_[word] = 0;
+    }
+    hoist_read_pages_[word] |= mask;
+  }
 }
 
 VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
@@ -3504,10 +3778,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, u32 index
   VulkanShader::VulkanTranslation* pixel_shader_translation;
   bool memexport_writes_possible = memexport_used_vertex || memexport_used_pixel;
 
+  // With threaded submission, a long submission is ended early, so the
+  // submission thread records it while the following draws are processed, and
+  // less is left to record when the frame is presented.
+  const u32 split_draws = GetVulkanSettings().threaded_submission_split_draws.Get();
+  if (split_draws && submission_open_ && submission_draws_ >= split_draws && submission_thread_ &&
+      GetVulkanSettings().threaded_submission.Get() && !active_occlusion_query_.valid &&
+      CanEndSubmissionImmediately()) {
+    EndSubmission(false);
+  }
+
   // 2 iterations because awaiting a submission on sampler overflow invalidates earlier updates.
   for (u32 i = 0; i < 2; ++i) {
     if (!BeginSubmission(true)) {
       return draw_fail("begin_submission");
+    }
+    if (!i) {
+      ++submission_draws_;
     }
 
     if (!primitive_processor_->Process(primitive_processing_result)) {
@@ -3834,6 +4121,33 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, u32 index
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->GetLastUpdateRenderPass(),
       render_target_cache_->GetLastUpdateFramebuffer());
+
+  // What this draw reads from the shared memory: no upload into it can go
+  // before this render pass any more (CanHoistSharedMemoryUpload).
+  if (hoist_render_pass_) {
+    for (const Shader* shader :
+         {static_cast<const Shader*>(vertex_shader), static_cast<const Shader*>(pixel_shader)}) {
+      if (!shader) {
+        continue;
+      }
+      const Shader::ConstantRegisterMap& constant_map = shader->GetConstantRegisterMap();
+      for (u32 i = 0; i < rex::CountOf(constant_map.vertex_fetch_bitmap); ++i) {
+        u32 vfetch_bits_remaining = constant_map.vertex_fetch_bitmap[i];
+        u32 j;
+        while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+          vfetch_bits_remaining &= ~(static_cast<u32>(1) << j);
+          xenos::VertexFetch vfetch_constant = regs.GetVertexFetch(i * 32 + j);
+          MarkSharedMemoryReadInRenderPass(vfetch_constant.address << 2, vfetch_constant.size << 2);
+        }
+      }
+    }
+    std::pair<u32, u32> guest_index_range = primitive_processor_->last_guest_index_range();
+    MarkSharedMemoryReadInRenderPass(guest_index_range.first, guest_index_range.second);
+    for (const draw_state::MemExportRange& memexport_range : memexport_ranges_) {
+      MarkSharedMemoryReadInRenderPass(memexport_range.base_address_dwords << 2,
+                                       memexport_range.size_bytes);
+    }
+  }
 
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
@@ -4881,8 +5195,10 @@ bool VulkanCommandProcessor::HostOcclusionQueryRead(u32 host_index, u64 submissi
       // Still being recorded.
       return false;
     }
-    // Only looks at the fences, never waits.
-    // CHECK: no stall from this call (the frame times of a scene with the sun glare).
+    // Only looks at the fences, never waits. With threaded submission it polls only the fences of
+    // submissions the thread has passed to vkQueueSubmit (GetLastQueuedSubmission), so a query
+    // still with the thread reads as not done yet. CHECK: no stall from this call (the frame times
+    // of a scene with the sun glare).
     CheckSubmissionFenceAndDeviceLoss(0);
     if (submission_completed_ < submission) {
       return false;
@@ -4936,11 +5252,30 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(u64 await_submiss
     await_submission = GetCurrentSubmission() - 1;
   }
 
+  // With threaded submission, a fence can be awaited only once the thread has
+  // passed it to vkQueueSubmit, and only the fences of submissions already in
+  // the queue are checked.
+  if (await_submission > submission_completed_) {
+    AwaitSubmissionThread(await_submission);
+  }
+  if (submission_thread_failed_.load(std::memory_order_acquire)) {
+    device_lost_ = true;
+    if (graphics_system_) {
+      graphics_system_->OnHostGPULossFromAnyThread(true);
+    }
+    return;
+  }
+
   const gpu::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const gpu::vulkan::VulkanDevice::Functions& dfn = vulkan_device->GetFunctions();
   const VkDevice device = vulkan_device->GetDevice();
 
-  size_t fences_total = submissions_in_flight_fences_.size();
+  const u64 last_queued_submission = GetLastQueuedSubmission();
+  size_t fences_total =
+      last_queued_submission > submission_completed_
+          ? std::min(submissions_in_flight_fences_.size(),
+                     static_cast<size_t>(last_queued_submission - submission_completed_))
+          : 0;
   size_t fences_awaited = 0;
   if (await_submission > submission_completed_) {
     VkResult wait_result =
@@ -5093,6 +5428,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
 
   if (!submission_open_) {
     submission_open_ = true;
+    submission_draws_ = 0;
 
     // The deferred command buffer submits to the real one at the end, after async pipelines finish.
     deferred_command_buffer_.Reset();
@@ -5110,6 +5446,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     current_render_pass_ = VK_NULL_HANDLE;
     current_framebuffer_ = nullptr;
     in_render_pass_ = false;
+    hoist_render_pass_ = false;
     current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
     current_external_compute_pipeline_ = VK_NULL_HANDLE;
@@ -5305,6 +5642,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       bind_sparse_info.pImageBinds = 0;
       bind_sparse_info.signalSemaphoreCount = 1;
       bind_sparse_info.pSignalSemaphores = &bind_sparse_semaphore;
+      // With threaded submission, the binds reach the queue after the
+      // submissions already ended, as they do without it.
+      AwaitSubmissionThread();
       VkResult bind_sparse_result;
       {
         gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
@@ -5327,60 +5667,92 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
     REX_ASSERT(!command_buffers_writable_.empty());
     CommandBuffer command_buffer = command_buffers_writable_.back();
-    if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
-      REXGPU_FAIL(false, "Failed to reset a Vulkan command pool");
-    }
-    VkCommandBufferBeginInfo command_buffer_begin_info;
-    command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    command_buffer_begin_info.pNext = nullptr;
-    command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    command_buffer_begin_info.pInheritanceInfo = nullptr;
-    if (dfn.vkBeginCommandBuffer(command_buffer.buffer, &command_buffer_begin_info) != VK_SUCCESS) {
-      REXGPU_FAIL(false, "Failed to begin a Vulkan command buffer");
-    }
-    deferred_command_buffer_.Execute(command_buffer.buffer);
-    if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
-      REXGPU_FAIL(false, "Failed to end a Vulkan command buffer");
-    }
-
-    VkSubmitInfo submit_info;
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.pNext = nullptr;
-    if (!current_submission_wait_semaphores_.empty()) {
-      submit_info.waitSemaphoreCount = static_cast<u32>(current_submission_wait_semaphores_.size());
-      submit_info.pWaitSemaphores = current_submission_wait_semaphores_.data();
-      submit_info.pWaitDstStageMask = current_submission_wait_stage_masks_.data();
-    } else {
-      submit_info.waitSemaphoreCount = 0;
-      submit_info.pWaitSemaphores = nullptr;
-      submit_info.pWaitDstStageMask = nullptr;
-    }
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer.buffer;
-    submit_info.signalSemaphoreCount = 0;
-    submit_info.pSignalSemaphores = nullptr;
     REX_ASSERT(!fences_free_.empty());
     VkFence fence = fences_free_.back();
     if (dfn.vkResetFences(device, 1, &fence) != VK_SUCCESS) {
       REXGPU_FAIL(false, "Failed to reset a Vulkan submission fence");
     }
-    VkResult submit_result;
-    {
-      gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
-          vulkan_device->AcquireQueue(vulkan_device->GetQueueFamilyGraphicsCompute(), 0);
-      submit_result = dfn.vkQueueSubmit(queue_acquisition.GetQueue(), 1, &submit_info, fence);
-    }
-    if (submit_result != VK_SUCCESS) {
-      REXGPU_ERROR("Failed to submit a Vulkan command buffer");
-      if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
-        device_lost_ = true;
-        if (graphics_system_) {
-          graphics_system_->OnHostGPULossFromAnyThread(true);
+    u64 submission_current = GetCurrentSubmission();
+    if (GetVulkanSettings().threaded_submission.Get() && StartSubmissionThread()) {
+      SubmissionJob job;
+      job.submission = submission_current;
+      job.command_buffer = command_buffer;
+      job.fence = fence;
+      job.wait_semaphores = current_submission_wait_semaphores_;
+      job.wait_stage_masks.swap(current_submission_wait_stage_masks_);
+      {
+        std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+        for (std::vector<uintmax_t>* stream : {&job.stream, &job.hoisted_stream}) {
+          if (!submission_thread_free_streams_.empty()) {
+            *stream = std::move(submission_thread_free_streams_.back());
+            submission_thread_free_streams_.pop_back();
+          }
         }
       }
-      return false;
+      deferred_command_buffer_.TakeStreams(job.stream, job.hoisted_stream);
+      {
+        std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+        submission_thread_jobs_.push_back(std::move(job));
+      }
+      submission_thread_request_cond_.notify_one();
+      submission_thread_queued_ = submission_current;
+    } else {
+      // Threaded submission is off or the thread could not be created: submit here, after the
+      // thread (if it ran) has submitted what it was given, so the submissions reach the queue in
+      // order.
+      AwaitSubmissionThread();
+      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
+        REXGPU_FAIL(false, "Failed to reset a Vulkan command pool");
+      }
+      VkCommandBufferBeginInfo command_buffer_begin_info;
+      command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      command_buffer_begin_info.pNext = nullptr;
+      command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      command_buffer_begin_info.pInheritanceInfo = nullptr;
+      if (dfn.vkBeginCommandBuffer(command_buffer.buffer, &command_buffer_begin_info) !=
+          VK_SUCCESS) {
+        REXGPU_FAIL(false, "Failed to begin a Vulkan command buffer");
+      }
+      deferred_command_buffer_.Execute(command_buffer.buffer);
+      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+        REXGPU_FAIL(false, "Failed to end a Vulkan command buffer");
+      }
+
+      VkSubmitInfo submit_info;
+      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.pNext = nullptr;
+      if (!current_submission_wait_semaphores_.empty()) {
+        submit_info.waitSemaphoreCount =
+            static_cast<u32>(current_submission_wait_semaphores_.size());
+        submit_info.pWaitSemaphores = current_submission_wait_semaphores_.data();
+        submit_info.pWaitDstStageMask = current_submission_wait_stage_masks_.data();
+      } else {
+        submit_info.waitSemaphoreCount = 0;
+        submit_info.pWaitSemaphores = nullptr;
+        submit_info.pWaitDstStageMask = nullptr;
+      }
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &command_buffer.buffer;
+      submit_info.signalSemaphoreCount = 0;
+      submit_info.pSignalSemaphores = nullptr;
+      VkResult submit_result;
+      {
+        gpu::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+            vulkan_device->AcquireQueue(vulkan_device->GetQueueFamilyGraphicsCompute(), 0);
+        submit_result = dfn.vkQueueSubmit(queue_acquisition.GetQueue(), 1, &submit_info, fence);
+      }
+      if (submit_result != VK_SUCCESS) {
+        REXGPU_ERROR("Failed to submit a Vulkan command buffer");
+        if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
+          device_lost_ = true;
+          if (graphics_system_) {
+            graphics_system_->OnHostGPULossFromAnyThread(true);
+          }
+        }
+        return false;
+      }
+      submission_direct_last_ = submission_current;
     }
-    u64 submission_current = GetCurrentSubmission();
     current_submission_wait_stage_masks_.clear();
     for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
       submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);

@@ -34,6 +34,22 @@ class D3D12Settings : public SettingOwner {
   REX_SETTING(bool, readback_resolve, false, "Read render to texture results on the CPU");
   REX_SETTING(bool, submit_on_primary_buffer_end, true,
               "Submit command list when PM4 primary buffer ends");
+  REX_SETTING(bool, threaded_submission, true,
+              "Replay the recorded Direct3D 12 command lists into the real command list and submit "
+              "them on a thread of their own instead of the GPU command processor's thread. Off: "
+              "the command processor thread does it at the end of every submission",
+              kDebugOnly);
+  REX_SETTING(u32, threaded_submission_split_draws, 1000,
+              "With threaded_submission, end a submission after this many draws (0: only where the "
+              "guest's command buffers end), so the submission thread replays it while the next "
+              "draws are recorded and less is left to replay when a frame is presented",
+              Range{0, 100000}, kDebugOnly);
+  REX_SETTING(bool, hoist_shared_memory_uploads, false,
+              "Record the shared memory uploads (vertex and index data the CPU rewrote, textures) "
+              "at the start of the run of draws they are for, between one pair of barriers for the "
+              "run, when no draw before the upload has read the uploaded pages, instead of copying "
+              "between the draws",
+              kDebugOnly);
   REX_SETTING(bool, dxbc_disasm, false, "Dump DXBC disassembly");
   REX_SETTING(bool, dxbc_disasm_dxilconv, false, "Dump DXIL conversion disassembly");
   REX_SETTING(i32, pipeline_creation_threads, -1,

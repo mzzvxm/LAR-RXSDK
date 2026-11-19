@@ -25,6 +25,24 @@ DeferredCommandList::DeferredCommandList(const D3D12CommandProcessor& command_pr
 
 void DeferredCommandList::Reset() {
   command_stream_.Clear();
+  hoisted_stream_.Clear();
+  write_stream_ = &command_stream_;
+}
+
+size_t DeferredCommandList::CmdHoistPoint() {
+  REX_ASSERT(write_stream_ == &command_stream_);
+  auto& args = *reinterpret_cast<HoistedCommandsArguments*>(
+      WriteCommand(Command::kHoistedCommands, sizeof(HoistedCommandsArguments)));
+  args.begin = hoisted_stream_.Size();
+  args.end = args.begin;
+  return static_cast<size_t>(reinterpret_cast<const uintmax_t*>(&args) - command_stream_.Data());
+}
+
+void DeferredCommandList::ExtendHoistPoint(size_t hoist_point) {
+  REX_ASSERT(hoist_point < command_stream_.Size());
+  auto& args = *reinterpret_cast<HoistedCommandsArguments*>(command_stream_.Data() + hoist_point);
+  REX_ASSERT(args.begin <= hoisted_stream_.Size());
+  args.end = hoisted_stream_.Size();
 }
 
 void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
@@ -32,8 +50,14 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
 #if REXGPU_FINE_GRAINED_DRAW_SCOPES
   REX_PROFILE_SCOPE("gpu");
 #endif  // REXGPU_FINE_GRAINED_DRAW_SCOPES
-  const uintmax_t* stream = command_stream_.Data();
-  size_t stream_remaining = command_stream_.Size();
+  ExecuteCommands(command_list, command_list_1, command_stream_.Data(), command_stream_.Size(),
+                  hoisted_stream_.Data());
+}
+
+void DeferredCommandList::ExecuteCommands(ID3D12GraphicsCommandList* command_list,
+                                          ID3D12GraphicsCommandList1* command_list_1,
+                                          const uintmax_t* stream, size_t stream_remaining,
+                                          const uintmax_t* hoisted_stream) const {
   ID3D12PipelineState* current_pipeline_state = nullptr;
   while (stream_remaining != 0) {
     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
@@ -273,6 +297,15 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
                                                                sizeof(DebugMarkerHeader));
         command_list->SetMarker(1, label_name, static_cast<UINT>(args.label_length + 1));
       } break;
+      case Command::kHoistedCommands: {
+        // Copies and barriers only, which need no pipeline state: the nested call
+        // has its own, and the one of this call is untouched.
+        auto& args = *reinterpret_cast<const HoistedCommandsArguments*>(stream);
+        if (args.end > args.begin) {
+          ExecuteCommands(command_list, command_list_1, hoisted_stream + args.begin,
+                          args.end - args.begin, hoisted_stream);
+        }
+      } break;
       default:
         REX_UNHANDLED_CASE(header.command);
         break;
@@ -283,7 +316,7 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
 }
 
 void* DeferredCommandList::WriteCommand(Command command, size_t arguments_size_bytes) {
-  return command_stream_.Write(command, arguments_size_bytes);
+  return write_stream_->Write(command, arguments_size_bytes);
 }
 
 }  // namespace rex::gpu::d3d12

@@ -27,6 +27,7 @@
 #include <rex/title.h>
 #include <rex/xenos/register.h>
 #include "gpu/xenos/draw_state.h"
+#include "gpu/xenos/register_blocks.h"
 #include <rex/xenos/fetch.h>
 #include <rex/xenos/format.h>
 #include <rex/xenos/state.h>
@@ -1516,6 +1517,10 @@ bool D3D12CommandProcessor::CreateMsaaLineGuardPipelines() {
   return any;
 }
 
+// CHECK: with threaded submission this runs on the submission thread, while the deferred list is
+// replayed. It reads only what is immutable after the pipeline was created (its description,
+// the render target cache's path and 2x support), the guard pipelines (created in SetupContext,
+// released after the thread stops) and an atomic counter. Read from the code, not run.
 ID3D12PipelineState* D3D12CommandProcessor::GetMsaaLineGuardPipeline(void* handle) const {
   u32 samples = pipeline_cache_->GetMsaaLineGuardSamples(handle);
   if (!samples) {
@@ -1529,9 +1534,87 @@ ID3D12PipelineState* D3D12CommandProcessor::GetMsaaLineGuardPipeline(void* handl
   return guard;
 }
 
+bool D3D12CommandProcessor::StartSubmissionThread() {
+  if (submission_thread_) {
+    return true;
+  }
+  submission_thread_shutdown_ = false;
+  submission_thread_ = rex::platform::Thread::Create({}, [this]() { SubmissionThread(); });
+  if (!submission_thread_) {
+    REXGPU_ERROR(
+        "Failed to create the Direct3D 12 submission thread, submitting on the GPU thread");
+    return false;
+  }
+  submission_thread_->SetName("GPU Submission");
+  return true;
+}
+
+void D3D12CommandProcessor::SubmissionThread() {
+  ID3D12CommandQueue* direct_queue = GetD3D12Provider().GetDirectQueue();
+  while (true) {
+    SubmissionJob job;
+    {
+      std::unique_lock<std::mutex> lock(submission_thread_mutex_);
+      submission_thread_request_cond_.wait(
+          lock, [this] { return submission_thread_shutdown_ || !submission_thread_jobs_.empty(); });
+      if (submission_thread_jobs_.empty()) {
+        return;
+      }
+      job = std::move(submission_thread_jobs_.front());
+      submission_thread_jobs_.pop_front();
+    }
+    // The allocator was reclaimed only after the fence of its previous
+    // submission had been reached.
+    job.command_allocator->Reset();
+    command_list_->Reset(job.command_allocator, nullptr);
+    deferred_command_list_.ExecuteStream(command_list_, command_list_1_, job.stream);
+    command_list_->Close();
+    ID3D12CommandList* execute_command_lists[] = {command_list_};
+    direct_queue->ExecuteCommandLists(1, execute_command_lists);
+    direct_queue->Signal(submission_fence_, job.submission);
+    job.stream.clear();
+    {
+      std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+      submission_thread_free_streams_.push_back(std::move(job.stream));
+      submission_thread_submitted_.store(job.submission, std::memory_order_release);
+    }
+    submission_thread_done_cond_.notify_all();
+  }
+}
+
+void D3D12CommandProcessor::AwaitSubmissionThread() {
+  if (submission_thread_submitted_.load(std::memory_order_acquire) >= submission_thread_queued_) {
+    return;
+  }
+  std::unique_lock<std::mutex> lock(submission_thread_mutex_);
+  submission_thread_done_cond_.wait(lock, [this] {
+    return submission_thread_submitted_.load(std::memory_order_acquire) >=
+           submission_thread_queued_;
+  });
+}
+
+void D3D12CommandProcessor::ShutdownSubmissionThread() {
+  if (!submission_thread_) {
+    return;
+  }
+  // The thread submits what's still queued before exiting.
+  {
+    std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+    submission_thread_shutdown_ = true;
+  }
+  submission_thread_request_cond_.notify_all();
+  rex::platform::Wait(submission_thread_.get(), false);
+  submission_thread_.reset();
+  submission_thread_jobs_.clear();
+  submission_thread_free_streams_.clear();
+  submission_thread_queued_ = 0;
+  submission_thread_submitted_.store(0, std::memory_order_relaxed);
+}
+
 void D3D12CommandProcessor::ShutdownContext() {
   window_title_state_.store(0, std::memory_order_release);
   AwaitAllQueueOperationsCompletion();
+  ShutdownSubmissionThread();
   if (msaa_line_guard_binds_.load(std::memory_order_relaxed)) {
     REXGPU_INFO("D3D12 MSAA line guard: {} guard pipeline binds in this run",
                 msaa_line_guard_binds_.load(std::memory_order_relaxed));
@@ -1713,87 +1796,86 @@ void D3D12CommandProcessor::WriteRegister(u32 index, u32 value) {
 }
 
 void D3D12CommandProcessor::WriteRegistersFromMem(u32 start_index, u32* base, u32 num_registers) {
-  if (!num_registers) {
+  // Walks the range block by block: ordinary registers are copied at once, shader constants are
+  // checked against what the current shaders use, and only the special registers (the scratch
+  // writeback, COHER_STATUS_HOST, the gamma ramp) take the per register path. Same registers, same
+  // order, whatever the range crosses; Xenia Canary does it the same way.
+  u32 index = start_index;
+  const u32 end = start_index + num_registers;
+  while (index < end) {
+    u32 segment_end;
+    if (index >= xenos::RegisterFile::kRegisterCount) {
+      // The extended registers are stored one by one by the base class.
+      CommandProcessor::WriteRegistersFromMem(index, base, end - index);
+      return;
+    }
+    if (index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X) &&
+        index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_511_W)) {
+      segment_end =
+          std::min(end, std::to_underlying(xenos::Register::SHADER_CONSTANT_511_W) + u32(1));
+      WriteFloatConstantsFromMem(index, segment_end - 1, base);
+    } else if (index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0) &&
+               index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_31_5)) {
+      segment_end =
+          std::min(end, std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_31_5) + u32(1));
+      WriteFetchConstantsFromMem(index, segment_end - 1, base);
+    } else if (index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_BOOL_000_031) &&
+               index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_LOOP_31)) {
+      segment_end =
+          std::min(end, std::to_underlying(xenos::Register::SHADER_CONSTANT_LOOP_31) + u32(1));
+      memory::copy_and_swap(register_file_->values + index, base, segment_end - index);
+      cbuffer_binding_bool_loop_.up_to_date = false;
+    } else if (IsSpecialRegister(index)) {
+      segment_end = index + 1;
+      CommandProcessor::WriteRegister(index, memory::load<be_u32>(base));
+    } else {
+      segment_end = std::min(end, NextNonOrdinaryRegister(index));
+      memory::copy_and_swap(register_file_->values + index, base, segment_end - index);
+    }
+    base += segment_end - index;
+    index = segment_end;
+  }
+}
+
+/** Writes float constants first_index to last_index, all within SHADER_CONSTANT_000_X to 511_W. */
+void D3D12CommandProcessor::WriteFloatConstantsFromMem(u32 first_index, u32 last_index, u32* base) {
+  memory::copy_and_swap(register_file_->values + first_index, base, last_index - first_index + 1);
+  if (!frame_open_) {
     return;
   }
-  u32 end_index = start_index + num_registers - 1;
-
-  auto range_has_any_constant_usage = [](const u64* usage_map, u32 first_constant,
-                                         u32 last_constant) -> bool {
-    if (first_constant > last_constant) {
-      return false;
+  u32 first_float_constant =
+      (first_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X)) >> 2;
+  u32 last_float_constant =
+      (last_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X)) >> 2;
+  if (first_float_constant < 256) {
+    u32 last_vertex_constant = std::min(last_float_constant, 255u);
+    if (RangeHasAnyConstantUsage(current_float_constant_map_vertex_, first_float_constant,
+                                 last_vertex_constant)) {
+      cbuffer_binding_float_vertex_.up_to_date = false;
     }
-    u32 first_word = first_constant >> 6;
-    u32 last_word = last_constant >> 6;
-    u32 first_bit = first_constant & 63;
-    u32 last_bit = last_constant & 63;
-    if (first_word == last_word) {
-      u32 bit_count = last_bit - first_bit + 1;
-      u64 mask = bit_count == 64 ? UINT64_MAX : ((UINT64_C(1) << bit_count) - 1) << first_bit;
-      return (usage_map[first_word] & mask) != 0;
-    }
-    if (usage_map[first_word] & (UINT64_MAX << first_bit)) {
-      return true;
-    }
-    for (u32 word = first_word + 1; word < last_word; ++word) {
-      if (usage_map[word]) {
-        return true;
-      }
-    }
-    u64 last_mask = last_bit == 63 ? UINT64_MAX : ((UINT64_C(1) << (last_bit + 1)) - 1);
-    return (usage_map[last_word] & last_mask) != 0;
-  };
-
-  if (start_index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X) &&
-      end_index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_511_W)) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    if (frame_open_) {
-      u32 first_float_constant =
-          (start_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X)) >> 2;
-      u32 last_float_constant =
-          (end_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_000_X)) >> 2;
-      if (first_float_constant < 256) {
-        u32 last_vertex_constant = std::min(last_float_constant, 255u);
-        if (range_has_any_constant_usage(current_float_constant_map_vertex_, first_float_constant,
-                                         last_vertex_constant)) {
-          cbuffer_binding_float_vertex_.up_to_date = false;
-        }
-      }
-      if (last_float_constant >= 256) {
-        u32 first_pixel_constant = first_float_constant >= 256 ? first_float_constant - 256 : 0;
-        u32 last_pixel_constant = last_float_constant - 256;
-        if (range_has_any_constant_usage(current_float_constant_map_pixel_, first_pixel_constant,
-                                         last_pixel_constant)) {
-          cbuffer_binding_float_pixel_.up_to_date = false;
-        }
-      }
-    }
-    return;
   }
-
-  if (start_index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_BOOL_000_031) &&
-      end_index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_LOOP_31)) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    cbuffer_binding_bool_loop_.up_to_date = false;
-    return;
-  }
-
-  if (start_index >= std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0) &&
-      end_index <= std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_31_5)) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    cbuffer_binding_fetch_.up_to_date = false;
-    u32 first_fetch_dword =
-        start_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0);
-    u32 last_fetch_dword =
-        end_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0);
-    if (texture_cache_) {
-      texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
+  if (last_float_constant >= 256) {
+    u32 first_pixel_constant = first_float_constant >= 256 ? first_float_constant - 256 : 0;
+    u32 last_pixel_constant = last_float_constant - 256;
+    if (RangeHasAnyConstantUsage(current_float_constant_map_pixel_, first_pixel_constant,
+                                 last_pixel_constant)) {
+      cbuffer_binding_float_pixel_.up_to_date = false;
     }
-    InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
-    return;
   }
+}
 
-  CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+/** Writes fetch constants first_index to last_index, all within FETCH_00_0 to FETCH_31_5. */
+void D3D12CommandProcessor::WriteFetchConstantsFromMem(u32 first_index, u32 last_index, u32* base) {
+  memory::copy_and_swap(register_file_->values + first_index, base, last_index - first_index + 1);
+  cbuffer_binding_fetch_.up_to_date = false;
+  u32 first_fetch_dword =
+      first_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0);
+  u32 last_fetch_dword =
+      last_index - std::to_underlying(xenos::Register::SHADER_CONSTANT_FETCH_00_0);
+  if (texture_cache_) {
+    texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
+  }
+  InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
 }
 
 void D3D12CommandProcessor::OnGammaRamp256EntryTableValueWritten() {
@@ -2140,11 +2222,28 @@ void D3D12CommandProcessor::IssueSwap([[maybe_unused]] u32 frontbuffer_ptr, u32 
         // Submit all commands before returning the image, as the presenter submits its own after.
         SubmitBarriers();
         EndSubmission(true);
+        // With threaded submission, they must be in the queue, not only handed
+        // over: the presenter signals its fence and paints right after this.
+        AwaitSubmissionThread();
         return true;
       });
 
   // End the frame even without presenting, to prevent leaking per frame resources.
   EndSubmission(true);
+}
+
+void D3D12CommandProcessor::PrepareForWait() {
+  // This thread is about to spin (SwitchToThread in a loop) or wait for more
+  // guest commands, while the submission thread may still be replaying and
+  // submitting the lists of the guest command buffer that just ended. Spinning
+  // meanwhile ended, on an AMD GPU, in bursts of 2 to 3 frames of garbage
+  // 8x8-pixel blocks over the scene; waiting here does not, and costs no
+  // overlap, as this thread has nothing else to process.
+  // CHECK: the MSAA line guard fixes the same kind of corruption at its root, and with it the
+  // wait made no difference on the integrated Radeon in the fork's runs (msaa-line-guard note); it
+  // is kept because it is cheap. Drop this override if an A/B on the iGPU shows nothing.
+  AwaitSubmissionThread();
+  CommandProcessor::PrepareForWait();
 }
 
 void D3D12CommandProcessor::OnPrimaryBufferEnd() {
@@ -2229,9 +2328,20 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
   }
   bool memexport_used = memexport_used_vertex || memexport_used_pixel;
 
+  // With threaded submission, a long submission is ended early, so the
+  // submission thread replays it while the following draws are recorded, and
+  // less is left to replay when the frame is presented.
+  const u32 split_draws = GetD3D12Settings().threaded_submission_split_draws.Get();
+  if (split_draws && submission_open_ && submission_draws_ >= split_draws && submission_thread_ &&
+      GetD3D12Settings().threaded_submission.Get() && !active_occlusion_query_.valid &&
+      CanEndSubmissionImmediately()) {
+    EndSubmission(false);
+  }
+
   if (!BeginSubmission(true)) {
     return false;
   }
+  ++submission_draws_;
 
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
   if (!primitive_processor_->Process(primitive_processing_result)) {
@@ -2509,9 +2619,10 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
     if (memexport_used) {
       shared_memory_->UseForWriting();
     } else {
-      shared_memory_->UseForReading();
+      shared_memory_->UseForReadingInDraw();
     }
     SubmitBarriers();
+    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
     REX_PERF_INC("draw_calls");
     REX_PERF_ADD("vertices_processed", primitive_processing_result.host_draw_vertex_count);
     deferred_command_list_.D3DDrawInstanced(primitive_processing_result.host_draw_vertex_count, 1,
@@ -2566,9 +2677,10 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
     if (memexport_used) {
       shared_memory_->UseForWriting();
     } else {
-      shared_memory_->UseForReading();
+      shared_memory_->UseForReadingInDraw();
     }
     SubmitBarriers();
+    BeginSharedMemoryDrawReads(memexport_used, vertex_shader, pixel_shader);
     REX_PERF_INC("draw_calls");
     REX_PERF_ADD("vertices_processed", primitive_processing_result.host_draw_vertex_count);
     deferred_command_list_.D3DDrawIndexedInstanced(
@@ -2605,6 +2717,42 @@ bool D3D12CommandProcessor::IssueDraw([[maybe_unused]] xenos::PrimitiveType prim
   }
 
   return true;
+}
+
+// Upload hoisting (gpu.d3d12.hoist_shared_memory_uploads): the draw about to be recorded reads the
+// shared memory in the reading state, with the barriers before it submitted. Starts a run of
+// draws if there is none, and says which pages this draw reads, so no upload of them is moved
+// before it (D3D12SharedMemory::BeginDrawReads). A superset of what the draw reads is safe: the
+// vertex fetch constants of both shaders, whether or not the draw's fetches were found in sync
+// with the shared memory, and the guest indices. A draw that exports to the shared memory ends
+// the run (UseForWriting).
+void D3D12CommandProcessor::BeginSharedMemoryDrawReads(bool memexport_used,
+                                                       const D3D12Shader* vertex_shader,
+                                                       const D3D12Shader* pixel_shader) {
+  if (!GetD3D12Settings().hoist_shared_memory_uploads.Get() || memexport_used) {
+    shared_memory_->EndHoistRun();
+    return;
+  }
+  shared_memory_->BeginDrawReads();
+  const xenos::RegisterFile& regs = *register_file_;
+  for (const Shader* shader :
+       {static_cast<const Shader*>(vertex_shader), static_cast<const Shader*>(pixel_shader)}) {
+    if (!shader) {
+      continue;
+    }
+    const Shader::ConstantRegisterMap& constant_map = shader->GetConstantRegisterMap();
+    for (u32 i = 0; i < rex::CountOf(constant_map.vertex_fetch_bitmap); ++i) {
+      u32 vfetch_bits_remaining = constant_map.vertex_fetch_bitmap[i];
+      u32 j;
+      while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+        vfetch_bits_remaining &= ~(static_cast<u32>(1) << j);
+        xenos::VertexFetch vfetch_constant = regs.GetVertexFetch(i * 32 + j);
+        shared_memory_->MarkReadByDraw(vfetch_constant.address << 2, vfetch_constant.size << 2);
+      }
+    }
+  }
+  std::pair<u32, u32> guest_index_range = primitive_processor_->last_guest_index_range();
+  shared_memory_->MarkReadByDraw(guest_index_range.first, guest_index_range.second);
 }
 
 bool D3D12CommandProcessor::IssueDrawMemexportReadbackFullPath(u32 total_size) {
@@ -3427,8 +3575,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 
   if (!submission_open_) {
     submission_open_ = true;
+    submission_draws_ = 0;
 
     deferred_command_list_.Reset();
+    if (shared_memory_) {
+      shared_memory_->EndHoistRun();
+    }
 
     ff_viewport_update_needed_ = true;
     ff_scissor_update_needed_ = true;
@@ -3528,6 +3680,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
   if (submission_open_) {
     REX_ASSERT(!scratch_buffer_used_);
 
+    // The deferred commands are about to go; no run goes on into the next list.
+    if (shared_memory_) {
+      shared_memory_->EndHoistRun();
+    }
+
     if (active_occlusion_query_.valid && occlusion_query_heap_) {
       deferred_command_list_.D3DEndQuery(occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION,
                                          active_occlusion_query_.host_index);
@@ -3544,12 +3701,37 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // ExecuteCommandLists boundaries are full UAV and aliasing barriers, so use one list per call.
     ID3D12CommandAllocator* command_allocator =
         command_allocator_writable_first_->command_allocator;
-    command_allocator->Reset();
-    command_list_->Reset(command_allocator, nullptr);
-    deferred_command_list_.Execute(command_list_, command_list_1_);
-    command_list_->Close();
-    ID3D12CommandList* execute_command_lists[] = {command_list_};
-    direct_queue->ExecuteCommandLists(1, execute_command_lists);
+    if (GetD3D12Settings().threaded_submission.Get() && StartSubmissionThread()) {
+      SubmissionJob job;
+      job.submission = submission_current_;
+      job.command_allocator = command_allocator;
+      {
+        std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+        if (!submission_thread_free_streams_.empty()) {
+          job.stream = std::move(submission_thread_free_streams_.back());
+          submission_thread_free_streams_.pop_back();
+        }
+      }
+      deferred_command_list_.TakeStream(job.stream);
+      {
+        std::lock_guard<std::mutex> lock(submission_thread_mutex_);
+        submission_thread_jobs_.push_back(std::move(job));
+      }
+      submission_thread_request_cond_.notify_one();
+      submission_thread_queued_ = submission_current_;
+    } else {
+      // Threaded submission is off or the thread could not be created: submit here, after the
+      // thread (if it ran) has submitted what it was given, so the fence values stay in order and
+      // command_list_ is not used by two threads.
+      AwaitSubmissionThread();
+      command_allocator->Reset();
+      command_list_->Reset(command_allocator, nullptr);
+      deferred_command_list_.Execute(command_list_, command_list_1_);
+      command_list_->Close();
+      ID3D12CommandList* execute_command_lists[] = {command_list_};
+      direct_queue->ExecuteCommandLists(1, execute_command_lists);
+      direct_queue->Signal(submission_fence_, submission_current_);
+    }
     command_allocator_writable_first_->last_usage_submission = submission_current_;
     if (command_allocator_submitted_last_) {
       command_allocator_submitted_last_->next = command_allocator_writable_first_;
@@ -3563,7 +3745,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
       command_allocator_writable_last_ = nullptr;
     }
 
-    direct_queue->Signal(submission_fence_, submission_current_++);
+    ++submission_current_;
 
     submission_open_ = false;
 
@@ -3625,6 +3807,7 @@ bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
 }
 
 void D3D12CommandProcessor::ClearCommandAllocatorCache() {
+  AwaitSubmissionThread();
   while (command_allocator_submitted_first_) {
     auto next = command_allocator_submitted_first_->next;
     command_allocator_submitted_first_->command_allocator->Release();

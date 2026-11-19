@@ -33,6 +33,46 @@ class DeferredCommandBuffer {
   void Reset();
   void Execute(VkCommandBuffer command_buffer);
 
+  // Swaps the recorded commands (and the hoisted ones) with `stream` and
+  // `hoisted_stream` (normally empty ones, whose allocations are reused) and
+  // starts recording anew, for another thread to execute them (threaded
+  // submission).
+  void TakeStreams(std::vector<uintmax_t>& stream, std::vector<uintmax_t>& hoisted_stream) {
+    command_stream_.Swap(stream);
+    hoisted_stream_.Swap(hoisted_stream);
+    Reset();
+  }
+  // Executes commands taken with TakeStreams. Touches nothing else in the
+  // deferred command buffer, so it may run on another thread while new
+  // commands are recorded.
+  void ExecuteStream(VkCommandBuffer command_buffer, const std::vector<uintmax_t>& stream,
+                     const std::vector<uintmax_t>& hoisted_stream) const {
+    ExecuteCommands(command_buffer, stream.data(), stream.size(), hoisted_stream.data());
+  }
+
+  // Hoisting: commands recorded later but executed earlier, at a hoist point
+  // written into the stream before (the shared memory uploads that
+  // VulkanSharedMemory moves before the current render pass instead of ending
+  // it). The hoisted commands go to a second stream; a hoist point covers a
+  // contiguous range of it, which Execute replays where the hoist point is.
+  // Writes a hoist point covering nothing yet, and returns its handle.
+  size_t CmdHoistPoint();
+  // Directs the commands written from now on to the hoisted stream (true) or
+  // the main one.
+  void SetWritingHoisted(bool hoisted) {
+    write_stream_ = hoisted ? &hoisted_stream_ : &command_stream_;
+  }
+  size_t hoisted_stream_size() const { return hoisted_stream_.Size(); }
+  // Drops the hoisted commands from `size` on (only those of the latest hoist
+  // point).
+  void TruncateHoistedStream(size_t size) {
+    REX_ASSERT(size <= hoisted_stream_.Size());
+    hoisted_stream_.Truncate(size);
+  }
+  // Makes the hoist point cover the hoisted stream from where it was at
+  // CmdHoistPoint to its current end.
+  void ExtendHoistPoint(size_t hoist_point);
+
   // render_pass_begin->pNext must be null.
   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,
                             VkSubpassContents contents) {
@@ -383,6 +423,7 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    kHoistedCommands,
   };
 
   using Stream = gpu::DeferredStream<Command>;
@@ -565,6 +606,12 @@ class DeferredCommandBuffer {
     u32 mask_reference;
   };
 
+  struct ArgsHoistedCommands {
+    // Range of the hoisted stream, in elements.
+    size_t begin;
+    size_t end;
+  };
+
   struct ArgsVkSetViewport {
     u32 first_viewport;
     u32 viewport_count;
@@ -573,11 +620,15 @@ class DeferredCommandBuffer {
   };
 
   void* WriteCommand(Command command, size_t arguments_size_bytes);
+  void ExecuteCommands(VkCommandBuffer command_buffer, const uintmax_t* stream,
+                       size_t stream_remaining, const uintmax_t* hoisted_stream) const;
 
   const VulkanCommandProcessor& command_processor_;
 
   /** uintmax_t elements give uint64_t and pointer alignment to all structures. */
   Stream command_stream_;
+  Stream hoisted_stream_;
+  Stream* write_stream_ = &command_stream_;
 };
 
 }  // namespace rex::gpu::vulkan

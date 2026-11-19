@@ -34,6 +34,21 @@ class VulkanSettings : public SettingOwner {
               "placeholder pipelines to avoid visible flashing");
   REX_SETTING(bool, submit_on_primary_buffer_end, true,
               "Submit command buffer when PM4 primary buffer ends");
+  REX_SETTING(bool, threaded_submission, true,
+              "Record the Vulkan command buffers from the deferred commands and submit them on a "
+              "thread of their own instead of the GPU command processor's thread. Off: the "
+              "command processor thread does it at the end of every submission",
+              kDebugOnly);
+  REX_SETTING(u32, threaded_submission_split_draws, 1000,
+              "With threaded_submission, end a submission after this many draws (0: only where the "
+              "guest's command buffers end), so the submission thread records it while the next "
+              "draws are processed and less is left to record when a frame is presented",
+              Range{0, 100000}, kDebugOnly);
+  REX_SETTING(bool, hoist_shared_memory_uploads, true,
+              "Record the shared memory uploads (vertex and index data the CPU rewrote, textures) "
+              "before the render pass of the draws they are for, when no draw of the render pass "
+              "has read the uploaded pages, instead of ending the render pass for every upload",
+              kDebugOnly);
   REX_SETTING(bool, dynamic_rendering, true,
               "Use VK_KHR_dynamic_rendering when the device supports it, render passes otherwise");
   REX_SETTING(i32, pipeline_creation_threads, -1,

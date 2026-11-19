@@ -30,6 +30,8 @@ add_executable(
   gpu/texture_info_test.cpp
   gpu/texture_layout_test.cpp
   gpu/primitive_processor_simd_test.cpp
+  gpu/register_blocks_test.cpp
+  gpu/deferred_stream_test.cpp
   gpu/xenos_provider_test.cpp
   gpu/imgui_overlay_test.cpp
   gpu/xenos_base_test.cpp

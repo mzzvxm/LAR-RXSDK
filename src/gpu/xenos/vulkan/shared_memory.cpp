@@ -318,13 +318,16 @@ bool VulkanSharedMemory::UploadRanges(const std::vector<std::pair<u32, u32>>& up
   if (upload_page_ranges.empty()) {
     return true;
   }
-  // The ranges are sorted, so front and back bound the barrier.
-  Use(Usage::kTransferDestination,
-      std::make_pair(upload_page_ranges.front().first << GetPageSizeLog2(),
-                     (upload_page_ranges.back().first + upload_page_ranges.back().second -
-                      upload_page_ranges.front().first)
-                         << GetPageSizeLog2()));
-  command_processor_.SubmitBarriers(true);
+  bool hoist = BeginHoistedUpload(upload_page_ranges);
+  if (!hoist) {
+    // The ranges are sorted, so front and back bound the barrier.
+    Use(Usage::kTransferDestination,
+        std::make_pair(upload_page_ranges.front().first << GetPageSizeLog2(),
+                       (upload_page_ranges.back().first + upload_page_ranges.back().second -
+                        upload_page_ranges.front().first)
+                           << GetPageSizeLog2()));
+    command_processor_.SubmitBarriers(true);
+  }
   DeferredCommandBuffer& command_buffer = command_processor_.GetDeferredCommandBuffer();
   u64 submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
@@ -382,7 +385,69 @@ bool VulkanSharedMemory::UploadRanges(const std::vector<std::pair<u32, u32>>& up
                                    upload_regions_.data());
     upload_regions_.clear();
   }
+  if (hoist) {
+    hoist_page_ranges_temp_.clear();
+    for (const std::pair<u32, u32>& range : upload_page_ranges) {
+      hoist_page_ranges_temp_.emplace_back(range.first << GetPageSizeLog2(),
+                                           range.second << GetPageSizeLog2());
+    }
+    EndHoistedUpload(hoist_page_ranges_temp_);
+  }
   return successful;
+}
+
+bool VulkanSharedMemory::BeginHoistedUpload(
+    const std::vector<std::pair<u32, u32>>& upload_page_ranges) {
+  // In a render pass whose draws have not read these pages, copy before the
+  // render pass instead of ending it: between a barrier after everything that
+  // read the buffer before the render pass and one before the render pass's
+  // reads, which all the uploads hoisted before the same render pass share.
+  if (last_usage_ != Usage::kRead || last_written_range_.second ||
+      !command_processor_.CanHoistSharedMemoryUpload(upload_page_ranges)) {
+    return false;
+  }
+  command_processor_.BeginHoistedCommands();
+  u64 hoist_render_pass_serial = command_processor_.hoist_render_pass_serial();
+  if (hoist_render_pass_serial_ != hoist_render_pass_serial) {
+    hoist_render_pass_serial_ = hoist_render_pass_serial;
+    WriteUsageBarrier(Usage::kRead, Usage::kTransferDestination);
+  } else {
+    command_processor_.GetDeferredCommandBuffer().TruncateHoistedStream(
+        hoist_closing_barrier_offset_);
+  }
+  return true;
+}
+
+void VulkanSharedMemory::EndHoistedUpload(
+    const std::vector<std::pair<u32, u32>>& upload_byte_ranges) {
+  hoist_closing_barrier_offset_ =
+      command_processor_.GetDeferredCommandBuffer().hoisted_stream_size();
+  WriteUsageBarrier(Usage::kTransferDestination, Usage::kRead);
+  command_processor_.EndHoistedCommands();
+  // Another upload of these pages before this render pass would need a barrier
+  // between the two copies: let it end the render pass instead.
+  for (const std::pair<u32, u32>& range : upload_byte_ranges) {
+    command_processor_.MarkSharedMemoryReadInRenderPass(range.first, range.second);
+  }
+}
+
+void VulkanSharedMemory::WriteUsageBarrier(Usage from, Usage to) {
+  VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+  VkAccessFlags src_access_mask, dst_access_mask;
+  GetUsageMasks(from, src_stage_mask, src_access_mask);
+  GetUsageMasks(to, dst_stage_mask, dst_access_mask);
+  VkBufferMemoryBarrier barrier;
+  barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  barrier.pNext = nullptr;
+  barrier.srcAccessMask = src_access_mask;
+  barrier.dstAccessMask = dst_access_mask;
+  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.buffer = buffer_;
+  barrier.offset = 0;
+  barrier.size = VK_WHOLE_SIZE;
+  command_processor_.GetDeferredCommandBuffer().CmdVkPipelineBarrier(
+      src_stage_mask, dst_stage_mask, 0, 0, nullptr, 1, &barrier, 0, nullptr);
 }
 
 void VulkanSharedMemory::GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
