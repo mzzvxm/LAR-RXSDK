@@ -41,6 +41,7 @@
 #include <rex/kernel/title_runtime.h>
 #include <rex/kernel/runtime_settings.h>
 #include "kernel/delay_observer.h"
+#include "kernel/kernel_time_gate.h"
 #include "kernel/thread_registry.h"
 #include "kernel/guest_stack.h"
 #include "kernel/settings_access.h"
@@ -506,13 +507,22 @@ void KernelThread::Abandon() {
   WriteExitState(X_STATUS_PROCESS_IS_TERMINATING);
 }
 
+void KernelThread::WriteKernelTimeNow() {
+  GetGuestObject<X_KTHREAD>()->kernel_time =
+      static_cast<u32>(rex::platform::GetCurrentThreadCPUTime().count());
+}
+
 void KernelThread::WriteKernelTime() {
   KernelThread* self = GetBoundCurrentThread();
   if (!self || !self->guest_object_ptr_) {
     return;
   }
-  self->GetGuestObject<X_KTHREAD>()->kernel_time =
-      static_cast<u32>(rex::platform::GetCurrentThreadCPUTime().count());
+  // One millisecond: the field's own unit (see KernelTimeDue). The tick count is a counter read
+  // (QueryPerformanceCounter or clock_gettime), not a system call like GetThreadTimes.
+  static const u64 interval_ticks = std::max<u64>(Clock::GetHostTickFrequency() / 1000, 1);
+  if (KernelTimeDue(self->kernel_time_tick_, Clock::GetHostTickCount(), interval_ticks)) {
+    self->WriteKernelTimeNow();
+  }
 }
 
 void KernelThread::WriteExitState(u32 exit_code) {
@@ -520,7 +530,7 @@ void KernelThread::WriteExitState(u32 exit_code) {
   thread->terminated = 1;
   thread->thread_state = kKThreadStateTerminated;
   if (IsInThread(this)) {
-    WriteKernelTime();
+    WriteKernelTimeNow();  // the final value, whatever the last write was
   }
   thread->exit_time = Clock::QueryGuestSystemTime();
   thread->exit_status = exit_code;

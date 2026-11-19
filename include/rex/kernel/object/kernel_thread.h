@@ -135,7 +135,9 @@ class REX_KERNEL_API KernelThread : public ICallingThread, public rex::NonCopyab
   static void SleepFor(std::chrono::microseconds duration);
 
   /**
-   * Writes the CPU time of the calling thread to its KTHREAD, if it has a `KernelThread`.
+   * Writes the CPU time of the calling thread to its KTHREAD, if it has a `KernelThread`. The field
+   * counts milliseconds and the call is a system call, so a call less than a millisecond after the
+   * thread's last write does nothing.
    */
   static void WriteKernelTime();
 
@@ -387,10 +389,14 @@ class REX_KERNEL_API KernelThread : public ICallingThread, public rex::NonCopyab
 
   void WriteExitState(u32 exit_code);
 
+  /** Writes the CPU time of the calling thread, which must be this one, whatever the last write was. */
+  void WriteKernelTimeNow();
+
   TitleRuntime* runtime_;
   ThreadRegistry* registry_ = nullptr;
   X_HANDLE handle_ = 0;
   u32 guest_object_ptr_ = 0;
+  u64 kernel_time_tick_ = 0; /**< Host tick of the last WriteKernelTime that wrote, 0 before the first. */
   rex::MoveOnlyFunction<int()> host_fn_;
   std::atomic<bool> released_{false};
   std::atomic<bool> abandoned_{false};

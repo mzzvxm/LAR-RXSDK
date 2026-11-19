@@ -199,6 +199,7 @@ add_executable(
   kernel/call_test.cpp
   xam/language_test.cpp
   kernel/thread_wait_test.cpp
+  kernel/kernel_time_gate_test.cpp
   kernel/runtime_error_test.cpp
   kernel/runtime_interfaces_test.cpp
   kernel/memory_view_test.cpp
