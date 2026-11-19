@@ -219,6 +219,29 @@ class VulkanCommandProcessor : public CommandProcessor {
    */
   void EndRenderPass();
 
+  // Shared memory upload hoisting: in a
+  // render pass begun for guest draws, an upload of bytes that no draw in the
+  // render pass has read yet is recorded before the render pass (after the
+  // barriers preceding it) instead of ending it. Without this, every vertex or
+  // index upload in a render pass ends it, copies between two barriers and
+  // begins it again.
+  // Whether an upload of these shared memory pages (first, count) can be
+  // hoisted now.
+  bool CanHoistSharedMemoryUpload(const std::vector<std::pair<u32, u32>>& upload_page_ranges) const;
+  // A new value for every render pass that hoisted commands can go before.
+  u64 hoist_render_pass_serial() const { return hoist_render_pass_serial_; }
+  // Between these, the deferred command buffer's commands go before the
+  // current render pass.
+  void BeginHoistedCommands() { deferred_command_buffer_.SetWritingHoisted(true); }
+  void EndHoistedCommands() {
+    deferred_command_buffer_.SetWritingHoisted(false);
+    deferred_command_buffer_.ExtendHoistPoint(hoist_point_);
+  }
+  // Records that the GPU reads (or will read, for the upload itself) these
+  // bytes of the shared memory in the current render pass, so they are not
+  // uploaded before it any more.
+  void MarkSharedMemoryReadInRenderPass(u32 start, u32 length);
+
   VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
       SingleTransientDescriptorLayout transient_descriptor_layout) const {
     return descriptor_set_layouts_single_transient_[static_cast<size_t>(
@@ -787,6 +810,17 @@ class VulkanCommandProcessor : public CommandProcessor {
   VkRenderPass current_render_pass_;
   const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
   bool in_render_pass_ = false;
+
+  // Upload hoisting (CanHoistSharedMemoryUpload): whether the current render
+  // pass takes hoisted commands, its hoist point in the deferred command
+  // buffer, and the shared memory pages its draws read (a bit per page, in
+  // 64-page words that only count if their serial is the render pass's, so
+  // nothing needs clearing between render passes).
+  bool hoist_render_pass_ = false;
+  size_t hoist_point_ = 0;
+  u64 hoist_render_pass_serial_ = 0;
+  std::vector<u64> hoist_read_pages_;
+  std::vector<u64> hoist_read_pages_serial_;
 
   /** Exactly one of the title and external graphics pipelines is bound, the other is null. */
   VkPipeline current_guest_graphics_pipeline_;

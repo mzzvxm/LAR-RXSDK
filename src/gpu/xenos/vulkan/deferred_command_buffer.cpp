@@ -29,6 +29,24 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
 
 void DeferredCommandBuffer::Reset() {
   command_stream_.Clear();
+  hoisted_stream_.Clear();
+  write_stream_ = &command_stream_;
+}
+
+size_t DeferredCommandBuffer::CmdHoistPoint() {
+  REX_ASSERT(write_stream_ == &command_stream_);
+  auto& args = *reinterpret_cast<ArgsHoistedCommands*>(
+      WriteCommand(Command::kHoistedCommands, sizeof(ArgsHoistedCommands)));
+  args.begin = hoisted_stream_.Size();
+  args.end = args.begin;
+  return static_cast<size_t>(reinterpret_cast<const uintmax_t*>(&args) - command_stream_.Data());
+}
+
+void DeferredCommandBuffer::ExtendHoistPoint(size_t hoist_point) {
+  REX_ASSERT(hoist_point < command_stream_.Size());
+  auto& args = *reinterpret_cast<ArgsHoistedCommands*>(command_stream_.Data() + hoist_point);
+  REX_ASSERT(args.begin <= hoisted_stream_.Size());
+  args.end = hoisted_stream_.Size();
 }
 
 void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
@@ -36,10 +54,15 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
   REX_PROFILE_SCOPE("gpu");
 #endif  // REXGPU_FINE_GRAINED_DRAW_SCOPES
 
+  ExecuteCommands(command_buffer, command_stream_.Data(), command_stream_.Size(),
+                  hoisted_stream_.Data());
+}
+
+void DeferredCommandBuffer::ExecuteCommands(VkCommandBuffer command_buffer, const uintmax_t* stream,
+                                            size_t stream_remaining,
+                                            const uintmax_t* hoisted_stream) const {
   const gpu::vulkan::VulkanDevice::Functions& dfn =
       command_processor_.GetVulkanDevice()->GetFunctions();
-  const uintmax_t* stream = command_stream_.Data();
-  size_t stream_remaining = command_stream_.Size();
   while (stream_remaining) {
     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
     stream += kCommandHeaderSizeElements;
@@ -313,6 +336,14 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                                  rex::RoundUpPow2(sizeof(ArgsVkSetViewport), alignof(VkViewport))));
       } break;
 
+      case Command::kHoistedCommands: {
+        auto& args = *reinterpret_cast<const ArgsHoistedCommands*>(stream);
+        if (args.end > args.begin) {
+          ExecuteCommands(command_buffer, hoisted_stream + args.begin, args.end - args.begin,
+                          hoisted_stream);
+        }
+      } break;
+
       default:
         REX_UNHANDLED_CASE(header.command);
         break;
@@ -411,7 +442,7 @@ void DeferredCommandBuffer::CmdVkBeginRendering(const VkRenderingInfo* rendering
 }
 
 void* DeferredCommandBuffer::WriteCommand(Command command, size_t arguments_size_bytes) {
-  return command_stream_.Write(command, arguments_size_bytes);
+  return write_stream_->Write(command, arguments_size_bytes);
 }
 
 }  // namespace rex::gpu::vulkan
