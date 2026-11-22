@@ -3445,6 +3445,12 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
         }
       }
     }
+    // A stencil bit transfer from a depth source binds no depth texture, so the stencil is the
+    // tested value.
+    if (packed == spv::NoResult && mode.output == TransferOutput::kStencilBit &&
+        source_stencil[0] != spv::NoResult) {
+      packed = source_stencil[0];
+    }
     switch (mode.output) {
       case TransferOutput::kColor: {
         if (packed != spv::NoResult) {
