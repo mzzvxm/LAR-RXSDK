@@ -8,7 +8,7 @@ The configure fails when a folder or submodule in `thirdparty` has no row in the
 
 | Name | Source | Upstream and version | License | License files | Included in | Obligation |
 |---|---|---|---|---|---|---|
-| libmspack | submodule | [kyz/libmspack](https://github.com/kyz/libmspack) v1.11 | LGPL-2.1-only | `libmspack/libmspack/COPYING.LIB` | `rexfilesystem` | license text, library source, relinking allowed |
+| libmspack | submodule | [kyz/libmspack](https://github.com/kyz/libmspack) v1.12 | LGPL-2.1-only | `libmspack/libmspack/COPYING.LIB` | `rexfilesystem` | license text, library source, relinking allowed |
 | glslang | submodule | [KhronosGroup/glslang](https://github.com/KhronosGroup/glslang) `f4f1d8a` | BSD-3-Clause and others | `glslang/LICENSE.txt` | `rexgpu-xenos-vulkan` | attribution |
 | FFmpeg | submodule | [wmarti/FFmpeg](https://github.com/wmarti/FFmpeg) n4.4-22-g0604b464c7 | LGPL-2.1-or-later | `FFmpeg/COPYING.LGPLv2.1`, `FFmpeg/LICENSE.md` | `rexkernel` | license text, library source, relinking allowed |
 | ffmpeg-overlay | vendored | the codec, parser and filter lists of the FFmpeg configure | LGPL-2.1-or-later | as FFmpeg | `rexkernel` | as FFmpeg |
