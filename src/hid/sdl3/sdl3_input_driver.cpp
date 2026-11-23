@@ -426,7 +426,7 @@ void SDL3InputDriver::State::QueuePump(const std::shared_ptr<State>& self) {
 // is off (on_demand), by the UI thread's SDL_PumpEvents otherwise. In the first case SDL pushes the
 // resulting events through HandleEvent, which only buffers them, and DrainAndLock applies them, so
 // the state read right after is current. SDL_UpdateJoysticks may be called from any thread: the
-// pinned SDL 3.4.14 documents it so in SDL_joystick.h (\threadsafety) and the function takes SDL's
+// pinned SDL 3.4.20 documents it so in SDL_joystick.h (\threadsafety) and the function takes SDL's
 // joystick lock.
 void SDL3InputDriver::State::RefreshJoysticks(const std::shared_ptr<State>& self) {
   if (!on_demand) {

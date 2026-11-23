@@ -18,7 +18,7 @@ The configure fails when a folder or submodule in `thirdparty` has no row in the
 | catch2 | submodule | [catchorg/Catch2](https://github.com/catchorg/Catch2) v3.12.0 | BSL-1.0 | `catch2/LICENSE.txt` | tests only | none |
 | imgui | submodule | [ocornut/imgui](https://github.com/ocornut/imgui) `6d910d5` | MIT | `imgui/LICENSE.txt` | `rexbase`, installed headers | attribution |
 | cli11 | submodule | [CLIUtils/CLI11](https://github.com/CLIUtils/CLI11) `bfffd37` | BSD-3-Clause | `cli11/LICENSE` | `rexglue` tool | attribution |
-| sdl3 | submodule | [libsdl-org/SDL](https://github.com/libsdl-org/SDL) release-3.4.14 | Zlib | `sdl3/LICENSE.txt` | SDL3 shared library, SDL3 modules | none for binaries |
+| sdl3 | submodule | [libsdl-org/SDL](https://github.com/libsdl-org/SDL) release-3.4.20 | Zlib | `sdl3/LICENSE.txt` | SDL3 shared library, SDL3 modules | none for binaries |
 | inja | submodule | [pantor/inja](https://github.com/pantor/inja) v3.5.0 | MIT | `inja/LICENSE` | `rexglue` tool | attribution |
 | nlohmann-json | inside inja | [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 | MIT | `inja/third_party/include/nlohmann/LICENSE.MIT` | `rexglue` tool | attribution |
 | tracy | submodule | [wolfpld/tracy](https://github.com/wolfpld/tracy) v0.13.1 | BSD-3-Clause | `tracy/LICENSE` | `TracyClient` when `REXGLUE_ENABLE_TRACY` is on | attribution |
