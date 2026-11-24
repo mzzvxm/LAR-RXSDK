@@ -278,6 +278,9 @@ add_subdirectory(sdl3)
 foreach (sdl_target SDL3-static SDL3-shared SDL3_test SDL_uclibc)
   if (TARGET ${sdl_target})
     target_compile_options(${sdl_target} PRIVATE -w)
+    # SDL uses no C++ modules; scanning its C++ file (SDL 3.4.20: SDL_gameinput.cpp) made CMake 4.4's Ninja
+    # Multi-Config generator list the same .modmap output for every configuration ("defined as an output multiple times").
+    set_property(TARGET ${sdl_target} PROPERTY CXX_SCAN_FOR_MODULES OFF)
   endif ()
 endforeach ()
 
