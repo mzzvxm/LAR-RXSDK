@@ -453,7 +453,13 @@ REX_TEST_CASE("Every copy of a helper run is registered, the lowest address with
   CHECK(Has(tree,
             Entry(kSecondIndex + kGPRCount - 1,
                   std::format("__savegprlr_31_{:08X}", Address(kSecondIndex + kGPRCount - 1)))));
-  CHECK(Has(tree, std::format("__savegprlr_14_{:08X}(ctx, base)", Address(kSecondIndex))));
-  CHECK(Has(tree, std::format("__savegprlr_15_{:08X}(ctx, base)", Address(kSecondIndex + 1))));
-  CHECK(Has(tree, "__savegprlr_14(ctx, base)"));
+  // rexglue 32195385 registers every copy. LARecomp's inline expansion passes the
+  // registered symbol for the exact branch target as its fallback.
+  // CHECK: rerun this case with a rebuilt SDK test executable.
+  const auto caller = Body(tree, "xstart");
+  CHECK(Has(caller, InlineSave(14)));
+  CHECK(Has(caller, std::format("rex_savegprlr<14>(ctx, base, __savegprlr_14_{:08X})",
+                                Address(kSecondIndex))));
+  CHECK(Has(caller, std::format("rex_savegprlr<15>(ctx, base, __savegprlr_15_{:08X})",
+                                Address(kSecondIndex + 1))));
 }
