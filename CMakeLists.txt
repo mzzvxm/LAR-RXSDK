@@ -122,8 +122,11 @@ if (NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
 endif ()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS "20.0")
-    message(FATAL_ERROR "ReXGlue requires Clang 20 or newer (found ${CMAKE_CXX_COMPILER_VERSION})")
+  # 20.1.8: Clang 20.1.0 builds the SDK and a game, but the game dies with an access violation at startup
+  # (fixed in later 20.1 releases); 20.1.8 is the version the prebuilt SDK and the Linux kit use.
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS "20.1.8")
+    message(FATAL_ERROR "ReXGlue requires Clang 20.1.8 or newer (found ${CMAKE_CXX_COMPILER_VERSION}): "
+                        "Clang 20.1.0 builds a game that crashes at startup")
   endif ()
 elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
   if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS "17.0")
